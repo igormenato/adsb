@@ -137,7 +137,7 @@ class StructParser:
                     self.version_errors += 1
                 else:
                     self.checksum_errors += 1
-                # Slide one byte and rescan, same rule as the ESP32.
+                # Slide one byte and rescan.
                 pending = frame[1:] + pending[index:]
                 index = 0
                 continue

@@ -3,7 +3,7 @@
 
 Raw mode writes the TCP bytes to the UART with no framing changes.
 Struct mode decodes DF17/DF18 on the Pi and writes one 32-byte record
-per squitter. On the bench, adsb_uart_receiver.py reads that UART.
+per squitter. The record layout is common/adsb_struct.h.
 """
 
 from __future__ import annotations

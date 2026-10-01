@@ -10,7 +10,7 @@
  * and must match these offsets; test/test_bench.py checks that.
  *
  * One message is one decoded ADS-B extended squitter, not a fused track.
- * Flags tell the receiver which kinematic fields this squitter carried.
+ * Flags mark which kinematic fields this squitter carried.
  * Cleared fields use the sentinels below (0 is a valid latitude, altitude,
  * and a valid east/north component, so it is not a sentinel).
  *

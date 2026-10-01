@@ -1,4 +1,4 @@
-"""UART open/baud settings shared by the bench sender and receiver."""
+"""UART open and baud settings for the Pi sender."""
 
 from __future__ import annotations
 

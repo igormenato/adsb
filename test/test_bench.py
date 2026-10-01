@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host test: Beast and struct framers agree, without a Pi or an ESP32.
+"""Host test: the Pi sender's bytes for raw Beast and struct mode.
 
 Compiles test/frame_tool.c against common/ and checks it against the Python
 sender. Raw mode must be a byte copy. Struct mode must match common/adsb_struct.h.
@@ -16,7 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "pi"))
 
 import adsb_decode  # noqa: E402
-import adsb_uart_receiver  # noqa: E402
 import adsb_uart_sender  # noqa: E402
 import beast  # noqa: E402
 import struct_frame  # noqa: E402
@@ -344,9 +343,9 @@ def check_struct_agreement(tool: Path) -> None:
         fail(f"struct stream was parsed as Beast: {beasts}")
     icaos = [int(item["icao"], 16) for item in structs]
     if icaos[:4] != [msg.icao for msg in samples] or icaos[-1] != 0x40621D:
-        fail(f"ESP32 link parser lost struct frames: {icaos}")
+        fail(f"link parser lost struct frames: {icaos}")
     if "struct_checksum" not in errors or int(stats["struct_checksum"]) < 1:
-        fail(f"ESP32 link parser did not report a checksum error: {errors} {stats}")
+        fail(f"link parser did not report a checksum error: {errors} {stats}")
 
     mixed = beast.encode(0x33, b"\x00" * 6, 0x20, EVEN) + good + beast.encode(0x32, b"\x01" * 6, 0x02, b"\x00" * 7)
     mixed_beasts, mixed_structs, _, _ = parse_link(run(tool, "link-decode", stdin=mixed.hex()).stdout)
@@ -354,77 +353,6 @@ def check_struct_agreement(tool: Path) -> None:
         fail(f"mixed stream not split into beast/struct: {mixed_beasts} {mixed_structs}")
     if mixed_beasts[0]["payload"] != EVEN.hex() or int(mixed_beasts[0]["crc"]) != 1:
         fail("mixed stream changed the Beast payload")
-
-
-def check_pi_receiver(tool: Path) -> None:
-    """The Pi receiver parses sender bytes with no UART."""
-    raw_stream = bytes([0x00, 0xFF, 0x1A, 0x00]) + BEAST_EXAMPLE
-    raw_stream += beast.encode(0x33, b"\x00" * 6, 0x20, EVEN)
-    if adsb_uart_sender.forward_raw(raw_stream) != raw_stream:
-        fail("raw sender changed bytes before the Pi receiver")
-
-    good = struct_frame.pack_message(
-        struct_frame.TrackStruct(0x40621D, 0x07, 522572021, 39193726, 38000, 450, 1005_000_000)
-    )
-    bad = bytearray(good)
-    bad[-1] ^= 0x5A
-    struct_stream = bytes(bad) + good
-
-    forwarder = adsb_uart_sender.StructForwarder()
-    times = [(1000.0, 1000_000_000), (1005.0, 1005_000_000)]
-
-    def clock():
-        return times.pop(0)
-
-    odd_wire = beast.encode(0x33, b"\x00" * 6, 0x10, ODD)
-    even_wire = beast.encode(0x33, b"\x00" * 6, 0x11, EVEN)
-    packed = b"".join(forwarder.feed(odd_wire + even_wire, clock))
-
-    stream = raw_stream + struct_stream + packed
-    rx = adsb_uart_receiver.BenchReceiver()
-    lines: list[str] = []
-    for index in range(len(stream)):
-        lines.extend(rx.feed(stream[index : index + 1]))
-
-    proc = run(tool, "link-decode", stdin=stream.hex())
-    if proc.returncode != 0:
-        fail(proc.stderr)
-    c_beasts, c_structs, c_errors, c_stats = parse_link(proc.stdout)
-    beast_lines = [line for line in lines if line.startswith("beast ")]
-    struct_lines = [line for line in lines if line.startswith("struct ")]
-    if len(beast_lines) != len(c_beasts) or len(struct_lines) != len(c_structs):
-        fail(
-            f"Pi receiver lines beast={len(beast_lines)} struct={len(struct_lines)} "
-            f"C beast={len(c_beasts)} struct={len(c_structs)}\n{lines}"
-        )
-    if rx.stats.beast_ok != int(c_stats["beast_ok"]) or rx.stats.struct_ok != int(c_stats["struct_ok"]):
-        fail(f"Pi receiver counts {rx.stats} vs C {c_stats}")
-    if rx.stats.struct_checksum_errors != int(c_stats["struct_checksum"]):
-        fail(f"checksum errors differ: {rx.stats} vs {c_stats}")
-    if "struct_checksum" not in c_errors or not any(line.startswith("err struct_checksum") for line in lines):
-        fail(f"Pi receiver did not log a struct checksum error: {lines}")
-
-    if "type=2" not in beast_lines[0] or "crc=-1" not in beast_lines[0]:
-        fail(f"escaped Beast example was not logged: {beast_lines[0]}")
-    if "type=3" not in beast_lines[1] or "icao=40621D" not in beast_lines[1] or "crc=1" not in beast_lines[1]:
-        fail(f"DF17 Beast frame was not logged: {beast_lines[1]}")
-    if c_beasts[1]["payload"] != EVEN.hex():
-        fail("C parser did not recover the raw Beast payload")
-
-    packed_line = next(line for line in struct_lines if "flags=0x07" in line)
-    if "icao=40621D" not in packed_line or "vel=450kt" not in packed_line or "t=1005000000" not in packed_line:
-        fail(f"packed struct line wrong: {packed_line}")
-    if "lat=52.2572021" not in packed_line or "lon=3.9193726" not in packed_line or "alt=38000ft" not in packed_line:
-        fail(f"packed struct position wrong: {packed_line}")
-    if "lat=- lon=-" not in struct_lines[-2] or "alt=38000ft" not in struct_lines[-2]:
-        fail(f"odd squitter should be altitude only: {struct_lines[-2]}")
-    position = struct_lines[-1]
-    if "flags=0x03" not in position or "lat=52.2572021" not in position or "vel=-" not in position:
-        fail(f"even squitter should carry position without velocity: {position}")
-
-    beat = rx.beat_line()
-    if f"beast={rx.stats.beast_ok}" not in beat or f"struct={rx.stats.struct_ok}" not in beat:
-        fail(f"beat line missing counts: {beat}")
 
 
 def _same(left: struct_frame.TrackStruct | None, right: struct_frame.TrackStruct) -> bool:
@@ -444,12 +372,9 @@ def main() -> int:
         check_beast_agreement(tool)
         check_decode_and_struct(tool)
         check_struct_agreement(tool)
-        check_pi_receiver(tool)
     print("host test passed")
-    print("beast: python and C encoders match, including 0x1A escaping; both parsers resync")
-    print("struct: python pack matches common/adsb_struct.h and the C decoder")
-    print("raw: forward_raw() is a byte copy of the Beast stream")
-    print("pi receiver: same bytes, same frames and error counts as the C link parser")
+    print("raw: forward_raw() is a byte copy of the Beast stream, including 0x1A escaping")
+    print("struct: sender records match common/adsb_struct.h")
     print("decode: published CPR example is 52.257202N 3.919373E at 38000 ft; velocity 500 kt")
     return 0
 
