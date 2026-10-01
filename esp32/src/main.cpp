@@ -1,8 +1,8 @@
-// Bench receiver for the Pi sender. One UART stream, two framings:
+// Optional ESP32 receiver. The bench path is the Pi loopback in
+// pi/adsb_uart_receiver.py. This sketch uses the same two framings
+// if an ESP32 is wired up later:
 //   0x1A ...  raw Beast from readsb, forwarded unchanged
 //   0x5B 0xAD packed struct from common/adsb_struct.h
-// USB serial logs what arrived. This is a PlatformIO Arduino sketch
-// because the repository had no embedded tree to extend.
 
 #include <Arduino.h>
 

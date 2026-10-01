@@ -3,7 +3,7 @@
 
 Raw mode writes the TCP bytes to the UART with no framing changes.
 Struct mode decodes DF17/DF18 on the Pi and writes one 32-byte record
-per squitter. The ESP32 accepts either stream.
+per squitter. On the bench, adsb_uart_receiver.py reads that UART.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import time
 from adsb_decode import CprCache, decode_adsb
 from beast import BeastParser
 from struct_frame import pack_message
+from uart_port import open_serial
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 30005
@@ -84,39 +85,7 @@ class _Uart:
 def open_output(path: str, baud: int):
     if path == "-":
         return _Stdout()
-    import termios
-
-    rates = {
-        9600: termios.B9600,
-        19200: termios.B19200,
-        38400: termios.B38400,
-        57600: termios.B57600,
-        115200: termios.B115200,
-        230400: termios.B230400,
-    }
-    for name in ("B460800", "B921600"):
-        value = getattr(termios, name, None)
-        if value is not None:
-            rates[int(name[1:])] = value
-    if baud not in rates:
-        known = ", ".join(str(rate) for rate in sorted(rates))
-        raise SystemExit(f"unsupported baud {baud}; choose one of: {known}")
-    try:
-        fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
-    except OSError as exc:
-        raise SystemExit(f"cannot open {path}: {exc}") from exc
-    attrs = termios.tcgetattr(fd)
-    attrs[0] = 0
-    attrs[1] = 0
-    attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
-    attrs[3] = 0
-    attrs[4] = rates[baud]
-    attrs[5] = rates[baud]
-    attrs[6][termios.VMIN] = 0
-    attrs[6][termios.VTIME] = 0
-    termios.tcsetattr(fd, termios.TCSANOW, attrs)
-    termios.tcflush(fd, termios.TCIOFLUSH)
-    return _Uart(fd)
+    return _Uart(open_serial(path, baud))
 
 
 def connect(host: str, port: int) -> socket.socket:

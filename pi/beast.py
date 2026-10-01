@@ -81,10 +81,17 @@ class BeastParser:
             guard += 1
             if guard > limit:
                 raise RuntimeError("beast parser did not advance")
-            status = self._byte(blob[index], out)
+            status, frames = self.push(blob[index])
+            out.extend(frames)
             if status != "retry":
                 index += 1
         return out
+
+    def push(self, byte: int) -> tuple[str, list[BeastMessage]]:
+        """Feed one wire byte. 'retry' means the byte was not consumed."""
+        out: list[BeastMessage] = []
+        status = self._byte(byte, out)
+        return status, out
 
     def _byte(self, byte: int, out: list[BeastMessage]) -> str:
         if self.state == _HUNT:
