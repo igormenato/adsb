@@ -1,0 +1,14 @@
+[package]
+name = "adsb-uart-sender"
+version = "0.1.0"
+edition = "2021"
+description = "Forward readsb Beast output to a UART as raw Beast or packed structs."
+
+[[bin]]
+name = "adsb-uart-sender"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+ctrlc = "3.4"
+serialport = { version = "4.6", default-features = false }

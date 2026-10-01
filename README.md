@@ -8,8 +8,8 @@ A Raspberry Pi running [readsb](https://github.com/wiedehopf/readsb) sends ADS-B
 | `struct` | one 32-byte record per DF17/DF18 squitter |
 
 ```
-pi/adsb_uart_sender.py  sender
-test/test_bench.py      host test, no Pi required
+src/                         sender
+tests/host.rs                host test, no Pi required
 ```
 
 ## UART
@@ -30,12 +30,12 @@ readsb --device-type rtlsdr --net --net-bo-port 30005
 
 ## Run a mode
 
-The Pi needs [uv](https://docs.astral.sh/uv/) installed. From the repo root, `uv sync` installs Python 3.11 or newer and pyModeS from `uv.lock`.
+The Pi needs Rust 1.85 or newer (`rustup` stable is enough). From the repo root:
 
 ```
-uv sync
-uv run python pi/adsb_uart_sender.py --mode raw --uart /dev/serial0 --baud 115200
-uv run python pi/adsb_uart_sender.py --mode struct --uart /dev/serial0 --baud 115200
+cargo build --release
+./target/release/adsb-uart-sender --mode raw --uart /dev/serial0 --baud 115200
+./target/release/adsb-uart-sender --mode struct --uart /dev/serial0 --baud 115200
 ```
 
 Stop one before starting the other. Stderr prints a one-line count about once a second.
@@ -56,7 +56,7 @@ A `0x1A` inside the timestamp, signal, or payload is sent twice. Raw mode does n
 
 ## Struct layout
 
-`pi/struct_frame.py` packs `<HBBIiiiHQH`. 32 bytes, packed, little-endian.
+32 bytes, packed, little-endian. The field order is `u16, u8, u8, u32, i32, i32, i32, u16, u64, u16`.
 
 | Offset | Size | Field | Unit |
 | --- | --- | --- | --- |
@@ -81,8 +81,8 @@ Struct mode fills fields as follows:
 
 - DF17 and DF18 only.
 - Airborne position, type codes 9–18: barometric altitude in feet (25 ft coding). Q=0 Gillham altitude is left invalid.
-- Type codes 20–22: the 12-bit GNSS height in meters, converted to feet.
-- Latitude and longitude only after an even and an odd CPR frame for that address, less than 10 seconds apart. Until then the position flag stays clear and altitude can still be set.
+- Type codes 20–22: the 12-bit GNSS height in meters, converted to feet with `trunc(meters * 3.28084)` (1000 m is 3280 ft).
+- Latitude and longitude only after an even and an odd CPR frame for that address, within 10 seconds. Until then the position flag stays clear and altitude can still be set.
 - Airborne velocity, type code 19 subtypes 1 and 2: ground speed in knots.
 - Other DF17/DF18 squitters: ICAO and timestamp only.
 - Surface position is not decoded.
@@ -92,10 +92,7 @@ Struct mode fills fields as follows:
 No radio and no UART:
 
 ```
-uv sync
-uv run python test/test_bench.py
+cargo test
 ```
 
 It checks that raw mode does not alter a Beast stream, that struct records match the layout above, and that a published CPR pair encodes as 52.257202° N, 3.919373° E at 38000 ft.
-
-Lint and format with `uv run ruff check` and `uv run ruff format`. Typecheck `pi/` and `test/` with `uv run ty check`.
