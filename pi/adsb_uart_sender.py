@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import math
-import os
 import socket
 import sys
 import time
@@ -120,20 +119,20 @@ class _Stdout:
 
 
 class _Uart:
-    def __init__(self, fd: int) -> None:
-        self._fd = fd
+    def __init__(self, port) -> None:
+        self._port = port
 
     def write(self, data: bytes) -> None:
         view = memoryview(data)
         while view:
-            wrote = os.write(self._fd, view)
-            if wrote <= 0:
+            wrote = self._port.write(view)
+            if not wrote:
                 raise OSError("UART write failed")
             view = view[wrote:]
-        drain(self._fd)
+        drain(self._port)
 
     def close(self) -> None:
-        os.close(self._fd)
+        self._port.close()
 
 
 def open_output(path: str, baud: int):

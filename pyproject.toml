@@ -5,6 +5,7 @@ description = "Send readsb Beast or struct records over the Pi UART"
 requires-python = ">=3.11"
 dependencies = [
     "pyModeS>=3",
+    "pyserial",
 ]
 
 [tool.uv]
