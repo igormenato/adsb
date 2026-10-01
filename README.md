@@ -8,7 +8,6 @@ A Raspberry Pi running [readsb](https://github.com/wiedehopf/readsb) sends ADS-B
 | `struct` | one 32-byte record per DF17/DF18 squitter |
 
 ```
-common/adsb_struct.h    layout of the struct record
 pi/adsb_uart_sender.py  sender
 test/test_bench.py      host test, no Pi required
 ```
@@ -56,7 +55,7 @@ A `0x1A` inside the timestamp, signal, or payload is sent twice. Raw mode does n
 
 ## Struct layout
 
-`common/adsb_struct.h` is the layout. `pi/struct_frame.py` packs `<HBBIiiiHQH`. The host test checks those bytes against the header. 32 bytes, packed, little-endian.
+`pi/struct_frame.py` packs `<HBBIiiiHQH`. 32 bytes, packed, little-endian.
 
 | Offset | Size | Field | Unit |
 | --- | --- | --- | --- |
@@ -95,4 +94,4 @@ No radio and no UART:
 python3 test/test_bench.py
 ```
 
-Needs `gcc` and Python 3. It checks that raw mode does not alter a Beast stream, that struct records match `common/adsb_struct.h`, and that a published CPR pair encodes as 52.257202° N, 3.919373° E at 38000 ft.
+Needs Python 3. It checks that raw mode does not alter a Beast stream, that struct records match the layout above, and that a published CPR pair encodes as 52.257202° N, 3.919373° E at 38000 ft.

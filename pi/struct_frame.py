@@ -1,11 +1,10 @@
-"""Little-endian packed struct. Offsets must match common/adsb_struct.h."""
+"""Little-endian packed struct. Offsets match the layout table in the README."""
 
 from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
 
-# common/adsb_struct.h
 ADSB_STRUCT_MAGIC = 0xAD5B
 ADSB_STRUCT_VERSION = 1
 ADSB_STRUCT_SIZE = 32

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """Host test: the Pi sender's bytes for raw Beast and struct mode.
 
-Compiles test/frame_tool.c against common/ and checks it against the Python
-sender. Raw mode must be a byte copy. Struct mode must match common/adsb_struct.h.
+Raw mode must be a byte copy of the Beast stream. Struct records must match
+the layout in the README: 32 bytes, little-endian, magic 0xAD5B.
 """
 
 from __future__ import annotations
 
-import subprocess
+import struct
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,99 +23,44 @@ EVEN = bytes.fromhex("8D40621D58C382D690C8AC2863A7")
 ODD = bytes.fromhex("8D40621D58C386435CC412692AD6")
 BEAST_EXAMPLE = bytes.fromhex("1a32083e27b6cb6a1a1a00a1841a1ac3b31d")
 
-SOURCES = [
-    ROOT / "common" / "crc16.c",
-    ROOT / "common" / "modes_crc.c",
-    ROOT / "common" / "beast_frame.c",
-    ROOT / "common" / "struct_frame.c",
-    ROOT / "common" / "link_parser.c",
-    ROOT / "test" / "frame_tool.c",
-]
+# Prefix of "<HBBIiiiHQH" ending at each field. Offset is the size before it.
+LAYOUT = (
+    ("magic", 0, 2),
+    ("version", 2, 1),
+    ("flags", 3, 1),
+    ("icao", 4, 4),
+    ("latitude_e7", 8, 4),
+    ("longitude_e7", 12, 4),
+    ("altitude_ft", 16, 4),
+    ("velocity_kt", 20, 2),
+    ("timestamp_us", 22, 8),
+    ("checksum", 30, 2),
+)
 
 
 def fail(message: str) -> None:
     raise SystemExit(message)
 
 
-def compile_tool(path: Path) -> None:
-    cmd = [
-        "gcc",
-        "-std=c11",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-        "-I",
-        str(ROOT / "common"),
-        "-o",
-        str(path),
-        *[str(source) for source in SOURCES],
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        fail(proc.stderr or proc.stdout or "gcc failed")
-
-
-def run(tool: Path, *args: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(tool), *args],
-        input=stdin,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-
-def parse_kv(text: str) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for part in text.split():
-        key, value = part.split("=", 1)
-        out[key] = value
-    return out
-
-
-def parse_link(stdout: str) -> tuple[list[dict[str, str]], list[dict[str, str]], list[str], dict[str, str]]:
-    beasts: list[dict[str, str]] = []
-    structs: list[dict[str, str]] = []
-    errors: list[str] = []
-    stats: dict[str, str] = {}
-    for line in stdout.splitlines():
-        if line.startswith("B "):
-            beasts.append(parse_kv(line[2:]))
-        elif line.startswith("S "):
-            structs.append(parse_kv(line[2:]))
-        elif line.startswith("E "):
-            errors.append(line[2:].strip())
-        elif line.startswith("STATS "):
-            stats = parse_kv(line[6:])
-    return beasts, structs, errors, stats
-
-
-def check_layout(tool: Path) -> None:
-    proc = run(tool, "layout")
-    if proc.returncode != 0:
-        fail(proc.stderr)
-    got = dict(line.split() for line in proc.stdout.splitlines())
-    expect = {
-        "size": "32",
-        "magic": "0",
-        "version": "2",
-        "flags": "3",
-        "icao": "4",
-        "latitude_e7": "8",
-        "longitude_e7": "12",
-        "altitude_ft": "16",
-        "velocity_kt": "20",
-        "timestamp_us": "22",
-        "checksum": "30",
-        "magic_value": f"{struct_frame.ADSB_STRUCT_MAGIC:04x}",
-        "version_value": str(struct_frame.ADSB_STRUCT_VERSION),
-        "wire0": "5b",
-        "wire1": "ad",
-    }
-    if got != expect:
-        fail(f"C layout does not match Python/header constants:\n{got}\n{expect}")
-    if struct_frame.struct.calcsize(struct_frame.STRUCT_FORMAT) != 32:
+def check_layout() -> None:
+    """Packed bytes sit at the offsets documented in the README."""
+    if struct_frame.STRUCT_FORMAT != "<HBBIiiiHQH":
+        fail(f"pack format is {struct_frame.STRUCT_FORMAT}, want <HBBIiiiHQH")
+    if struct.calcsize(struct_frame.STRUCT_FORMAT) != 32:
         fail("Python struct format is not 32 bytes")
+    cursor = 0
+    for name, offset, size in LAYOUT:
+        if offset != cursor:
+            fail(f"{name} offset {offset} does not follow the previous field")
+        cursor += size
+    if cursor != 32:
+        fail(f"layout sums to {cursor} bytes, want 32")
+    if struct_frame.ADSB_STRUCT_SIZE != 32 or struct_frame.ADSB_STRUCT_CRC_LEN != 30:
+        fail("struct size or checksum span does not match the documented layout")
+    if struct_frame.ADSB_STRUCT_MAGIC != 0xAD5B or struct_frame.ADSB_WIRE_MAGIC != b"\x5b\xad":
+        fail("magic is not 0xAD5B (wire 5B AD)")
+    if struct_frame.ADSB_STRUCT_VERSION != 1:
+        fail("struct version is not 1")
 
 
 def check_crc() -> None:
@@ -128,39 +72,23 @@ def check_crc() -> None:
         fail("Mode S parity append did not reproduce the sample")
 
 
-def check_beast_example(tool: Path) -> None:
-    """The published escaped frame must round-trip in both languages."""
-    proc = run(tool, "beast-decode", stdin=BEAST_EXAMPLE.hex())
-    if proc.returncode != 0:
-        fail(proc.stderr)
-    beasts, _, _, _ = parse_link(proc.stdout)
-    if len(beasts) != 1:
-        fail(f"C beast decode of the escaped example returned {beasts}")
-    if beasts[0]["type"] != "2" or beasts[0]["signal"] != "1a":
-        fail(f"escaped example fields wrong: {beasts[0]}")
-    if beasts[0]["payload"] != "00a1841ac3b31d" or beasts[0]["mlat"] != "083e27b6cb6a":
-        fail(f"escaped example payload wrong: {beasts[0]}")
-
+def check_beast_example() -> None:
+    """The published escaped frame round-trips, and raw mode copies it."""
     parsed = beast.BeastParser().feed(BEAST_EXAMPLE)
-    if len(parsed) != 1 or parsed[0].signal != 0x1A or parsed[0].payload.hex() != "00a1841ac3b31d":
-        fail("Python beast parser disagreed with the escaped example")
+    if len(parsed) != 1 or parsed[0].type != 0x32:
+        fail("Python beast parser missed the escaped example")
+    if parsed[0].mlat.hex() != "083e27b6cb6a" or parsed[0].signal != 0x1A:
+        fail(f"escaped example fields wrong: {parsed[0]}")
+    if parsed[0].payload.hex() != "00a1841ac3b31d":
+        fail(f"escaped example payload wrong: {parsed[0].payload.hex()}")
     again = beast.encode(parsed[0].type, parsed[0].mlat, parsed[0].signal, parsed[0].payload)
     if again != BEAST_EXAMPLE:
         fail("Python re-encode changed the escaped Beast frame")
-
-    c_hex = run(
-        tool,
-        "beast-encode",
-        "2",
-        parsed[0].mlat.hex(),
-        f"{parsed[0].signal:02x}",
-        parsed[0].payload.hex(),
-    )
-    if c_hex.returncode != 0 or bytes.fromhex(c_hex.stdout.strip()) != BEAST_EXAMPLE:
-        fail(f"C beast encoder disagreed:\n{c_hex.stdout}\n{c_hex.stderr}")
+    if adsb_uart_sender.forward_raw(BEAST_EXAMPLE) != BEAST_EXAMPLE:
+        fail("raw mode changed the escaped Beast example")
 
 
-def check_beast_agreement(tool: Path) -> None:
+def check_raw_copy() -> None:
     samples = [
         (0x31, bytes.fromhex("010203040506"), 0x00, bytes.fromhex("00ab")),
         (0x32, bytes.fromhex("1a1a1a1a1a1a"), 0x1A, bytes.fromhex("0011223344551a")),
@@ -170,32 +98,30 @@ def check_beast_agreement(tool: Path) -> None:
     wire = bytearray()
     for msg_type, mlat, signal, payload in samples:
         encoded = beast.encode(msg_type, mlat, signal, payload)
-        c_hex = run(tool, "beast-encode", chr(msg_type), mlat.hex(), f"{signal:02x}", payload.hex())
-        if c_hex.returncode != 0:
-            fail(c_hex.stderr)
-        if bytes.fromhex(c_hex.stdout.strip()) != encoded:
-            fail(f"Beast encoders disagree for type {chr(msg_type)}")
         wire += encoded
 
-    # Garbage, a false start, then the real frames, split one byte at a time.
     stream = bytes([0x00, 0xFF, 0x1A, 0x00]) + bytes(wire)
     python_msgs = []
     parser = beast.BeastParser()
     for index in range(len(stream)):
         python_msgs.extend(parser.feed(stream[index : index + 1]))
-    c_msgs, _, _, _ = parse_link(run(tool, "beast-decode", stdin=stream.hex()).stdout)
-    if len(python_msgs) != len(c_msgs):
-        fail(f"Beast parser count Python={len(python_msgs)} C={len(c_msgs)}")
-    for index, (py_msg, c_msg) in enumerate(zip(python_msgs, c_msgs)):
-        if c_msg["type"] != chr(py_msg.type) or c_msg["payload"] != py_msg.payload.hex():
-            fail(f"Beast message {index} disagreed: {py_msg} vs {c_msg}")
-        if int(c_msg["crc"]) != py_msg.crc_ok:
-            fail(f"CRC flag disagreed on message {index}")
+    if len(python_msgs) != len(samples):
+        fail(f"Beast parser count {len(python_msgs)}, want {len(samples)}")
+    for index, (py_msg, sample) in enumerate(zip(python_msgs, samples)):
+        msg_type, mlat, signal, payload = sample
+        if py_msg.type != msg_type or py_msg.payload != payload or py_msg.mlat != mlat:
+            fail(f"Beast message {index} disagreed")
+        if py_msg.signal != signal:
+            fail(f"Beast signal disagreed on message {index}")
 
     if adsb_uart_sender.forward_raw(stream) != stream:
         fail("raw mode changed Beast bytes")
     if b"\x1a\x1a" not in BEAST_EXAMPLE:
         fail("test fixture lost its escaped 0x1A")
+    # A 0x1A in the MLAT field must survive as an escaped pair, then as a copy.
+    escaped = beast.encode(0x33, b"\x00\x1a\x00\x00\x00\x00", 0x00, EVEN)
+    if escaped.count(b"\x1a") < 2 or adsb_uart_sender.forward_raw(escaped) != escaped:
+        fail("raw mode dropped an escaped 0x1A in the MLAT timestamp")
 
 
 def velocity_squitter() -> bytes:
@@ -213,7 +139,35 @@ def gnss_squitter() -> bytes:
     return beast.append_modes_parity(body)
 
 
-def check_decode_and_struct(tool: Path) -> None:
+def assert_packed(frame: bytes, msg: struct_frame.TrackStruct) -> None:
+    """Each documented field is at its offset, and the checksum covers bytes 0..29."""
+    if len(frame) != 32:
+        fail(f"struct record is {len(frame)} bytes, want 32")
+    if frame[0:2] != b"\x5b\xad" or frame[2] != 1:
+        fail(f"magic/version bytes are {frame[:3].hex()}, want 5bad 01")
+    if frame[3] != (msg.flags & 0xFF):
+        fail("flags byte does not match the record")
+    if struct.unpack_from("<I", frame, 4)[0] != (msg.icao & 0xFFFFFF):
+        fail("icao is not the little-endian word at offset 4")
+    if struct.unpack_from("<i", frame, 8)[0] != msg.latitude_e7:
+        fail("latitude is not the little-endian int32 at offset 8")
+    if struct.unpack_from("<i", frame, 12)[0] != msg.longitude_e7:
+        fail("longitude is not the little-endian int32 at offset 12")
+    if struct.unpack_from("<i", frame, 16)[0] != msg.altitude_ft:
+        fail("altitude is not the little-endian int32 at offset 16")
+    if struct.unpack_from("<H", frame, 20)[0] != (msg.velocity_kt & 0xFFFF):
+        fail("velocity is not the little-endian uint16 at offset 20")
+    if struct.unpack_from("<Q", frame, 22)[0] != (msg.timestamp_us & 0xFFFFFFFFFFFFFFFF):
+        fail("timestamp is not the little-endian uint64 at offset 22")
+    expect_crc = struct_frame.crc16_ccitt_false(frame[:30])
+    if struct.unpack_from("<H", frame, 30)[0] != expect_crc:
+        fail("checksum is not CRC-16/CCITT-FALSE over bytes 0..29")
+    back = struct_frame.unpack_message(frame)
+    if back != msg:
+        fail(f"unpack did not recover the packed record: {back} vs {msg}")
+
+
+def check_decode_and_struct() -> None:
     if beast.modes_crc24(velocity_squitter()) != 0 or beast.modes_crc24(gnss_squitter()) != 0:
         fail("synthetic squitter CRC is not zero")
 
@@ -267,7 +221,6 @@ def check_decode_and_struct(tool: Path) -> None:
 
     odd_wire = beast.encode(0x33, b"\x11\x22\x33\x44\x55\x66", 0x1A, ODD)
     even_wire = beast.encode(0x33, b"\x00" * 6, 0x00, EVEN)
-    # A byte inside the MLAT field is 0x1A, so the wire form is escaped.
     if odd_wire.count(b"\x1a") < 2:
         fail("position fixture was not escaped")
     frames = forwarder.feed(bytes([0x99, 0x1A, 0x00]) + odd_wire + even_wire, clock)
@@ -278,13 +231,10 @@ def check_decode_and_struct(tool: Path) -> None:
 
     decoded = struct_frame.unpack_message(frames[1])
     if decoded is None or decoded.timestamp_us != 1005_000_000 or decoded.altitude_ft != 38000:
-        fail(f"packed struct did not round-trip in Python: {decoded}")
-    c_dec = run(tool, "struct-decode", stdin=frames[1].hex())
-    if c_dec.returncode != 0:
-        fail(c_dec.stderr)
-    got = parse_kv(c_dec.stdout.strip()[2:])
-    if int(got["lat"]) != decoded.latitude_e7 or int(got["alt"]) != 38000 or int(got["icao"], 16) != 0x40621D:
-        fail(f"C struct decoder disagreed with Python pack: {got}")
+        fail(f"packed struct did not round-trip: {decoded}")
+    assert_packed(frames[1], decoded)
+    if decoded.latitude_e7 != second.latitude_e7 or decoded.icao != 0x40621D:
+        fail("sender struct bytes do not carry the decoded position")
 
     bad = bytearray(EVEN)
     bad[-1] ^= 0xFF
@@ -294,87 +244,48 @@ def check_decode_and_struct(tool: Path) -> None:
         fail("bad Mode S CRC was forwarded as a struct")
 
 
-def check_struct_agreement(tool: Path) -> None:
+def check_struct_bytes() -> None:
     samples = [
         struct_frame.TrackStruct(0x40621D, 0x07, 522572021, 39193726, 38000, 450, 1005_000_000),
         struct_frame.TrackStruct.empty(0x1A1A1A, 0x1A),
-        struct_frame.TrackStruct(0xABCDEF, 0x04, struct_frame.ADSB_LATLON_INVALID,
-                                  struct_frame.ADSB_LATLON_INVALID, struct_frame.ADSB_ALT_INVALID,
-                                  500, 2**40 + 26),
-        struct_frame.TrackStruct(1, 0x02, -338687000, -706690000, -1000, struct_frame.ADSB_VEL_INVALID, 0),
+        struct_frame.TrackStruct(
+            0xABCDEF,
+            0x04,
+            struct_frame.ADSB_LATLON_INVALID,
+            struct_frame.ADSB_LATLON_INVALID,
+            struct_frame.ADSB_ALT_INVALID,
+            500,
+            2**40 + 26,
+        ),
+        struct_frame.TrackStruct(
+            1, 0x02, -338687000, -706690000, -1000, struct_frame.ADSB_VEL_INVALID, 0
+        ),
     ]
-    blob = bytearray(b"\x00\xff")
     for msg in samples:
-        packed = struct_frame.pack_message(msg)
-        c_hex = run(
-            tool,
-            "struct-encode",
-            str(msg.flags),
-            str(msg.icao),
-            str(msg.latitude_e7),
-            str(msg.longitude_e7),
-            str(msg.altitude_ft),
-            str(msg.velocity_kt),
-            str(msg.timestamp_us),
-        )
-        if c_hex.returncode != 0:
-            fail(c_hex.stderr)
-        if bytes.fromhex(c_hex.stdout.strip()) != packed:
-            fail(f"struct encoders disagree for icao {msg.icao:#x}")
-        back = struct_frame.unpack_message(bytes.fromhex(c_hex.stdout.strip()))
-        if back != msg and not _same(back, msg):
-            fail(f"Python unpack of C struct failed: {back} vs {msg}")
-        blob += packed
+        assert_packed(struct_frame.pack_message(msg), msg)
 
-    # Corrupt one checksum, then a good frame. Both parsers must keep the good one.
     good = struct_frame.pack_message(samples[0])
     bad = bytearray(good)
     bad[-1] ^= 0x5A
     stream = bytes(bad) + good
-    py = struct_frame.StructParser()
+    parser = struct_frame.StructParser()
     got = []
     for index in range(len(stream)):
-        got.extend(py.feed(stream[index : index + 1]))
-    if py.checksum_errors < 1 or len(got) != 1 or got[0].icao != 0x40621D:
-        fail(f"Python struct resync failed: errors={py.checksum_errors} frames={got}")
-
-    beasts, structs, errors, stats = parse_link(run(tool, "link-decode", stdin=(bytes(blob) + stream).hex()).stdout)
-    if beasts:
-        fail(f"struct stream was parsed as Beast: {beasts}")
-    icaos = [int(item["icao"], 16) for item in structs]
-    if icaos[:4] != [msg.icao for msg in samples] or icaos[-1] != 0x40621D:
-        fail(f"link parser lost struct frames: {icaos}")
-    if "struct_checksum" not in errors or int(stats["struct_checksum"]) < 1:
-        fail(f"link parser did not report a checksum error: {errors} {stats}")
-
-    mixed = beast.encode(0x33, b"\x00" * 6, 0x20, EVEN) + good + beast.encode(0x32, b"\x01" * 6, 0x02, b"\x00" * 7)
-    mixed_beasts, mixed_structs, _, _ = parse_link(run(tool, "link-decode", stdin=mixed.hex()).stdout)
-    if [item["type"] for item in mixed_beasts] != ["3", "2"] or len(mixed_structs) != 1:
-        fail(f"mixed stream not split into beast/struct: {mixed_beasts} {mixed_structs}")
-    if mixed_beasts[0]["payload"] != EVEN.hex() or int(mixed_beasts[0]["crc"]) != 1:
-        fail("mixed stream changed the Beast payload")
-
-
-def _same(left: struct_frame.TrackStruct | None, right: struct_frame.TrackStruct) -> bool:
-    return left is not None and left == right
+        got.extend(parser.feed(stream[index : index + 1]))
+    if parser.checksum_errors < 1 or len(got) != 1 or got[0].icao != 0x40621D:
+        fail(f"checksum mismatch was accepted: errors={parser.checksum_errors} frames={got}")
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory() as tmp:
-        tool = Path(tmp) / "frame_tool"
-        compile_tool(tool)
-        check = run(tool, "self-check")
-        if check.returncode != 0:
-            fail(check.stderr or check.stdout)
-        check_layout(tool)
-        check_crc()
-        check_beast_example(tool)
-        check_beast_agreement(tool)
-        check_decode_and_struct(tool)
-        check_struct_agreement(tool)
+    check_layout()
+    check_crc()
+    check_beast_example()
+    check_raw_copy()
+    check_decode_and_struct()
+    check_struct_bytes()
     print("host test passed")
     print("raw: forward_raw() is a byte copy of the Beast stream, including 0x1A escaping")
-    print("struct: sender records match common/adsb_struct.h")
+    print("struct: packed records match the documented 32-byte layout")
     print("decode: published CPR example is 52.257202N 3.919373E at 38000 ft; velocity 500 kt")
     return 0
 
