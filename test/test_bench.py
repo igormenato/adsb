@@ -10,6 +10,7 @@ from __future__ import annotations
 import struct
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 from pyModeS.util import crc
 
@@ -24,7 +25,7 @@ ODD = bytes.fromhex("8D40621D58C386435CC412692AD6")
 BEAST_EXAMPLE = bytes.fromhex("1a32083e27b6cb6a1a1a00a1841a1ac3b31d")
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     raise SystemExit(message)
 
 
@@ -35,7 +36,10 @@ def check_layout() -> None:
         fail("Python struct format is not 32 bytes")
     if struct_frame.ADSB_STRUCT_SIZE != 32 or struct_frame.ADSB_STRUCT_CRC_LEN != 30:
         fail("struct size or checksum span does not match the documented layout")
-    if struct_frame.ADSB_STRUCT_MAGIC != 0xAD5B or struct_frame.ADSB_WIRE_MAGIC != b"\x5b\xad":
+    if (
+        struct_frame.ADSB_STRUCT_MAGIC != 0xAD5B
+        or struct_frame.ADSB_WIRE_MAGIC != b"\x5b\xad"
+    ):
         fail("magic is not 0xAD5B (wire 5B AD)")
     if struct_frame.ADSB_STRUCT_VERSION != 1:
         fail("struct version is not 1")
@@ -71,7 +75,9 @@ def check_beast_example() -> None:
         fail("test fixture lost its escaped 0x1A")
     if adsb_uart_sender.forward_raw(BEAST_EXAMPLE) != BEAST_EXAMPLE:
         fail("raw mode changed the escaped Beast example")
-    again = beast_encode(0x32, bytes.fromhex("083e27b6cb6a"), 0x1A, bytes.fromhex("00a1841ac3b31d"))
+    again = beast_encode(
+        0x32, bytes.fromhex("083e27b6cb6a"), 0x1A, bytes.fromhex("00a1841ac3b31d")
+    )
     if again != BEAST_EXAMPLE:
         fail("Beast escape helper does not rebuild the published frame")
 
@@ -124,7 +130,9 @@ def assert_packed(frame: bytes, msg: struct_frame.TrackStruct) -> None:
         fail("altitude is not the little-endian int32 at offset 16")
     if struct.unpack_from("<H", frame, 20)[0] != (msg.velocity_kt & 0xFFFF):
         fail("velocity is not the little-endian uint16 at offset 20")
-    if struct.unpack_from("<Q", frame, 22)[0] != (msg.timestamp_us & 0xFFFFFFFFFFFFFFFF):
+    if struct.unpack_from("<Q", frame, 22)[0] != (
+        msg.timestamp_us & 0xFFFFFFFFFFFFFFFF
+    ):
         fail("timestamp is not the little-endian uint64 at offset 22")
     expect_crc = struct_frame.crc16_ccitt_false(frame[:30])
     if struct.unpack_from("<H", frame, 30)[0] != expect_crc:
@@ -134,7 +142,9 @@ def assert_packed(frame: bytes, msg: struct_frame.TrackStruct) -> None:
         fail(f"unpack did not recover the packed record: {back} vs {msg}")
 
 
-def _feed(payloads: list[bytes], times: list[tuple[float, int]]) -> list[struct_frame.TrackStruct]:
+def _feed(
+    payloads: list[bytes], times: list[tuple[float, int]]
+) -> list[struct_frame.TrackStruct]:
     wire = b""
     for payload in payloads:
         wire += beast_encode(0x33, b"\x00" * 6, 0x00, payload)
@@ -184,7 +194,9 @@ def check_decode_and_struct() -> None:
 
     first = struct_frame.unpack_message(frames[0])
     second = struct_frame.unpack_message(frames[1])
-    if first is None or second is None:
+    if first is None:
+        fail("sender struct did not unpack")
+    if second is None:
         fail("sender struct did not unpack")
     assert_packed(frames[0], first)
     assert_packed(frames[1], second)
@@ -198,7 +210,11 @@ def check_decode_and_struct() -> None:
         fail(f"CPR position {lat}, {lon} is not the published example")
     if second.latitude_e7 != 522572021 or second.longitude_e7 != 39193726:
         fail(f"CPR e7 fields are {second.latitude_e7}, {second.longitude_e7}")
-    if second.altitude_ft != 38000 or second.icao != 0x40621D or second.timestamp_us != 1005_000_000:
+    if (
+        second.altitude_ft != 38000
+        or second.icao != 0x40621D
+        or second.timestamp_us != 1005_000_000
+    ):
         fail(f"position struct fields wrong: {second}")
 
     late = _feed([ODD, EVEN], [(1000.0, 1), (1011.0, 2)])[1]
@@ -225,7 +241,9 @@ def check_decode_and_struct() -> None:
 
 def check_struct_bytes() -> None:
     samples = [
-        struct_frame.TrackStruct(0x40621D, 0x07, 522572021, 39193726, 38000, 450, 1005_000_000),
+        struct_frame.TrackStruct(
+            0x40621D, 0x07, 522572021, 39193726, 38000, 450, 1005_000_000
+        ),
         struct_frame.TrackStruct.empty(0x1A1A1A, 0x1A),
         struct_frame.TrackStruct(
             0xABCDEF,
@@ -261,9 +279,14 @@ def main() -> int:
     check_decode_and_struct()
     check_struct_bytes()
     print("host test passed")
-    print("raw: forward_raw() is a byte copy of the Beast stream, including 0x1A escaping")
+    print(
+        "raw: forward_raw() is a byte copy of the Beast stream, including 0x1A escaping"
+    )
     print("struct: packed records match the documented 32-byte layout")
-    print("decode: published CPR example is 52.257202N 3.919373E at 38000 ft; velocity 500 kt")
+    print(
+        "decode: published CPR example is 52.257202N "
+        "3.919373E at 38000 ft; velocity 500 kt"
+    )
     return 0
 
 

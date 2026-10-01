@@ -97,3 +97,5 @@ uv run python test/test_bench.py
 ```
 
 It checks that raw mode does not alter a Beast stream, that struct records match the layout above, and that a published CPR pair encodes as 52.257202° N, 3.919373° E at 38000 ft.
+
+Lint and format with `uv run ruff check` and `uv run ruff format`. Typecheck `pi/` and `test/` with `uv run ty check`.

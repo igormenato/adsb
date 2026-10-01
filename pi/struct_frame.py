@@ -72,16 +72,23 @@ def pack_message(msg: TrackStruct) -> bytes:
         msg.timestamp_us & 0xFFFFFFFFFFFFFFFF,
         0,
     )
-    return raw[:ADSB_STRUCT_CRC_LEN] + struct.pack("<H", crc16_ccitt_false(raw[:ADSB_STRUCT_CRC_LEN]))
+    return raw[:ADSB_STRUCT_CRC_LEN] + struct.pack(
+        "<H", crc16_ccitt_false(raw[:ADSB_STRUCT_CRC_LEN])
+    )
 
 
 def unpack_message(frame: bytes) -> TrackStruct | None:
     """Return the struct, or None if the magic, checksum, or version fails."""
     if len(frame) != ADSB_STRUCT_SIZE or frame[:2] != ADSB_WIRE_MAGIC:
         return None
-    if crc16_ccitt_false(frame[:ADSB_STRUCT_CRC_LEN]) != struct.unpack_from("<H", frame, 30)[0]:
+    if (
+        crc16_ccitt_false(frame[:ADSB_STRUCT_CRC_LEN])
+        != struct.unpack_from("<H", frame, 30)[0]
+    ):
         return None
-    _magic, version, flags, icao, lat, lon, alt, vel, ts, _crc = struct.unpack(STRUCT_FORMAT, frame)
+    _magic, version, flags, icao, lat, lon, alt, vel, ts, _crc = struct.unpack(
+        STRUCT_FORMAT, frame
+    )
     if version != ADSB_STRUCT_VERSION:
         return None
     return TrackStruct(icao & 0xFFFFFF, flags, lat, lon, alt, vel, ts)

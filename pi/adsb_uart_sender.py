@@ -16,6 +16,7 @@ import time
 
 from pyModeS import decode as modes_decode
 from pyModeS.cli._source import _REMAINDER_CAP, _parse_beast_buffer
+
 from struct_frame import (
     ADSB_FLAG_ALTITUDE,
     ADSB_FLAG_POSITION,
@@ -95,7 +96,9 @@ class StructForwarder:
                 track.flags |= ADSB_FLAG_VELOCITY
         return track
 
-    def _position(self, result: dict, payload_hex: str, now_s: float) -> tuple[float | None, float | None]:
+    def _position(
+        self, result: dict, payload_hex: str, now_s: float
+    ) -> tuple[float | None, float | None]:
         icao = result["icao"]
         odd = result.get("cpr_format") == 1
         slot = self._odd if odd else self._even
@@ -156,10 +159,16 @@ def connect(host: str, port: int) -> socket.socket:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Forward readsb Beast output to a UART as raw Beast or packed structs."
+        description=(
+            "Forward readsb Beast output to a UART as raw Beast or packed structs."
+        )
     )
     parser.add_argument("--mode", choices=("raw", "struct"), required=True)
-    parser.add_argument("--uart", default=DEFAULT_UART, help=f"UART device, or - for stdout (default {DEFAULT_UART})")
+    parser.add_argument(
+        "--uart",
+        default=DEFAULT_UART,
+        help=f"UART device, or - for stdout (default {DEFAULT_UART})",
+    )
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     parser.add_argument("--beast-host", default=DEFAULT_HOST)
     parser.add_argument("--beast-port", type=int, default=DEFAULT_PORT)
@@ -173,7 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     total_raw = 0
     last_log = time.monotonic()
     print(
-        f"mode={args.mode} uart={args.uart} baud={args.baud} beast={args.beast_host}:{args.beast_port}",
+        f"mode={args.mode} uart={args.uart} baud={args.baud} "
+        f"beast={args.beast_host}:{args.beast_port}",
         file=sys.stderr,
     )
     try:
@@ -192,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
                         if args.mode == "raw":
                             output.write(forward_raw(chunk))
                             total_raw += len(chunk)
-                        else:
+                        elif forwarder is not None:
                             frames = forwarder.feed(chunk)
                             if frames:
                                 output.write(b"".join(frames))
@@ -200,9 +210,10 @@ def main(argv: list[str] | None = None) -> int:
                     if now - last_log >= 1.0:
                         if args.mode == "raw":
                             print(f"raw forwarded {total_raw} bytes", file=sys.stderr)
-                        else:
+                        elif forwarder is not None:
                             print(
-                                f"struct sent {forwarder.sent} crc_dropped {forwarder.crc_drops}",
+                                f"struct sent {forwarder.sent} "
+                                f"crc_dropped {forwarder.crc_drops}",
                                 file=sys.stderr,
                             )
                         last_log = now
