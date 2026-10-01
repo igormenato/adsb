@@ -26,7 +26,7 @@ Beast binary output is TCP `127.0.0.1:30005` when networking is on. The sender c
 readsb --device-type rtlsdr --net --net-bo-port 30005
 ```
 
-`--net-bo-port` defaults to 30005. The sender retries once a second until the port is open. `--beast-host` and `--beast-port` change the address. No extra Python packages.
+`--net-bo-port` defaults to 30005. The sender retries once a second until the port is open. `--beast-host` and `--beast-port` change the address. Struct mode needs Python 3.11 or newer and pyModeS v3 (`pip install pyModeS`). Raw mode has no extra packages of its own, but the sender imports pyModeS at startup.
 
 ## Run a mode
 
@@ -94,4 +94,4 @@ No radio and no UART:
 python3 test/test_bench.py
 ```
 
-Needs Python 3. It checks that raw mode does not alter a Beast stream, that struct records match the layout above, and that a published CPR pair encodes as 52.257202° N, 3.919373° E at 38000 ft.
+Needs Python 3.11 or newer. Install the decoder first: `pip install pyModeS`. It checks that raw mode does not alter a Beast stream, that struct records match the layout above, and that a published CPR pair encodes as 52.257202° N, 3.919373° E at 38000 ft.

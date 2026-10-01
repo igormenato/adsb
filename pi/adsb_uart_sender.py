@@ -2,21 +2,29 @@
 """Send readsb Beast output to a UART, either unchanged or as packed structs.
 
 Raw mode writes the TCP bytes to the UART with no framing changes.
-Struct mode decodes DF17/DF18 on the Pi and writes one 32-byte record
-per squitter. The record layout is the table in the README.
+Struct mode uses pyModeS to decode DF17/DF18 and writes one 32-byte
+record per squitter. The record layout is the table in the README.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import socket
 import sys
 import time
 
-from adsb_decode import CprCache, decode_adsb
-from beast import BeastParser
-from struct_frame import pack_message
+from pyModeS import decode as modes_decode
+from pyModeS.cli._source import _REMAINDER_CAP, _parse_beast_buffer
+from struct_frame import (
+    ADSB_FLAG_ALTITUDE,
+    ADSB_FLAG_POSITION,
+    ADSB_FLAG_VELOCITY,
+    ADSB_VEL_INVALID,
+    TrackStruct,
+    pack_message,
+)
 from uart_port import drain, open_serial
 
 DEFAULT_HOST = "127.0.0.1"
@@ -34,27 +42,72 @@ def _clock() -> tuple[float, int]:
     return time.time(), time.time_ns() // 1000
 
 
+def _deg_e7(degrees: float) -> int:
+    scaled = math.floor(abs(degrees) * 10_000_000 + 0.5)
+    return -scaled if degrees < 0 else scaled
+
+
 class StructForwarder:
+    """One UART record per DF17/DF18 squitter. Position is this squitter only."""
+
     def __init__(self) -> None:
-        self.parser = BeastParser()
-        self.cache = CprCache()
+        self._pending = b""
+        self._even: dict[str, tuple[str, float]] = {}
+        self._odd: dict[str, tuple[str, float]] = {}
         self.crc_drops = 0
         self.sent = 0
 
     def feed(self, chunk: bytes, clock=_clock) -> list[bytes]:
+        frames, remainder = _parse_beast_buffer(self._pending + chunk)
+        self._pending = remainder[-_REMAINDER_CAP:]
         encoded: list[bytes] = []
-        for msg in self.parser.feed(chunk):
-            if msg.crc_ok != 1:
-                if msg.crc_ok == 0:
-                    self.crc_drops += 1
+        for _mlat, payload_hex in frames:
+            record = self._record(payload_hex, clock)
+            if record is None:
                 continue
-            now_s, now_us = clock()
-            decoded = decode_adsb(msg, self.cache, now_s, now_us)
-            if decoded is None:
-                continue
-            encoded.append(pack_message(decoded))
+            encoded.append(pack_message(record))
             self.sent += 1
         return encoded
+
+    def _record(self, payload_hex: str, clock) -> TrackStruct | None:
+        result = modes_decode(payload_hex)
+        if result.get("df") not in (17, 18):
+            return None
+        if not result.get("crc_valid"):
+            self.crc_drops += 1
+            return None
+        now_s, now_us = clock()
+        track = TrackStruct.empty(int(result["icao"], 16), now_us)
+        tc = result.get("typecode")
+        if isinstance(tc, int) and (9 <= tc <= 18 or 20 <= tc <= 22):
+            alt = result.get("altitude")
+            if alt is not None:
+                track.altitude_ft = int(alt)
+                track.flags |= ADSB_FLAG_ALTITUDE
+            lat, lon = self._position(result, payload_hex, now_s)
+            if lat is not None and lon is not None:
+                track.latitude_e7 = _deg_e7(lat)
+                track.longitude_e7 = _deg_e7(lon)
+                track.flags |= ADSB_FLAG_POSITION
+        elif tc == 19:
+            gs = result.get("groundspeed")
+            if gs is not None:
+                track.velocity_kt = min(math.floor(gs + 0.5), ADSB_VEL_INVALID - 1)
+                track.flags |= ADSB_FLAG_VELOCITY
+        return track
+
+    def _position(self, result: dict, payload_hex: str, now_s: float) -> tuple[float | None, float | None]:
+        icao = result["icao"]
+        odd = result.get("cpr_format") == 1
+        slot = self._odd if odd else self._even
+        other = self._even if odd else self._odd
+        prev = other.get(icao)
+        slot[icao] = (payload_hex, now_s)
+        if prev is None:
+            return None, None
+        paired = modes_decode([prev[0], payload_hex], timestamps=[prev[1], now_s])
+        current = paired[-1]
+        return current.get("latitude"), current.get("longitude")
 
 
 class _Stdout:

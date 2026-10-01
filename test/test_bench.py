@@ -11,24 +11,24 @@ import struct
 import sys
 from pathlib import Path
 
+from pyModeS.util import crc
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "pi"))
 
-import adsb_decode  # noqa: E402
 import adsb_uart_sender  # noqa: E402
-import beast  # noqa: E402
 import struct_frame  # noqa: E402
 
 EVEN = bytes.fromhex("8D40621D58C382D690C8AC2863A7")
 ODD = bytes.fromhex("8D40621D58C386435CC412692AD6")
 BEAST_EXAMPLE = bytes.fromhex("1a32083e27b6cb6a1a1a00a1841a1ac3b31d")
 
+
 def fail(message: str) -> None:
     raise SystemExit(message)
 
 
 def check_layout() -> None:
-    """Packed bytes sit at the offsets documented in the README."""
     if struct_frame.STRUCT_FORMAT != "<HBBIiiiHQH":
         fail(f"pack format is {struct_frame.STRUCT_FORMAT}, want <HBBIiiiHQH")
     if struct.calcsize(struct_frame.STRUCT_FORMAT) != 32:
@@ -41,29 +41,39 @@ def check_layout() -> None:
         fail("struct version is not 1")
 
 
+def with_parity(data: bytes) -> bytes:
+    parity = crc(data.hex() + "000000")
+    return data + parity.to_bytes(3, "big")
+
+
+def beast_encode(msg_type: int, mlat: bytes, signal: int, payload: bytes) -> bytes:
+    raw = bytes((msg_type,)) + mlat + bytes((signal & 0xFF,)) + payload
+    out = bytearray(b"\x1a")
+    for byte in raw:
+        out.append(byte)
+        if byte == 0x1A:
+            out.append(0x1A)
+    return bytes(out)
+
+
 def check_crc() -> None:
-    if beast.modes_crc24(EVEN) != 0 or beast.modes_crc24(ODD) != 0:
+    if crc(EVEN.hex()) != 0 or crc(ODD.hex()) != 0:
         fail("published DF17 samples failed the Mode S CRC")
     if struct_frame.crc16_ccitt_false(b"123456789") != 0x29B1:
         fail("CRC-16/CCITT-FALSE check value mismatch")
-    if append_modes_parity(EVEN[:11]) != EVEN:
+    if with_parity(EVEN[:11]) != EVEN:
         fail("Mode S parity append did not reproduce the sample")
 
 
 def check_beast_example() -> None:
-    """The published escaped frame round-trips, and raw mode copies it."""
-    parsed = beast.BeastParser().feed(BEAST_EXAMPLE)
-    if len(parsed) != 1 or parsed[0].type != 0x32:
-        fail("Python beast parser missed the escaped example")
-    if parsed[0].mlat.hex() != "083e27b6cb6a" or parsed[0].signal != 0x1A:
-        fail(f"escaped example fields wrong: {parsed[0]}")
-    if parsed[0].payload.hex() != "00a1841ac3b31d":
-        fail(f"escaped example payload wrong: {parsed[0].payload.hex()}")
-    again = beast.encode(parsed[0].type, parsed[0].mlat, parsed[0].signal, parsed[0].payload)
-    if again != BEAST_EXAMPLE:
-        fail("Python re-encode changed the escaped Beast frame")
+    """The published escaped frame is copied, not rewritten."""
+    if b"\x1a\x1a" not in BEAST_EXAMPLE:
+        fail("test fixture lost its escaped 0x1A")
     if adsb_uart_sender.forward_raw(BEAST_EXAMPLE) != BEAST_EXAMPLE:
         fail("raw mode changed the escaped Beast example")
+    again = beast_encode(0x32, bytes.fromhex("083e27b6cb6a"), 0x1A, bytes.fromhex("00a1841ac3b31d"))
+    if again != BEAST_EXAMPLE:
+        fail("Beast escape helper does not rebuild the published frame")
 
 
 def check_raw_copy() -> None:
@@ -73,53 +83,27 @@ def check_raw_copy() -> None:
         (0x33, bytes.fromhex("000000000000"), 0xFF, EVEN),
         (0x33, bytes.fromhex("ffffffffffff"), 0x10, ODD),
     ]
-    wire = bytearray()
+    stream = bytearray(b"\x00\xff")
     for msg_type, mlat, signal, payload in samples:
-        encoded = beast.encode(msg_type, mlat, signal, payload)
-        wire += encoded
-
-    stream = bytes([0x00, 0xFF, 0x1A, 0x00]) + bytes(wire)
-    python_msgs = []
-    parser = beast.BeastParser()
-    for index in range(len(stream)):
-        python_msgs.extend(parser.feed(stream[index : index + 1]))
-    if len(python_msgs) != len(samples):
-        fail(f"Beast parser count {len(python_msgs)}, want {len(samples)}")
-    for index, (py_msg, sample) in enumerate(zip(python_msgs, samples)):
-        msg_type, mlat, signal, payload = sample
-        if py_msg.type != msg_type or py_msg.payload != payload or py_msg.mlat != mlat:
-            fail(f"Beast message {index} disagreed")
-        if py_msg.signal != signal:
-            fail(f"Beast signal disagreed on message {index}")
-
-    if adsb_uart_sender.forward_raw(stream) != stream:
+        stream += beast_encode(msg_type, mlat, signal, payload)
+    blob = bytes(stream)
+    if adsb_uart_sender.forward_raw(blob) != blob:
         fail("raw mode changed Beast bytes")
-    if b"\x1a\x1a" not in BEAST_EXAMPLE:
-        fail("test fixture lost its escaped 0x1A")
-    # A 0x1A in the MLAT field must survive as an escaped pair, then as a copy.
-    escaped = beast.encode(0x33, b"\x00\x1a\x00\x00\x00\x00", 0x00, EVEN)
+    escaped = beast_encode(0x33, b"\x00\x1a\x00\x00\x00\x00", 0x00, EVEN)
     if escaped.count(b"\x1a") < 2 or adsb_uart_sender.forward_raw(escaped) != escaped:
         fail("raw mode dropped an escaped 0x1A in the MLAT timestamp")
 
 
-def append_modes_parity(data: bytes) -> bytes:
-    parity = beast.modes_crc24(data)
-    return data + bytes(((parity >> 16) & 0xFF, (parity >> 8) & 0xFF, parity & 0xFF))
-
-
 def velocity_squitter() -> bytes:
     # TC 19 subtype 1, 300 kt east and 400 kt north. Speed is 500 kt.
-    # V_ew = 301, V_ns = 401. See pi/adsb_decode.py for the bit positions.
     me = bytes((0x99, 0x01, 0x2D, 0x32, 0x20, 0x00, 0x00))
-    body = bytes((0x8D, 0xAB, 0xC1, 0x23)) + me
-    return append_modes_parity(body)
+    return with_parity(bytes((0x8D, 0xAB, 0xC1, 0x23)) + me)
 
 
 def gnss_squitter() -> bytes:
-    # TC 20, GNSS height 1000 m. 1000 = 0x3E8 across the 12-bit altitude field.
+    # TC 20, GNSS height 1000 m. pyModeS converts with int(meters * 3.28084).
     me = bytes((0xA0, 0x3E, 0x80, 0x00, 0x00, 0x00, 0x00))
-    body = bytes((0x8D, 0x00, 0x00, 0x01)) + me
-    return append_modes_parity(body)
+    return with_parity(bytes((0x8D, 0x00, 0x00, 0x01)) + me)
 
 
 def assert_packed(frame: bytes, msg: struct_frame.TrackStruct) -> None:
@@ -150,79 +134,91 @@ def assert_packed(frame: bytes, msg: struct_frame.TrackStruct) -> None:
         fail(f"unpack did not recover the packed record: {back} vs {msg}")
 
 
-def check_decode_and_struct() -> None:
-    if beast.modes_crc24(velocity_squitter()) != 0 or beast.modes_crc24(gnss_squitter()) != 0:
-        fail("synthetic squitter CRC is not zero")
+def _feed(payloads: list[bytes], times: list[tuple[float, int]]) -> list[struct_frame.TrackStruct]:
+    wire = b""
+    for payload in payloads:
+        wire += beast_encode(0x33, b"\x00" * 6, 0x00, payload)
+    pending = list(times)
 
-    cache = adsb_decode.CprCache()
-    odd_msg = beast.BeastMessage(0x33, b"\x00" * 6, 0xFF, ODD, 1)
-    even_msg = beast.BeastMessage(0x33, b"\x00" * 6, 0xFF, EVEN, 1)
-    first = adsb_decode.decode_adsb(odd_msg, cache, 1000.0, 1000_000_000)
-    if first is None or first.flags != struct_frame.ADSB_FLAG_ALTITUDE or first.altitude_ft != 38000:
-        fail(f"odd frame should carry 38000 ft and no position yet: {first}")
-    second = adsb_decode.decode_adsb(even_msg, cache, 1005.0, 1005_000_000)
-    if second is None or (second.flags & struct_frame.ADSB_FLAG_POSITION) == 0:
-        fail(f"even/odd pair did not decode a position: {second}")
-    lat = second.latitude_e7 / 1e7
-    lon = second.longitude_e7 / 1e7
-    if abs(lat - 52.2572021484375) > 1e-6 or abs(lon - 3.91937255859375) > 1e-6:
-        fail(f"CPR position {lat}, {lon} is not the published example")
-    if second.altitude_ft != 38000 or second.icao != 0x40621D:
-        fail(f"position struct fields wrong: {second}")
-
-    stale = adsb_decode.CprCache()
-    adsb_decode.decode_adsb(odd_msg, stale, 1000.0, 1)
-    late = adsb_decode.decode_adsb(even_msg, stale, 1011.0, 2)
-    if late is None or (late.flags & struct_frame.ADSB_FLAG_POSITION) != 0:
-        fail("CPR pair older than 10 s was accepted")
-
-    speed = adsb_decode.decode_adsb(
-        beast.BeastMessage(0x33, b"\x00" * 6, 1, velocity_squitter(), 1),
-        adsb_decode.CprCache(),
-        1.0,
-        50,
-    )
-    if speed is None or speed.velocity_kt != 500 or speed.flags != struct_frame.ADSB_FLAG_VELOCITY:
-        fail(f"velocity decode failed: {speed}")
-    if speed.icao != 0xABC123:
-        fail(f"velocity ICAO wrong: {speed.icao:#x}")
-
-    height = adsb_decode.decode_adsb(
-        beast.BeastMessage(0x33, b"\x00" * 6, 1, gnss_squitter(), 1),
-        adsb_decode.CprCache(),
-        1.0,
-        60,
-    )
-    if height is None or height.altitude_ft != 3281 or height.flags != struct_frame.ADSB_FLAG_ALTITUDE:
-        fail(f"GNSS height decode failed: {height}")
+    def clock():
+        return pending.pop(0)
 
     forwarder = adsb_uart_sender.StructForwarder()
+    frames = forwarder.feed(wire, clock)
+    if len(frames) != len(payloads):
+        fail(f"struct forwarder emitted {len(frames)} frames, want {len(payloads)}")
+    out = []
+    for frame in frames:
+        decoded = struct_frame.unpack_message(frame)
+        if decoded is None:
+            fail("sender struct did not unpack")
+        assert_packed(frame, decoded)
+        out.append(decoded)
+    return out
+
+
+def check_decode_and_struct() -> None:
+    if crc(velocity_squitter().hex()) != 0 or crc(gnss_squitter().hex()) != 0:
+        fail("synthetic squitter CRC is not zero")
+
+    odd_wire = beast_encode(0x33, b"\x11\x22\x33\x44\x55\x66", 0x1A, ODD)
+    even_wire = beast_encode(0x33, b"\x00" * 6, 0x00, EVEN)
+    if odd_wire.count(b"\x1a") < 2:
+        fail("position fixture was not escaped")
     times = [(1000.0, 1000_000_000), (1005.0, 1005_000_000)]
 
     def clock():
         return times.pop(0)
 
-    odd_wire = beast.encode(0x33, b"\x11\x22\x33\x44\x55\x66", 0x1A, ODD)
-    even_wire = beast.encode(0x33, b"\x00" * 6, 0x00, EVEN)
-    if odd_wire.count(b"\x1a") < 2:
-        fail("position fixture was not escaped")
-    frames = forwarder.feed(bytes([0x99, 0x1A, 0x00]) + odd_wire + even_wire, clock)
+    forwarder = adsb_uart_sender.StructForwarder()
+    # Split the first frame so a TCP chunk boundary still reassembles.
+    head = bytes([0x99, 0x1A, 0x00]) + odd_wire[:5]
+    tail = odd_wire[5:] + even_wire
+    if forwarder.feed(head, clock):
+        fail("an incomplete Beast frame was emitted")
+    frames = forwarder.feed(tail, clock)
     if len(frames) != 2:
         fail(f"struct forwarder emitted {len(frames)} frames, want 2")
     if adsb_uart_sender.forward_raw(odd_wire + even_wire) != odd_wire + even_wire:
         fail("raw forward changed a decoded-path fixture")
 
-    decoded = struct_frame.unpack_message(frames[1])
-    if decoded is None or decoded.timestamp_us != 1005_000_000 or decoded.altitude_ft != 38000:
-        fail(f"packed struct did not round-trip: {decoded}")
-    assert_packed(frames[1], decoded)
-    if decoded.latitude_e7 != second.latitude_e7 or decoded.icao != 0x40621D:
-        fail("sender struct bytes do not carry the decoded position")
+    first = struct_frame.unpack_message(frames[0])
+    second = struct_frame.unpack_message(frames[1])
+    if first is None or second is None:
+        fail("sender struct did not unpack")
+    assert_packed(frames[0], first)
+    assert_packed(frames[1], second)
+    if first.flags != struct_frame.ADSB_FLAG_ALTITUDE or first.altitude_ft != 38000:
+        fail(f"odd frame should carry 38000 ft and no position yet: {first}")
+    if (second.flags & struct_frame.ADSB_FLAG_POSITION) == 0:
+        fail(f"even/odd pair did not decode a position: {second}")
+    lat = second.latitude_e7 / 1e7
+    lon = second.longitude_e7 / 1e7
+    if abs(lat - 52.2572021484375) > 1e-6 or abs(lon - 3.91937255859375) > 1e-6:
+        fail(f"CPR position {lat}, {lon} is not the published example")
+    if second.latitude_e7 != 522572021 or second.longitude_e7 != 39193726:
+        fail(f"CPR e7 fields are {second.latitude_e7}, {second.longitude_e7}")
+    if second.altitude_ft != 38000 or second.icao != 0x40621D or second.timestamp_us != 1005_000_000:
+        fail(f"position struct fields wrong: {second}")
+
+    late = _feed([ODD, EVEN], [(1000.0, 1), (1011.0, 2)])[1]
+    if (late.flags & struct_frame.ADSB_FLAG_POSITION) != 0 or late.altitude_ft != 38000:
+        fail("CPR pair older than 10 s was accepted")
+
+    speed = _feed([velocity_squitter()], [(1.0, 50)])[0]
+    if speed.velocity_kt != 500 or speed.flags != struct_frame.ADSB_FLAG_VELOCITY:
+        fail(f"velocity decode failed: {speed}")
+    if speed.icao != 0xABC123:
+        fail(f"velocity ICAO wrong: {speed.icao:#x}")
+
+    height = _feed([gnss_squitter()], [(1.0, 60)])[0]
+    if height.altitude_ft != 3280 or height.flags != struct_frame.ADSB_FLAG_ALTITUDE:
+        fail(f"GNSS height decode failed: {height}")
 
     bad = bytearray(EVEN)
     bad[-1] ^= 0xFF
     dropped = adsb_uart_sender.StructForwarder()
-    emitted = dropped.feed(beast.encode(0x33, b"\x00" * 6, 0, bytes(bad)))
+    emitted = dropped.feed(beast_encode(0x33, b"\x00" * 6, 0, bytes(bad)))
     if emitted or dropped.crc_drops != 1:
         fail("bad Mode S CRC was forwarded as a struct")
 
