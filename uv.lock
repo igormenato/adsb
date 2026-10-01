@@ -1,0 +1,23 @@
+version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "adsb"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "pymodes" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pymodes", specifier = ">=3" }]
+
+[[package]]
+name = "pymodes"
+version = "3.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/a1/05b79de7ea850455d203f4b07c59396baea170e137af31fe96a3cea6eaf1/pymodes-3.6.0.tar.gz", hash = "sha256:416c8ac4a77300c07ca761947b6f68efb135e25512e7a996d876561dfb3bd480", size = 176234, upload-time = "2026-07-16T12:26:51.335Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/12/db/78361a889148e04644699cfaa619049f614029dde10eb950889aafebe88c/pymodes-3.6.0-py3-none-any.whl", hash = "sha256:c508f4731c7aa39b7ab9eb34d5d56fe853f8d425be85638f528bac6e02ec23f5", size = 191976, upload-time = "2026-07-16T12:26:49.667Z" },
+]

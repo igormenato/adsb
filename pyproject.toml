@@ -1,0 +1,11 @@
+[project]
+name = "adsb"
+version = "0.1.0"
+description = "Send readsb Beast or struct records over the Pi UART"
+requires-python = ">=3.11"
+dependencies = [
+    "pyModeS>=3",
+]
+
+[tool.uv]
+package = false

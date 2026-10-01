@@ -26,15 +26,16 @@ Beast binary output is TCP `127.0.0.1:30005` when networking is on. The sender c
 readsb --device-type rtlsdr --net --net-bo-port 30005
 ```
 
-`--net-bo-port` defaults to 30005. The sender retries once a second until the port is open. `--beast-host` and `--beast-port` change the address. Struct mode needs Python 3.11 or newer and pyModeS v3 (`pip install pyModeS`). Raw mode has no extra packages of its own, but the sender imports pyModeS at startup.
+`--net-bo-port` defaults to 30005. The sender retries once a second until the port is open. `--beast-host` and `--beast-port` change the address.
 
 ## Run a mode
 
-From the repo root:
+The Pi needs [uv](https://docs.astral.sh/uv/) installed. From the repo root, `uv sync` installs Python 3.11 or newer and pyModeS from `uv.lock`.
 
 ```
-python3 pi/adsb_uart_sender.py --mode raw --uart /dev/serial0 --baud 115200
-python3 pi/adsb_uart_sender.py --mode struct --uart /dev/serial0 --baud 115200
+uv sync
+uv run python pi/adsb_uart_sender.py --mode raw --uart /dev/serial0 --baud 115200
+uv run python pi/adsb_uart_sender.py --mode struct --uart /dev/serial0 --baud 115200
 ```
 
 Stop one before starting the other. Stderr prints a one-line count about once a second.
@@ -91,7 +92,8 @@ Struct mode fills fields as follows:
 No radio and no UART:
 
 ```
-python3 test/test_bench.py
+uv sync
+uv run python test/test_bench.py
 ```
 
-Needs Python 3.11 or newer. Install the decoder first: `pip install pyModeS`. It checks that raw mode does not alter a Beast stream, that struct records match the layout above, and that a published CPR pair encodes as 52.257202° N, 3.919373° E at 38000 ft.
+It checks that raw mode does not alter a Beast stream, that struct records match the layout above, and that a published CPR pair encodes as 52.257202° N, 3.919373° E at 38000 ft.
