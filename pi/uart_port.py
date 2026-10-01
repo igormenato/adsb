@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
+import termios
+
+
+def drain(fd: int) -> None:
+    """Wait until the UART accepts the bytes already written."""
+    termios.tcdrain(fd)
 
 
 def open_serial(path: str, baud: int) -> int:
     """Open a raw 8N1 UART and return the file descriptor."""
-    import termios
-
     rates = {
         9600: termios.B9600,
         19200: termios.B19200,

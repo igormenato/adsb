@@ -95,20 +95,20 @@ def nl(lat: float) -> int:
 
 def deg_e7(degrees: float) -> int:
     scaled = math.floor(abs(degrees) * 10_000_000 + 0.5)
-    return -int(scaled) if degrees < 0 else int(scaled)
+    return -scaled if degrees < 0 else scaled
 
 
 class CprCache:
     def __init__(self) -> None:
-        self._frames: dict[int, dict[str, tuple[int, int, float]]] = {}
+        self._even: dict[int, tuple[int, int, float]] = {}
+        self._odd: dict[int, tuple[int, int, float]] = {}
 
     def update(
         self, icao: int, odd: bool, cpr_lat: int, cpr_lon: int, now_s: float
     ) -> tuple[float, float] | None:
-        slot = self._frames.setdefault(icao, {})
-        slot["odd" if odd else "even"] = (cpr_lat, cpr_lon, now_s)
-        even = slot.get("even")
-        odd_frame = slot.get("odd")
+        (self._odd if odd else self._even)[icao] = (cpr_lat, cpr_lon, now_s)
+        even = self._even.get(icao)
+        odd_frame = self._odd.get(icao)
         if even is None or odd_frame is None:
             return None
         if abs(even[2] - odd_frame[2]) > CPR_PAIR_WINDOW_S:
@@ -166,7 +166,7 @@ def _ground_speed_kt(me: bytes) -> int | None:
     if subtype == 2:
         v_ew *= 4
         v_ns *= 4
-    speed = int(math.floor(math.hypot(v_ew, v_ns) + 0.5))
+    speed = math.floor(math.hypot(v_ew, v_ns) + 0.5)
     if speed >= ADSB_VEL_MAX:
         return ADSB_VEL_MAX
     return speed
@@ -188,7 +188,7 @@ def decode_adsb(msg: BeastMessage, cache: CprCache, now_s: float, now_us: int) -
         if 9 <= tc <= 18:
             alt = _baro_alt_ft(alt12)
         else:
-            alt = int(math.floor(alt12 * FT_PER_M + 0.5))
+            alt = math.floor(alt12 * FT_PER_M + 0.5)
         if alt is not None:
             track.altitude_ft = alt
             track.flags |= ADSB_FLAG_ALTITUDE

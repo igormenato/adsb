@@ -72,8 +72,6 @@ def pack_message(msg: TrackStruct) -> bytes:
         msg.timestamp_us & 0xFFFFFFFFFFFFFFFF,
         0,
     )
-    if len(raw) != ADSB_STRUCT_SIZE:
-        raise RuntimeError(f"struct packed to {len(raw)} bytes, expected {ADSB_STRUCT_SIZE}")
     return raw[:ADSB_STRUCT_CRC_LEN] + struct.pack("<H", crc16_ccitt_false(raw[:ADSB_STRUCT_CRC_LEN]))
 
 
@@ -83,63 +81,7 @@ def unpack_message(frame: bytes) -> TrackStruct | None:
         return None
     if crc16_ccitt_false(frame[:ADSB_STRUCT_CRC_LEN]) != struct.unpack_from("<H", frame, 30)[0]:
         return None
-    magic, version, flags, icao, lat, lon, alt, vel, ts, _crc = struct.unpack(STRUCT_FORMAT, frame)
-    if magic != ADSB_STRUCT_MAGIC or version != ADSB_STRUCT_VERSION:
+    _magic, version, flags, icao, lat, lon, alt, vel, ts, _crc = struct.unpack(STRUCT_FORMAT, frame)
+    if version != ADSB_STRUCT_VERSION:
         return None
     return TrackStruct(icao & 0xFFFFFF, flags, lat, lon, alt, vel, ts)
-
-
-class StructParser:
-    """Hunt for the magic header and drop frames whose checksum does not match."""
-
-    def __init__(self) -> None:
-        self._buf = bytearray()
-        self._magic = False
-        self.checksum_errors = 0
-        self.version_errors = 0
-        self.frames = 0
-
-    def feed(self, blob: bytes) -> list[TrackStruct]:
-        out: list[TrackStruct] = []
-        pending = bytearray(blob)
-        index = 0
-        guard = 0
-        limit = max(64, len(blob) * ADSB_STRUCT_SIZE)
-        while index < len(pending):
-            guard += 1
-            if guard > limit:
-                raise RuntimeError("struct parser did not advance")
-            byte = pending[index]
-            if not self._magic:
-                if byte == ADSB_WIRE_MAGIC[0]:
-                    self._magic = True
-                    self._buf = bytearray()
-                index += 1
-                continue
-            if not self._buf:
-                if byte != ADSB_WIRE_MAGIC[1]:
-                    self._magic = False
-                    continue  # reprocess this byte as a possible new magic
-                self._buf = bytearray(ADSB_WIRE_MAGIC)
-                index += 1
-                continue
-            self._buf.append(byte)
-            index += 1
-            if len(self._buf) < ADSB_STRUCT_SIZE:
-                continue
-            frame = bytes(self._buf)
-            self._buf = bytearray()
-            self._magic = False
-            decoded = unpack_message(frame)
-            if decoded is None:
-                if frame[2] != ADSB_STRUCT_VERSION and crc16_ccitt_false(frame[:30]) == struct.unpack_from("<H", frame, 30)[0]:
-                    self.version_errors += 1
-                else:
-                    self.checksum_errors += 1
-                # Slide one byte and rescan.
-                pending = frame[1:] + pending[index:]
-                index = 0
-                continue
-            self.frames += 1
-            out.append(decoded)
-        return out

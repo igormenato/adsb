@@ -33,12 +33,6 @@ def modes_crc24(msg: bytes) -> int:
     return crc
 
 
-def append_modes_parity(data: bytes) -> bytes:
-    """Append the 24-bit parity for an 11-byte (or 4-byte) Mode S body."""
-    parity = modes_crc24(data)
-    return data + bytes(((parity >> 16) & 0xFF, (parity >> 8) & 0xFF, parity & 0xFF))
-
-
 @dataclass(frozen=True)
 class BeastMessage:
     type: int
@@ -69,76 +63,59 @@ class BeastParser:
         self.state = _HUNT
         self.data = bytearray()
         self.expect = 0
-        self.framing_errors = 0
-        self.frames = 0
 
     def feed(self, blob: bytes) -> list[BeastMessage]:
         out: list[BeastMessage] = []
-        index = 0
-        guard = 0
-        limit = len(blob) * 4 + 64
-        while index < len(blob):
-            guard += 1
-            if guard > limit:
-                raise RuntimeError("beast parser did not advance")
-            status, frames = self.push(blob[index])
-            out.extend(frames)
-            if status != "retry":
-                index += 1
+        for byte in blob:
+            self._byte(byte, out)
         return out
 
-    def push(self, byte: int) -> tuple[str, list[BeastMessage]]:
-        """Feed one wire byte. 'retry' means the byte was not consumed."""
-        out: list[BeastMessage] = []
-        status = self._byte(byte, out)
-        return status, out
-
-    def _byte(self, byte: int, out: list[BeastMessage]) -> str:
+    def _byte(self, byte: int, out: list[BeastMessage]) -> None:
         if self.state == _HUNT:
             if byte == BEAST_ESC:
                 self.state = _TYPE
-            return "ok"
+            return
 
         if self.state == _TYPE:
             plen = TYPE_LEN.get(byte)
             if plen is not None:
-                self.data = bytearray((byte,))
+                self.data.clear()
+                self.data.append(byte)
                 self.expect = 1 + 6 + 1 + plen
                 self.state = _DATA
-                return "ok"
-            if byte == BEAST_ESC:
-                return "ok"
-            self.state = _HUNT
-            return "retry"
+                return
+            if byte != BEAST_ESC:
+                self.state = _HUNT
+            return
 
         if self.state == _ESC:
             self.state = _DATA
             if byte != BEAST_ESC:
-                self.framing_errors += 1
                 self.state = _TYPE
-                self.data = bytearray()
+                self.data.clear()
                 self.expect = 0
-                return self._byte(byte, out)
+                self._byte(byte, out)
+                return
             byte = BEAST_ESC
         elif byte == BEAST_ESC:
             self.state = _ESC
-            return "ok"
+            return
 
         self.data.append(byte)
         if len(self.data) < self.expect:
-            return "ok"
+            return
         out.append(self._finish())
-        return "ok"
 
     def _finish(self) -> BeastMessage:
         data = self.data
         msg_type = data[0]
+        mlat = bytes(data[1:7])
+        signal = data[7]
         payload = bytes(data[8:])
         crc_ok = -1
         if len(payload) == 14 and (payload[0] >> 3) in (17, 18):
             crc_ok = 1 if modes_crc24(payload) == 0 else 0
-        self.frames += 1
         self.state = _HUNT
         self.data = bytearray()
         self.expect = 0
-        return BeastMessage(msg_type, bytes(data[1:7]), data[7], payload, crc_ok)
+        return BeastMessage(msg_type, mlat, signal, payload, crc_ok)

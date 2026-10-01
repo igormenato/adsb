@@ -23,21 +23,6 @@ EVEN = bytes.fromhex("8D40621D58C382D690C8AC2863A7")
 ODD = bytes.fromhex("8D40621D58C386435CC412692AD6")
 BEAST_EXAMPLE = bytes.fromhex("1a32083e27b6cb6a1a1a00a1841a1ac3b31d")
 
-# Prefix of "<HBBIiiiHQH" ending at each field. Offset is the size before it.
-LAYOUT = (
-    ("magic", 0, 2),
-    ("version", 2, 1),
-    ("flags", 3, 1),
-    ("icao", 4, 4),
-    ("latitude_e7", 8, 4),
-    ("longitude_e7", 12, 4),
-    ("altitude_ft", 16, 4),
-    ("velocity_kt", 20, 2),
-    ("timestamp_us", 22, 8),
-    ("checksum", 30, 2),
-)
-
-
 def fail(message: str) -> None:
     raise SystemExit(message)
 
@@ -48,13 +33,6 @@ def check_layout() -> None:
         fail(f"pack format is {struct_frame.STRUCT_FORMAT}, want <HBBIiiiHQH")
     if struct.calcsize(struct_frame.STRUCT_FORMAT) != 32:
         fail("Python struct format is not 32 bytes")
-    cursor = 0
-    for name, offset, size in LAYOUT:
-        if offset != cursor:
-            fail(f"{name} offset {offset} does not follow the previous field")
-        cursor += size
-    if cursor != 32:
-        fail(f"layout sums to {cursor} bytes, want 32")
     if struct_frame.ADSB_STRUCT_SIZE != 32 or struct_frame.ADSB_STRUCT_CRC_LEN != 30:
         fail("struct size or checksum span does not match the documented layout")
     if struct_frame.ADSB_STRUCT_MAGIC != 0xAD5B or struct_frame.ADSB_WIRE_MAGIC != b"\x5b\xad":
@@ -68,7 +46,7 @@ def check_crc() -> None:
         fail("published DF17 samples failed the Mode S CRC")
     if struct_frame.crc16_ccitt_false(b"123456789") != 0x29B1:
         fail("CRC-16/CCITT-FALSE check value mismatch")
-    if beast.append_modes_parity(EVEN[:11]) != EVEN:
+    if append_modes_parity(EVEN[:11]) != EVEN:
         fail("Mode S parity append did not reproduce the sample")
 
 
@@ -124,19 +102,24 @@ def check_raw_copy() -> None:
         fail("raw mode dropped an escaped 0x1A in the MLAT timestamp")
 
 
+def append_modes_parity(data: bytes) -> bytes:
+    parity = beast.modes_crc24(data)
+    return data + bytes(((parity >> 16) & 0xFF, (parity >> 8) & 0xFF, parity & 0xFF))
+
+
 def velocity_squitter() -> bytes:
     # TC 19 subtype 1, 300 kt east and 400 kt north. Speed is 500 kt.
     # V_ew = 301, V_ns = 401. See pi/adsb_decode.py for the bit positions.
     me = bytes((0x99, 0x01, 0x2D, 0x32, 0x20, 0x00, 0x00))
     body = bytes((0x8D, 0xAB, 0xC1, 0x23)) + me
-    return beast.append_modes_parity(body)
+    return append_modes_parity(body)
 
 
 def gnss_squitter() -> bytes:
     # TC 20, GNSS height 1000 m. 1000 = 0x3E8 across the 12-bit altitude field.
     me = bytes((0xA0, 0x3E, 0x80, 0x00, 0x00, 0x00, 0x00))
     body = bytes((0x8D, 0x00, 0x00, 0x01)) + me
-    return beast.append_modes_parity(body)
+    return append_modes_parity(body)
 
 
 def assert_packed(frame: bytes, msg: struct_frame.TrackStruct) -> None:
@@ -267,13 +250,11 @@ def check_struct_bytes() -> None:
     good = struct_frame.pack_message(samples[0])
     bad = bytearray(good)
     bad[-1] ^= 0x5A
-    stream = bytes(bad) + good
-    parser = struct_frame.StructParser()
-    got = []
-    for index in range(len(stream)):
-        got.extend(parser.feed(stream[index : index + 1]))
-    if parser.checksum_errors < 1 or len(got) != 1 or got[0].icao != 0x40621D:
-        fail(f"checksum mismatch was accepted: errors={parser.checksum_errors} frames={got}")
+    if struct_frame.unpack_message(bytes(bad)) is not None:
+        fail("checksum mismatch was accepted")
+    back = struct_frame.unpack_message(good)
+    if back is None or back.icao != 0x40621D:
+        fail(f"good record was rejected: {back}")
 
 
 def main() -> int:

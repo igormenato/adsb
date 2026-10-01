@@ -17,7 +17,7 @@ import time
 from adsb_decode import CprCache, decode_adsb
 from beast import BeastParser
 from struct_frame import pack_message
-from uart_port import open_serial
+from uart_port import drain, open_serial
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 30005
@@ -26,8 +26,12 @@ DEFAULT_BAUD = 115200
 
 
 def forward_raw(chunk: bytes) -> bytes:
-    """Raw Beast mode is a byte-for-byte copy of the readsb stream."""
-    return bytes(chunk)
+    """Raw Beast mode is the readsb bytes, unchanged."""
+    return chunk
+
+
+def _clock() -> tuple[float, int]:
+    return time.time(), time.time_ns() // 1000
 
 
 class StructForwarder:
@@ -37,13 +41,12 @@ class StructForwarder:
         self.crc_drops = 0
         self.sent = 0
 
-    def feed(self, chunk: bytes, clock=None) -> list[bytes]:
-        if clock is None:
-            clock = lambda: (time.time(), time.time_ns() // 1000)
+    def feed(self, chunk: bytes, clock=_clock) -> list[bytes]:
         encoded: list[bytes] = []
         for msg in self.parser.feed(chunk):
-            if msg.crc_ok == 0:
-                self.crc_drops += 1
+            if msg.crc_ok != 1:
+                if msg.crc_ok == 0:
+                    self.crc_drops += 1
                 continue
             now_s, now_us = clock()
             decoded = decode_adsb(msg, self.cache, now_s, now_us)
@@ -60,7 +63,7 @@ class _Stdout:
         sys.stdout.buffer.flush()
 
     def close(self) -> None:
-        return None
+        pass
 
 
 class _Uart:
@@ -74,9 +77,7 @@ class _Uart:
             if wrote <= 0:
                 raise OSError("UART write failed")
             view = view[wrote:]
-        import termios
-
-        termios.tcdrain(self._fd)
+        drain(self._fd)
 
     def close(self) -> None:
         os.close(self._fd)
@@ -132,20 +133,20 @@ def main(argv: list[str] | None = None) -> int:
                         chunk = sock.recv(4096)
                     except socket.timeout:
                         chunk = None
-                    if chunk is None:
-                        pass
-                    elif chunk == b"":
+                    if chunk == b"":
                         print("readsb closed the connection", file=sys.stderr)
                         break
-                    elif args.mode == "raw":
-                        output.write(forward_raw(chunk))
-                        total_raw += len(chunk)
-                    else:
-                        for frame in forwarder.feed(chunk):
-                            output.write(frame)
+                    if chunk:
+                        if args.mode == "raw":
+                            output.write(forward_raw(chunk))
+                            total_raw += len(chunk)
+                        else:
+                            frames = forwarder.feed(chunk)
+                            if frames:
+                                output.write(b"".join(frames))
                     now = time.monotonic()
                     if now - last_log >= 1.0:
-                        if forwarder is None:
+                        if args.mode == "raw":
                             print(f"raw forwarded {total_raw} bytes", file=sys.stderr)
                         else:
                             print(
@@ -153,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
                                 file=sys.stderr,
                             )
                         last_log = now
-            except (ConnectionError, OSError) as exc:
+            except OSError as exc:
                 print(f"beast connection lost: {exc}", file=sys.stderr)
             finally:
                 sock.close()
