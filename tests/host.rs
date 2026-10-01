@@ -271,6 +271,92 @@ fn host_bench() {
     assert_eq!(unpack_message(&good).unwrap().icao, 0x40621D);
 }
 
+/// The Beast sample fed through readsb: Mode A/C, a short squitter, the
+/// published CPR pair, a 500 kt velocity, a 1000 m GNSS height, and one
+/// even frame with a broken CRC. Eight cycles, all inside the 10 second window.
+#[test]
+fn readsb_sample_burst() {
+    let df11 = with_parity(&[0x5D, 0x40, 0x62, 0x1D]);
+    let mut bad = EVEN;
+    bad[13] ^= 0xFF;
+    let velocity = velocity_squitter();
+    let gnss = gnss_squitter();
+    let mut blob = Vec::new();
+    for _ in 0..8 {
+        blob.extend(beast_encode(0x31, &hex("010203040506"), 0x10, &hex("00AB")));
+        blob.extend(beast_encode(0x32, &hex("00000000001a"), 0x1A, &df11));
+        blob.extend(beast_encode(0x33, &hex("112233445566"), 0x1A, &ODD));
+        blob.extend(beast_encode(0x33, &[0; 6], 0x20, &EVEN));
+        blob.extend(beast_encode(0x33, &hex("0000000000aa"), 0x30, &velocity));
+        blob.extend(beast_encode(0x33, &hex("0000000000bb"), 0x40, &gnss));
+        blob.extend(beast_encode(0x33, &[0xff; 6], 0x00, &bad));
+    }
+    assert_eq!(forward_raw(&blob), blob.as_slice());
+
+    let mut tick = 0u64;
+    let mut forwarder = StructForwarder::new();
+    let mut frames = Vec::new();
+    forwarder.feed(
+        &blob,
+        || {
+            let us = 1_000_000_000 + tick * 10_000;
+            tick += 1;
+            (us as f64 / 1_000_000.0, us)
+        },
+        &mut frames,
+    );
+    assert_eq!(forwarder.sent, 32);
+    assert_eq!(forwarder.crc_drops, 8);
+    assert_eq!(frames.len(), 32 * 32);
+
+    let records: Vec<Track> = frames
+        .chunks(32)
+        .map(|frame| {
+            let decoded = unpack_message(frame).expect("sender struct did not unpack");
+            assert_packed(frame, &decoded);
+            decoded
+        })
+        .collect();
+
+    for (index, record) in records.iter().enumerate() {
+        let cycle = index / 4;
+        match index % 4 {
+            0 => {
+                assert_eq!(record.icao, 0x40621D);
+                assert_eq!(record.altitude_ft, 38000);
+                if cycle == 0 {
+                    assert_eq!(record.flags, ADSB_FLAG_ALTITUDE);
+                    assert_eq!(record.latitude_e7, ADSB_LATLON_INVALID);
+                } else {
+                    // Odd frame is newer, so CPR uses the odd grid of the same pair.
+                    assert_eq!(record.flags, ADSB_FLAG_POSITION | ADSB_FLAG_ALTITUDE);
+                    assert_eq!(record.latitude_e7, 522_657_802);
+                    assert_eq!(record.longitude_e7, 39_389_125);
+                }
+            }
+            1 => {
+                assert_eq!(record.icao, 0x40621D);
+                assert_eq!(record.flags, ADSB_FLAG_POSITION | ADSB_FLAG_ALTITUDE);
+                assert_eq!(record.latitude_e7, 522_572_021);
+                assert_eq!(record.longitude_e7, 39_193_726);
+                assert_eq!(record.altitude_ft, 38000);
+            }
+            2 => {
+                assert_eq!(record.icao, 0xABC123);
+                assert_eq!(record.flags, ADSB_FLAG_VELOCITY);
+                assert_eq!(record.velocity_kt, 500);
+            }
+            3 => {
+                assert_eq!(record.icao, 1);
+                assert_eq!(record.flags, ADSB_FLAG_ALTITUDE);
+                assert_eq!(record.altitude_ft, 3280);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(record.timestamp_us, 1_000_000_000 + index as u64 * 10_000);
+    }
+}
+
 fn hex(text: &str) -> Vec<u8> {
     (0..text.len())
         .step_by(2)

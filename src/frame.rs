@@ -1,5 +1,7 @@
 //! 32-byte little-endian record. Offsets match the layout table in the README.
 
+use crc::{Crc, CRC_16_IBM_3740};
+
 pub const ADSB_STRUCT_MAGIC: u16 = 0xAD5B;
 pub const ADSB_STRUCT_VERSION: u8 = 1;
 pub const ADSB_STRUCT_SIZE: usize = 32;
@@ -14,36 +16,13 @@ pub const ADSB_LATLON_INVALID: i32 = i32::MIN;
 pub const ADSB_ALT_INVALID: i32 = i32::MIN;
 pub const ADSB_VEL_INVALID: u16 = 0xFFFF;
 
-const CRC16_TABLE: [u16; 256] = crc16_table();
-
-const fn crc16_table() -> [u16; 256] {
-    let mut table = [0u16; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut crc = (i as u16) << 8;
-        let mut bit = 0;
-        while bit < 8 {
-            if crc & 0x8000 != 0 {
-                crc = (crc << 1) ^ 0x1021;
-            } else {
-                crc <<= 1;
-            }
-            bit += 1;
-        }
-        table[i] = crc;
-        i += 1;
-    }
-    table
-}
+/// CRC-16/CCITT-FALSE: poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`.
+/// The `crc` catalog names this `CRC_16_IBM_3740`. Check value is `0x29B1`.
+const CCITT_FALSE: Crc<u16> = Crc::<u16>::new(&CRC_16_IBM_3740);
 
 /// CRC-16/CCITT-FALSE. `crc16_ccitt_false(b"123456789") == 0x29B1`.
 pub fn crc16_ccitt_false(data: &[u8]) -> u16 {
-    let mut crc = 0xffffu16;
-    for &byte in data {
-        let index = ((crc >> 8) ^ u16::from(byte)) as usize;
-        crc = (crc << 8) ^ CRC16_TABLE[index];
-    }
-    crc
+    CCITT_FALSE.checksum(data)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

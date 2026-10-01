@@ -57,7 +57,6 @@ fn walk_body(buf: &[u8], start: usize, body_len: usize) -> Walk {
 pub fn parse(buf: &[u8], mut on_payload: impl FnMut(&[u8])) -> usize {
     let mut i = 0;
     let mut last_consumed = 0;
-    let mut frames = 0usize;
 
     while i < buf.len() {
         if buf[i] != 0x1A {
@@ -123,18 +122,13 @@ pub fn parse(buf: &[u8], mut on_payload: impl FnMut(&[u8])) -> usize {
             }
             Walk::Done { body, next } => {
                 on_payload(&body[7..body_len]);
-                frames += 1;
                 i = next;
                 last_consumed = next;
             }
         }
     }
 
-    if frames == 0 && last_consumed == 0 {
-        0
-    } else {
-        last_consumed
-    }
+    last_consumed
 }
 
 /// Byte buffer for a Beast stream that arrives in TCP chunks.

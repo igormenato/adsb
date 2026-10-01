@@ -1,5 +1,6 @@
 //! Read Beast from readsb and write it to a UART.
 
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
@@ -22,6 +23,15 @@ const DEFAULT_PORT: u16 = 30_005;
 enum Mode {
     Raw,
     Struct,
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Mode::Raw => "raw",
+            Mode::Struct => "struct",
+        })
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -59,17 +69,8 @@ struct UartOut {
 }
 
 impl Output for UartOut {
-    fn write_chunk(&mut self, mut data: &[u8]) -> io::Result<()> {
-        while !data.is_empty() {
-            let wrote = self.port.write(data)?;
-            if wrote == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "UART write failed",
-                ));
-            }
-            data = &data[wrote..];
-        }
+    fn write_chunk(&mut self, data: &[u8]) -> io::Result<()> {
+        self.port.write_all(data)?;
         // flush is tcdrain: this chunk leaves the port before the next write.
         self.port.flush()
     }
@@ -145,6 +146,32 @@ fn resolve(host: &str, port: u16) -> Option<SocketAddr> {
     (host, port).to_socket_addrs().ok()?.next()
 }
 
+fn forward_chunk(
+    mode: Mode,
+    output: &mut dyn Output,
+    forwarder: &mut StructForwarder,
+    records: &mut Vec<u8>,
+    total_raw: &mut usize,
+    chunk: &[u8],
+) -> io::Result<()> {
+    match mode {
+        Mode::Raw => {
+            output.write_chunk(chunk)?;
+            *total_raw += chunk.len();
+            Ok(())
+        }
+        Mode::Struct => {
+            records.clear();
+            forwarder.feed(chunk, wall_clock, records);
+            if records.is_empty() {
+                Ok(())
+            } else {
+                output.write_chunk(records)
+            }
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args = Args::parse();
     let mut output = match open_output(&args.uart, args.baud) {
@@ -167,14 +194,7 @@ fn main() -> ExitCode {
     let mut records = Vec::with_capacity(4096);
     eprintln!(
         "mode={} uart={} baud={} beast={}:{}",
-        match args.mode {
-            Mode::Raw => "raw",
-            Mode::Struct => "struct",
-        },
-        args.uart,
-        args.baud,
-        args.beast_host,
-        args.beast_port
+        args.mode, args.uart, args.baud, args.beast_host, args.beast_port
     );
 
     while !stop.load(Ordering::Relaxed) {
@@ -191,29 +211,25 @@ fn main() -> ExitCode {
                     break;
                 }
                 Ok(n) => {
-                    let write = if args.mode == Mode::Raw {
-                        let result = output.write_chunk(&buf[..n]);
-                        if result.is_ok() {
-                            total_raw += n;
-                        }
-                        result
-                    } else {
-                        records.clear();
-                        forwarder.feed(&buf[..n], wall_clock, &mut records);
-                        if records.is_empty() {
-                            Ok(())
-                        } else {
-                            output.write_chunk(&records)
-                        }
-                    };
-                    if let Err(err) = write {
-                        eprintln!("beast connection lost: {err}");
+                    if let Err(err) = forward_chunk(
+                        args.mode,
+                        output.as_mut(),
+                        &mut forwarder,
+                        &mut records,
+                        &mut total_raw,
+                        &buf[..n],
+                    ) {
+                        eprintln!("uart write failed: {err}");
                         break;
                     }
                 }
                 Err(err)
-                    if err.kind() == io::ErrorKind::WouldBlock
-                        || err.kind() == io::ErrorKind::TimedOut => {}
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) => {}
                 Err(err) => {
                     eprintln!("beast connection lost: {err}");
                     break;

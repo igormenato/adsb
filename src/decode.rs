@@ -77,17 +77,24 @@ fn speed_kt(subtype: u8, groundspeed: f64) -> Option<u16> {
     Some(u16::try_from(rounded).unwrap_or(u16::MAX).min(VEL_MAX))
 }
 
+#[derive(Clone, Copy)]
 struct CprFix {
     position: AirbornePosition,
     at: f64,
+}
+
+/// Latest even and odd airborne position for one address.
+#[derive(Clone, Copy, Default)]
+struct CprPair {
+    even: Option<CprFix>,
+    odd: Option<CprFix>,
 }
 
 /// Turns a Beast byte stream into packed 32-byte records.
 pub struct StructForwarder {
     stream: Stream,
     payloads: Vec<[u8; 14]>,
-    even: HashMap<u32, CprFix>,
-    odd: HashMap<u32, CprFix>,
+    pairs: HashMap<u32, CprPair>,
     pub crc_drops: u64,
     pub sent: u64,
 }
@@ -97,8 +104,7 @@ impl StructForwarder {
         Self {
             stream: Stream::new(),
             payloads: Vec::new(),
-            even: HashMap::new(),
-            odd: HashMap::new(),
+            pairs: HashMap::new(),
             crc_drops: 0,
             sent: 0,
         }
@@ -108,8 +114,7 @@ impl StructForwarder {
     /// called once per CRC-valid DF17/DF18. Packed records are appended to `out`.
     pub fn feed(&mut self, chunk: &[u8], mut clock: impl FnMut() -> (f64, u64), out: &mut Vec<u8>) {
         self.stream.push_long(chunk, &mut self.payloads);
-        let count = self.payloads.len();
-        for index in 0..count {
+        for index in 0..self.payloads.len() {
             let payload = self.payloads[index];
             if let Some(record) = self.record(&payload, &mut clock) {
                 out.extend_from_slice(&record);
@@ -176,16 +181,15 @@ impl StructForwarder {
             position: *msg,
             at: now_s,
         };
+        let pair = self.pairs.entry(icao).or_default();
         match msg.parity {
-            CPRFormat::Odd => {
-                self.odd.insert(icao, fix);
-            }
-            CPRFormat::Even => {
-                self.even.insert(icao, fix);
-            }
+            CPRFormat::Odd => pair.odd = Some(fix),
+            CPRFormat::Even => pair.even = Some(fix),
         }
-        let even = self.even.get(&icao)?;
-        let odd = self.odd.get(&icao)?;
+        let (even, odd) = match (pair.even, pair.odd) {
+            (Some(even), Some(odd)) => (even, odd),
+            _ => return None,
+        };
         if (even.at - odd.at).abs() > CPR_PAIR_WINDOW_S {
             return None;
         }
