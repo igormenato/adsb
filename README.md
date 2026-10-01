@@ -40,7 +40,7 @@ cargo build --release
 
 Stop one before starting the other. Stderr prints a one-line count about once a second.
 
-Raw mode is a byte copy of the TCP stream, including `0x1A` escaping. Struct mode decodes on the Pi and writes the record below.
+Raw mode is a byte copy of the TCP stream, including `0x1A` escaping. Struct mode decodes DF17/DF18 with [rs1090](https://crates.io/crates/rs1090) and writes the record below.
 
 ## Beast framing
 
@@ -80,7 +80,7 @@ DF18 addresses that are not ICAO still occupy the `icao` field. A squitter whose
 Struct mode fills fields as follows:
 
 - DF17 and DF18 only.
-- Airborne position, type codes 9–18: barometric altitude in feet (25 ft coding). Q=0 Gillham altitude is left invalid.
+- Airborne position, type codes 9–18: barometric altitude in feet (25 ft coding). rs1090 also decodes a valid Q=0 Gillham altitude.
 - Type codes 20–22: the 12-bit GNSS height in meters, converted to feet with `trunc(meters * 3.28084)` (1000 m is 3280 ft).
 - Latitude and longitude only after an even and an odd CPR frame for that address, within 10 seconds. Until then the position flag stays clear and altitude can still be set.
 - Airborne velocity, type code 19 subtypes 1 and 2: ground speed in knots.

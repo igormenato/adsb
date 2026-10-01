@@ -1,8 +1,9 @@
 //! Mode S Beast binary splitter.
 //!
 //! A frame is `0x1A`, a type byte, then a body. `0x1A` inside the body is
-//! escaped as `0x1A 0x1A`. This only finds frame boundaries. Raw mode never
-//! calls it: raw mode copies the TCP bytes.
+//! escaped as `0x1A 0x1A`. This only finds frame boundaries so struct mode
+//! can hand each Mode S payload to rs1090. Raw mode never calls it: raw mode
+//! copies the TCP bytes, and rs1090's Beast client would unescape them.
 
 const REMAINDER_CAP: usize = 64 * 1024;
 const BODY_SHORT: usize = 14;
