@@ -31,7 +31,7 @@ cargo build --release --target aarch64-unknown-linux-gnu
 
 The binary is `target/aarch64-unknown-linux-gnu/release/adsb-uart-sender`.
 
-The sender writes one JSON object per line. `--format struct` sends the binary snapshot.
+The sender writes one JSON object per line. `--format struct` sends the binary snapshot. Nothing is written when the snapshot has no aircraft.
 
 ## Snapshot
 
