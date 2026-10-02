@@ -1,31 +1,23 @@
 # adsb
 
-A Raspberry Pi running [readsb](https://github.com/wiedehopf/readsb) sends one aircraft-track snapshot out a UART each second. The snapshot is taken from readsb's `aircraft.json`.
-
-## UART
-
-Default device `/dev/serial0`, 115200 8N1. Override with `--uart` and `--baud`. `--uart -` writes the bytes to stdout. A write that has not left the port within 30 seconds fails.
-
-Disable the serial login shell and leave the UART enabled (`raspi-config` → Interface Options → Serial Port), or the console will share the port.
-
 ## readsb
-
-readsb writes `aircraft.json` about once a second when `--write-json` is set. The default path is `/run/readsb/aircraft.json`.
 
 ```
 readsb --device-type rtlsdr --net --write-json /run/readsb
 ```
 
-## Run
+`--write-json` writes `aircraft.json` in that directory.
 
-From the repo root (`rustup` stable is enough):
+## UART
+
+Disable the serial login shell and leave the UART enabled (`raspi-config` → Interface Options → Serial Port), or the console will share the port.
+
+## Run
 
 ```
 cargo build --release
-./target/release/adsb-uart-sender --json /run/readsb/aircraft.json --uart /dev/serial0 --baud 115200
+./target/release/adsb-uart-sender
 ```
-
-`--interval` defaults to 1 second. Stderr prints one line per snapshot. A missing file is retried. An empty sky is a snapshot with zero aircraft.
 
 ## Snapshot
 
@@ -53,11 +45,3 @@ Then one 20-byte record per aircraft:
 A CRC-16/CCITT-FALSE over every preceding byte follows the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`). `CRC("123456789") = 0x29B1`.
 
 Only aircraft with a latitude, longitude, and `seen_pos` of at most 2 seconds are included, at most 64, freshest first. The header time is the file's `now`. A fix in the packet can be up to 2 seconds older than that. Unknown speed or heading is `65535`. Unknown altitude is `0x80000000`. `alt_baro` of `"ground"` is 0 feet. The `flight` callsign in `aircraft.json` is not sent.
-
-## Host test
-
-No radio and no UART:
-
-```
-cargo test
-```
