@@ -37,7 +37,7 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_INTERVAL_S)]
     interval: f64,
     /// Encoding written to the UART each interval.
-    #[arg(long, value_enum, default_value = "struct")]
+    #[arg(long, value_enum, default_value = "json")]
     format: Format,
     /// Send the built-in sample instead of reading aircraft.json.
     #[arg(long)]

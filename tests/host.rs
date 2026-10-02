@@ -230,7 +230,7 @@ fn sender_writes_one_snapshot_from_the_file() {
     )
     .unwrap();
 
-    let mut sender = spawn_sender(&path);
+    let mut sender = spawn_sender_with(&path, &["--format", "struct"]);
     let mut stdout = sender.0.stdout.take().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -270,7 +270,7 @@ fn sender_writes_one_json_line() {
     )
     .unwrap();
 
-    let mut sender = spawn_sender_with(&path, &["--format", "json"]);
+    let mut sender = spawn_sender(&path);
     let mut stdout = sender.0.stdout.take().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -325,7 +325,7 @@ fn sample_flag_sends_two_aircraft_without_a_file() {
     assert_eq!(expect.aircraft[1].icao, 0x40621D);
 
     let path = scratch_dir("sample").join("missing.json");
-    let mut sender = spawn_sender_with(&path, &["--sample"]);
+    let mut sender = spawn_sender_with(&path, &["--sample", "--format", "struct"]);
     let mut stdout = sender.0.stdout.take().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     let packet_len = TRACK_HEADER_LEN + 2 * TRACK_RECORD_LEN + 2;
