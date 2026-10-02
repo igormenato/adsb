@@ -17,9 +17,10 @@ Disable the serial login shell and leave the UART enabled (`raspi-config` → In
 On the Pi:
 
 ```
-cargo build --release
-./target/release/adsb-uart-sender
+./run.sh
 ```
+
+`./run.sh --format json` passes extra arguments through.
 
 From another machine, for a 64-bit Pi (`gcc-aarch64-linux-gnu`):
 
