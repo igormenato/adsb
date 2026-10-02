@@ -1,9 +1,5 @@
 # adsb
 
-## UART
-
-Disable the serial login shell and leave the UART enabled (`raspi-config` → Interface Options → Serial Port), or the console will share the port.
-
 ## Run
 
 On the Pi:
