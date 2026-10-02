@@ -17,10 +17,11 @@ Disable the serial login shell and leave the UART enabled (`raspi-config` → In
 On the Pi:
 
 ```
-./run.sh
+cargo build --release
+./target/release/adsb-uart-sender
 ```
 
-`./run.sh --format json` passes extra arguments through. `./run.sh --sample` sends two built-in aircraft instead of the live file.
+`--sample` sends two built-in aircraft instead of the live file.
 
 From another machine, for a 64-bit Pi (`gcc-aarch64-linux-gnu`):
 
