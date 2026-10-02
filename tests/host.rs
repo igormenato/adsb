@@ -311,6 +311,46 @@ fn sender_writes_one_json_line() {
 }
 
 #[test]
+fn sample_flag_sends_two_aircraft_without_a_file() {
+    let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sample/aircraft.json");
+    let expect = snapshot_from_aircraft_json(&std::fs::read(&sample_path).unwrap()).unwrap();
+    assert_eq!(expect.aircraft.len(), 2);
+    assert_eq!(expect.unix_s, 1_700_000_000);
+    assert_eq!(expect.aircraft[0].icao, 0x400ABC);
+    assert_eq!(expect.aircraft[0].latitude_e7, 105_000_000);
+    assert_eq!(expect.aircraft[0].longitude_e7, -202_500_000);
+    assert_eq!(expect.aircraft[0].altitude_ft, 12000);
+    assert_eq!(expect.aircraft[0].ground_speed_kt, 280);
+    assert_eq!(expect.aircraft[0].heading_deg, 90);
+    assert_eq!(expect.aircraft[1].icao, 0x40621D);
+
+    let path = scratch_dir("sample").join("missing.json");
+    let mut sender = spawn_sender_with(&path, &["--sample"]);
+    let mut stdout = sender.0.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let packet_len = TRACK_HEADER_LEN + 2 * TRACK_RECORD_LEN + 2;
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 128];
+        while buf.len() < packet_len {
+            match stdout.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            }
+        }
+        let _ = tx.send(buf);
+    });
+    let buf = rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .expect("sender stdout");
+    assert!(buf.len() >= packet_len, "short packet: {}", buf.len());
+    let snapshot = unpack_snapshot(&buf[..packet_len]).expect("TRCK packet");
+    assert_eq!(snapshot, expect);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
 fn missing_file_sends_no_packet() {
     let path = scratch_dir("missing").join("aircraft.json");
     let mut sender = spawn_sender(&path);

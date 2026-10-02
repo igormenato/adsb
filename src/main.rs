@@ -18,6 +18,7 @@ const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
 const DEFAULT_JSON: &str = "/run/readsb/aircraft.json";
 const DEFAULT_INTERVAL_S: f64 = 1.0;
+const SAMPLE_AIRCRAFT_JSON: &str = include_str!("../sample/aircraft.json");
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_SLICE: Duration = Duration::from_millis(50);
 
@@ -38,6 +39,9 @@ struct Args {
     /// Encoding written to the UART each interval.
     #[arg(long, value_enum, default_value = "struct")]
     format: Format,
+    /// Send the built-in sample instead of reading aircraft.json.
+    #[arg(long)]
+    sample: bool,
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -196,7 +200,11 @@ fn main() -> ExitCode {
 
     eprintln!(
         "json={} uart={} baud={} interval={}s format={}",
-        args.json,
+        if args.sample {
+            "sample"
+        } else {
+            args.json.as_str()
+        },
         args.uart,
         args.baud,
         interval.as_secs_f64(),
@@ -207,7 +215,12 @@ fn main() -> ExitCode {
     );
 
     while !stop.load(Ordering::Relaxed) {
-        match fs::read(&args.json) {
+        let loaded = if args.sample {
+            Ok(SAMPLE_AIRCRAFT_JSON.as_bytes().to_vec())
+        } else {
+            fs::read(&args.json)
+        };
+        match loaded {
             Ok(bytes) => match snapshot_from_aircraft_json(&bytes) {
                 Ok(snapshot) => {
                     let packet = match args.format {
