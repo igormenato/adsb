@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use adsb_uart_sender::{pack_snapshot, snapshot_from_aircraft_json};
+use adsb_uart_sender::{pack_snapshot, pack_snapshot_json, snapshot_from_aircraft_json};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
@@ -35,6 +35,17 @@ struct Args {
     /// Seconds between snapshots.
     #[arg(long, default_value_t = DEFAULT_INTERVAL_S)]
     interval: f64,
+    /// Encoding written to the UART each interval.
+    #[arg(long, value_enum, default_value = "struct")]
+    format: Format,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum Format {
+    /// Binary TRCK packet.
+    Struct,
+    /// One JSON object per line.
+    Json,
 }
 
 #[derive(Debug)]
@@ -184,18 +195,25 @@ fn main() -> ExitCode {
     }
 
     eprintln!(
-        "json={} uart={} baud={} interval={}s",
+        "json={} uart={} baud={} interval={}s format={}",
         args.json,
         args.uart,
         args.baud,
-        interval.as_secs_f64()
+        interval.as_secs_f64(),
+        match args.format {
+            Format::Struct => "struct",
+            Format::Json => "json",
+        }
     );
 
     while !stop.load(Ordering::Relaxed) {
         match fs::read(&args.json) {
             Ok(bytes) => match snapshot_from_aircraft_json(&bytes) {
                 Ok(snapshot) => {
-                    let packet = pack_snapshot(&snapshot);
+                    let packet = match args.format {
+                        Format::Struct => pack_snapshot(&snapshot),
+                        Format::Json => pack_snapshot_json(&snapshot),
+                    };
                     if let Err(err) = output.write_chunk(&packet) {
                         return match err {
                             ChunkError::Stopped => {

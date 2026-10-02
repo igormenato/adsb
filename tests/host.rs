@@ -1,9 +1,9 @@
 //! Host test: aircraft.json becomes one TRCK snapshot. No radio and no UART.
 
 use adsb_uart_sender::{
-    crc16_ccitt_false, pack_snapshot, snapshot_from_aircraft_json, unpack_snapshot, SnapshotError,
-    ALT_UNKNOWN, HEADING_UNKNOWN, POSITION_MAX_AGE_S, SPEED_UNKNOWN, TRACK_HEADER_LEN, TRACK_MAGIC,
-    TRACK_MAX_AIRCRAFT, TRACK_RECORD_LEN,
+    crc16_ccitt_false, pack_snapshot, pack_snapshot_json, snapshot_from_aircraft_json,
+    unpack_snapshot, SnapshotError, ALT_UNKNOWN, HEADING_UNKNOWN, POSITION_MAX_AGE_S,
+    SPEED_UNKNOWN, TRACK_HEADER_LEN, TRACK_MAGIC, TRACK_MAX_AIRCRAFT, TRACK_RECORD_LEN,
 };
 
 fn json(body: &str) -> Vec<u8> {
@@ -58,6 +58,29 @@ fn skips_aircraft_without_a_position() {
     assert_eq!(snapshot.aircraft[1].altitude_ft, 0);
     assert_eq!(snapshot.aircraft[1].latitude_e7, 105_000_000);
     assert_eq!(snapshot.aircraft[1].longitude_e7, -202_500_000);
+}
+
+#[test]
+fn json_line_uses_the_struct_fields() {
+    let snapshot = one(
+        r#"{"hex":"40621d","flight":"ryr123","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"seen_pos":1.2}"#,
+    );
+    assert_eq!(
+        pack_snapshot_json(&snapshot),
+        b"{\"unix_s\":1700000000,\"aircraft\":[{\"icao\":4219421,\"latitude_e7\":522572021,\"longitude_e7\":39193726,\"altitude_ft\":38000,\"ground_speed_kt\":450,\"heading_deg\":271}]}\n"
+    );
+    let empty = snapshot_from_aircraft_json(br#"{"now": 10, "aircraft": []}"#).unwrap();
+    assert_eq!(
+        pack_snapshot_json(&empty),
+        b"{\"unix_s\":10,\"aircraft\":[]}\n"
+    );
+
+    let unknown = one(r#"{"hex":"abc123","lat":0,"lon":0,"seen_pos":0}"#);
+    let line = pack_snapshot_json(&unknown);
+    let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+    assert_eq!(value["aircraft"][0]["altitude_ft"], i32::MIN);
+    assert_eq!(value["aircraft"][0]["ground_speed_kt"], SPEED_UNKNOWN);
+    assert_eq!(value["aircraft"][0]["heading_deg"], HEADING_UNKNOWN);
 }
 
 #[test]
@@ -175,15 +198,21 @@ fn sender_bin() -> std::path::PathBuf {
 }
 
 fn spawn_sender(json: &std::path::Path) -> StopSender {
+    spawn_sender_with(json, &[])
+}
+
+fn spawn_sender_with(json: &std::path::Path, extra: &[&str]) -> StopSender {
+    let mut args = vec![
+        "--json",
+        json.to_str().expect("utf-8 path"),
+        "--uart",
+        "-",
+        "--interval",
+        "0.2",
+    ];
+    args.extend_from_slice(extra);
     let child = std::process::Command::new(sender_bin())
-        .args([
-            "--json",
-            json.to_str().expect("utf-8 path"),
-            "--uart",
-            "-",
-            "--interval",
-            "0.2",
-        ])
+        .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -228,6 +257,56 @@ fn sender_writes_one_snapshot_from_the_file() {
     assert_eq!(snapshot.aircraft[0].latitude_e7, 522_572_021);
     assert_eq!(snapshot.aircraft[0].longitude_e7, 39_193_726);
     assert_eq!(snapshot.aircraft[0].altitude_ft, 38000);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn sender_writes_one_json_line() {
+    let dir = scratch_dir("json");
+    let path = dir.join("aircraft.json");
+    std::fs::write(
+        &path,
+        r#"{"now":1700000000.9,"aircraft":[{"hex":"40621d","flight":"ryr123","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"seen_pos":1.2},{"hex":"abc","flight":"NOFIX"}]}"#,
+    )
+    .unwrap();
+
+    let mut sender = spawn_sender_with(&path, &["--format", "json"]);
+    let mut stdout = sender.0.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 128];
+        loop {
+            match stdout.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.contains(&b'\n') {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = tx.send(buf);
+    });
+    let buf = rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .expect("sender stdout");
+    let line = buf.split(|byte| *byte == b'\n').next().unwrap();
+    assert!(
+        !line.windows(4).any(|window| window == b"TRCK"),
+        "json mode wrote a binary packet"
+    );
+    let value: serde_json::Value = serde_json::from_slice(line).expect("json line");
+    assert_eq!(value["unix_s"], 1_700_000_000);
+    assert_eq!(value["aircraft"].as_array().unwrap().len(), 1);
+    assert_eq!(value["aircraft"][0]["icao"], 0x40621D);
+    assert_eq!(value["aircraft"][0]["latitude_e7"], 522_572_021);
+    assert_eq!(value["aircraft"][0]["longitude_e7"], 39_193_726);
+    assert_eq!(value["aircraft"][0]["altitude_ft"], 38000);
+    assert_eq!(value["aircraft"][0]["ground_speed_kt"], 450);
+    assert_eq!(value["aircraft"][0]["heading_deg"], 271);
     let _ = std::fs::remove_dir_all(dir);
 }
 

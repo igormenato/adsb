@@ -70,6 +70,39 @@ pub fn pack_snapshot(snapshot: &Snapshot) -> Vec<u8> {
     raw
 }
 
+/// One JSON object and a trailing newline. Keys follow [`Snapshot`] and [`Aircraft`] field order.
+pub fn pack_snapshot_json(snapshot: &Snapshot) -> Vec<u8> {
+    let mut raw = Vec::new();
+    raw.extend_from_slice(b"{\"unix_s\":");
+    push_num(&mut raw, snapshot.unix_s);
+    raw.extend_from_slice(b",\"aircraft\":[");
+    for (index, aircraft) in snapshot.aircraft.iter().enumerate() {
+        if index > 0 {
+            raw.push(b',');
+        }
+        raw.extend_from_slice(b"{\"icao\":");
+        push_num(&mut raw, aircraft.icao);
+        raw.extend_from_slice(b",\"latitude_e7\":");
+        push_num(&mut raw, aircraft.latitude_e7);
+        raw.extend_from_slice(b",\"longitude_e7\":");
+        push_num(&mut raw, aircraft.longitude_e7);
+        raw.extend_from_slice(b",\"altitude_ft\":");
+        push_num(&mut raw, aircraft.altitude_ft);
+        raw.extend_from_slice(b",\"ground_speed_kt\":");
+        push_num(&mut raw, aircraft.ground_speed_kt);
+        raw.extend_from_slice(b",\"heading_deg\":");
+        push_num(&mut raw, aircraft.heading_deg);
+        raw.push(b'}');
+    }
+    raw.extend_from_slice(b"]}\n");
+    raw
+}
+
+fn push_num(raw: &mut Vec<u8>, value: impl std::fmt::Display) {
+    let text = value.to_string();
+    raw.extend_from_slice(text.as_bytes());
+}
+
 pub fn unpack_snapshot(bytes: &[u8]) -> Option<Snapshot> {
     if bytes.len() < TRACK_HEADER_LEN + 2 || &bytes[0..4] != TRACK_MAGIC {
         return None;

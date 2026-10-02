@@ -19,6 +19,8 @@ cargo build --release
 ./target/release/adsb-uart-sender
 ```
 
+`--format json` sends one JSON object per line instead of the binary snapshot.
+
 ## Snapshot
 
 Little-endian. Magic is the ASCII bytes `TRCK`.
