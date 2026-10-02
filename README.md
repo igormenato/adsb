@@ -23,11 +23,15 @@ cargo build --release --target aarch64-unknown-linux-gnu
 
 The binary is `target/aarch64-unknown-linux-gnu/release/adsb-uart-sender`.
 
-The sender writes one JSON object per line. `--format struct` sends the binary snapshot. Nothing is written when the snapshot has no aircraft.
-
 ## Snapshot
 
-Little-endian. Magic is the ASCII bytes `TRCK`.
+The sender writes one JSON object per line. Nothing is written when the snapshot has no aircraft.
+
+```
+{"unix_s":1700000000,"aircraft":[{"icao":4219421,"latitude_e7":522572021,"longitude_e7":39193726,"altitude_ft":38000,"ground_speed_kt":450,"heading_deg":271}]}
+```
+
+`--format struct` sends that snapshot as a little-endian binary packet. Magic is the ASCII bytes `TRCK`.
 
 | Offset | Size | Field |
 | --- | --- | --- |
@@ -49,9 +53,3 @@ Then one 20-byte record per aircraft:
 | 18 | u16 | heading, degrees, 0–359 |
 
 A CRC-16/CCITT-FALSE over every preceding byte follows the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`). `CRC("123456789") = 0x29B1`.
-
-The default is that snapshot as one JSON object per line:
-
-```
-{"unix_s":1700000000,"aircraft":[{"icao":4219421,"latitude_e7":522572021,"longitude_e7":39193726,"altitude_ft":38000,"ground_speed_kt":450,"heading_deg":271}]}
-```
