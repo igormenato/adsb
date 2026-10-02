@@ -20,7 +20,7 @@ On the Pi:
 ./run.sh
 ```
 
-`./run.sh --format json` passes extra arguments through.
+`./run.sh --format json` passes extra arguments through. `./run.sh --sample` sends two built-in aircraft instead of the live file.
 
 From another machine, for a 64-bit Pi (`gcc-aarch64-linux-gnu`):
 
