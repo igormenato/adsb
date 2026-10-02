@@ -30,7 +30,7 @@ cargo build --release
 ./target/release/adsb-uart-sender --json /run/readsb/aircraft.json --uart /dev/serial0 --baud 115200
 ```
 
-`--interval` defaults to 1 second. Stderr prints one line per snapshot. A missing file is retried. An empty sky is a snapshot with zero aircraft. Each snapshot keeps at most 64 aircraft, freshest `seen_pos` first.
+`--interval` defaults to 1 second. Stderr prints one line per snapshot. A missing file is retried. An empty sky is a snapshot with zero aircraft. Each snapshot keeps at most 64 aircraft, freshest `seen_pos` first. A position older than 2 seconds, or one with no `seen_pos`, is left out, so the snapshot time is the time of the fix.
 
 ## Snapshot
 
@@ -58,7 +58,7 @@ Then one 28-byte record per aircraft:
 
 A CRC-16/CCITT-FALSE over every preceding byte follows the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`). `CRC("123456789") = 0x29B1`.
 
-Unknown speed or heading is `65535`. Unknown altitude is `0x80000000`. A missing callsign is eight spaces. `alt_baro` of `"ground"` is 0 feet. An aircraft without latitude and longitude is left out.
+Unknown speed or heading is `65535`. Unknown altitude is `0x80000000`. A missing callsign is eight spaces. `alt_baro` of `"ground"` is 0 feet. An aircraft without latitude and longitude is left out, as is one whose position is older than 2 seconds.
 
 ## Host test
 

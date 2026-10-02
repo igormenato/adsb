@@ -8,4 +8,4 @@ pub use frame::{
     HEADING_UNKNOWN, SPEED_UNKNOWN, TRACK_HEADER_LEN, TRACK_MAGIC, TRACK_MAX_AIRCRAFT,
     TRACK_RECORD_LEN, TRACK_VERSION,
 };
-pub use snapshot::{snapshot_from_aircraft_json, SnapshotError};
+pub use snapshot::{snapshot_from_aircraft_json, SnapshotError, POSITION_MAX_AGE_S};

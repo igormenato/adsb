@@ -6,6 +6,9 @@ use crate::frame::{
     deg_e7, Aircraft, Snapshot, ALT_UNKNOWN, HEADING_UNKNOWN, SPEED_UNKNOWN, TRACK_MAX_AIRCRAFT,
 };
 
+/// A position older than this is left out. The snapshot time would otherwise label a stale fix as current.
+pub const POSITION_MAX_AGE_S: f64 = 2.0;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotError {
     /// The file is not a JSON object with an `aircraft` array.
@@ -26,7 +29,7 @@ impl std::fmt::Display for SnapshotError {
     }
 }
 
-/// Aircraft with a latitude and longitude, freshest `seen_pos` first, at most 64.
+/// Aircraft with a latitude and longitude no older than [`POSITION_MAX_AGE_S`], freshest `seen_pos` first, at most 64.
 pub fn snapshot_from_aircraft_json(bytes: &[u8]) -> Result<Snapshot, SnapshotError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| SnapshotError::Json)?;
     let now = value
@@ -71,10 +74,10 @@ fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64)> {
     if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
         return None;
     }
-    let seen_pos = entry
-        .get("seen_pos")
-        .and_then(finite_number)
-        .unwrap_or(f64::INFINITY);
+    let seen_pos = finite_number(entry.get("seen_pos")?)?;
+    if seen_pos > POSITION_MAX_AGE_S {
+        return None;
+    }
     Some((
         Aircraft {
             icao,

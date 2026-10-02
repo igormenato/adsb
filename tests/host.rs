@@ -2,8 +2,8 @@
 
 use adsb_uart_sender::{
     crc16_ccitt_false, pack_snapshot, snapshot_from_aircraft_json, unpack_snapshot, SnapshotError,
-    ALT_UNKNOWN, HEADING_UNKNOWN, SPEED_UNKNOWN, TRACK_HEADER_LEN, TRACK_MAGIC, TRACK_MAX_AIRCRAFT,
-    TRACK_RECORD_LEN,
+    ALT_UNKNOWN, HEADING_UNKNOWN, POSITION_MAX_AGE_S, SPEED_UNKNOWN, TRACK_HEADER_LEN, TRACK_MAGIC,
+    TRACK_MAX_AIRCRAFT, TRACK_RECORD_LEN,
 };
 
 fn json(body: &str) -> Vec<u8> {
@@ -47,7 +47,7 @@ fn published_track_and_crc() {
 #[test]
 fn skips_aircraft_without_a_position() {
     let snapshot = one(r#"{"hex":"abc123","flight":"NOFIX"},
-           {"hex":"~40621d","lat":10.5,"lon":-20.25,"alt_baro":"ground","seen_pos":3},
+           {"hex":"~40621d","lat":10.5,"lon":-20.25,"alt_baro":"ground","seen_pos":1.5},
            {"hex":"000001","lat":1,"lon":2,"alt_geom":3280.4,"seen_pos":1}"#);
     assert_eq!(snapshot.aircraft.len(), 2);
     assert_eq!(snapshot.aircraft[0].icao, 1);
@@ -76,7 +76,8 @@ fn keeps_the_sixty_four_freshest() {
     let mut entries = Vec::new();
     for index in 0..70 {
         entries.push(format!(
-            r#"{{"hex":"{index:06x}","lat":1,"lon":2,"seen_pos":{index}}}"#
+            r#"{{"hex":"{index:06x}","lat":1,"lon":2,"seen_pos":{}}}"#,
+            index as f64 / 100.0
         ));
     }
     let snapshot = one(&entries.join(","));
@@ -87,15 +88,29 @@ fn keeps_the_sixty_four_freshest() {
 
 #[test]
 fn unknown_speed_heading_and_altitude() {
-    let snapshot = one(r#"{"hex":"abc123","lat":0,"lon":0,"gs":-1,"track":-5},
-           {"hex":"abc124","lat":0,"lon":1,"gs":65534.6,"track":360},
-           {"hex":"abc125","lat":0,"lon":2,"alt_baro":"ground"}"#);
+    let snapshot = one(
+        r#"{"hex":"abc123","lat":0,"lon":0,"gs":-1,"track":-5,"seen_pos":0},
+           {"hex":"abc124","lat":0,"lon":1,"gs":65534.6,"track":360,"seen_pos":0.1},
+           {"hex":"abc125","lat":0,"lon":2,"alt_baro":"ground","seen_pos":0.2}"#,
+    );
     assert_eq!(snapshot.aircraft[0].ground_speed_kt, SPEED_UNKNOWN);
     assert_eq!(snapshot.aircraft[0].heading_deg, HEADING_UNKNOWN);
     assert_eq!(snapshot.aircraft[0].altitude_ft, ALT_UNKNOWN);
     assert_eq!(snapshot.aircraft[1].ground_speed_kt, 65534);
     assert_eq!(snapshot.aircraft[1].heading_deg, 0);
     assert_eq!(snapshot.aircraft[2].altitude_ft, 0);
+}
+
+#[test]
+fn drops_a_stale_position() {
+    assert_eq!(POSITION_MAX_AGE_S, 2.0);
+    let snapshot = one(r#"{"hex":"000001","lat":1,"lon":2,"seen_pos":2},
+           {"hex":"000002","lat":1,"lon":2,"seen_pos":2.01},
+           {"hex":"000003","lat":1,"lon":2},
+           {"hex":"000004","lat":1,"lon":2,"seen_pos":0.4}"#);
+    assert_eq!(snapshot.aircraft.len(), 2);
+    assert_eq!(snapshot.aircraft[0].icao, 4);
+    assert_eq!(snapshot.aircraft[1].icao, 1);
 }
 
 #[test]
