@@ -351,6 +351,32 @@ fn sample_flag_sends_two_aircraft_without_a_file() {
 }
 
 #[test]
+fn empty_sky_sends_no_packet() {
+    let dir = scratch_dir("empty");
+    let path = dir.join("aircraft.json");
+    std::fs::write(&path, r#"{"now":10,"aircraft":[]}"#).unwrap();
+    let mut sender = spawn_sender(&path);
+    let mut stdout = sender.0.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut tmp = [0u8; 16];
+        let n = stdout.read(&mut tmp).unwrap_or(0);
+        let _ = tx.send(n);
+    });
+    match rx.recv_timeout(std::time::Duration::from_millis(700)) {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("reader disconnected");
+        }
+        Ok(0) => panic!("sender exited before writing a packet"),
+        Ok(n) => panic!("empty sky wrote {n} bytes"),
+    }
+    assert!(sender.0.try_wait().unwrap().is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn missing_file_sends_no_packet() {
     let path = scratch_dir("missing").join("aircraft.json");
     let mut sender = spawn_sender(&path);
