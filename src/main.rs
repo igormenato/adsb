@@ -1,53 +1,37 @@
-//! Read Beast from readsb and write it to a UART.
+//! Read readsb `aircraft.json` and write one track snapshot to a UART each second.
 
-use std::fmt;
-use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::fs;
+use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits};
 
-use adsb_uart_sender::StructForwarder;
+use adsb_uart_sender::{pack_snapshot, snapshot_from_aircraft_json};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
-const DEFAULT_HOST: &str = "127.0.0.1";
-const DEFAULT_PORT: u16 = 30_005;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum Mode {
-    Raw,
-    Struct,
-}
-
-impl fmt::Display for Mode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Mode::Raw => "raw",
-            Mode::Struct => "struct",
-        })
-    }
-}
+const DEFAULT_JSON: &str = "/run/readsb/aircraft.json";
+const DEFAULT_INTERVAL_S: f64 = 1.0;
 
 #[derive(Parser, Debug)]
-#[command(about = "Forward readsb Beast output to a UART as raw Beast or packed structs.")]
+#[command(about = "Send readsb aircraft tracks to a UART once a second.")]
 struct Args {
-    #[arg(long, value_enum)]
-    mode: Mode,
+    /// Path to readsb aircraft.json.
+    #[arg(long, default_value = DEFAULT_JSON)]
+    json: String,
     /// UART device, or - for stdout.
     #[arg(long, default_value = DEFAULT_UART)]
     uart: String,
     #[arg(long, default_value_t = DEFAULT_BAUD)]
     baud: u32,
-    #[arg(long, default_value = DEFAULT_HOST)]
-    beast_host: String,
-    #[arg(long, default_value_t = DEFAULT_PORT)]
-    beast_port: u16,
+    /// Seconds between snapshots.
+    #[arg(long, default_value_t = DEFAULT_INTERVAL_S)]
+    interval: f64,
 }
 
 trait Output {
@@ -103,81 +87,13 @@ fn open_output(path: &str, baud: u32) -> Result<Box<dyn Output>, ExitCode> {
     Ok(Box::new(UartOut { port }))
 }
 
-fn wall_clock() -> (f64, u64) {
-    let since = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let micros = since.as_micros() as u64;
-    (micros as f64 / 1_000_000.0, micros)
-}
-
-fn connect(host: &str, port: u16, stop: &AtomicBool) -> Option<TcpStream> {
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            return None;
-        }
-        let addr = match resolve(host, port) {
-            Some(addr) => addr,
-            None => {
-                eprintln!("waiting for readsb at {host}:{port}: address lookup failed");
-                thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-        };
-        match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
-            Ok(sock) => {
-                if let Err(err) = sock.set_read_timeout(Some(Duration::from_secs(1))) {
-                    eprintln!("beast connection lost: {err}");
-                    thread::sleep(Duration::from_secs(1));
-                    continue;
-                }
-                eprintln!("connected to readsb at {host}:{port}");
-                return Some(sock);
-            }
-            Err(err) => {
-                eprintln!("waiting for readsb at {host}:{port}: {err}");
-                thread::sleep(Duration::from_secs(1));
-            }
-        }
-    }
-}
-
-fn resolve(host: &str, port: u16) -> Option<SocketAddr> {
-    (host, port).to_socket_addrs().ok()?.next()
-}
-
-fn forward_chunk(
-    mode: Mode,
-    output: &mut dyn Output,
-    forwarder: &mut StructForwarder,
-    records: &mut Vec<u8>,
-    total_raw: &mut usize,
-    chunk: &[u8],
-) -> io::Result<()> {
-    match mode {
-        Mode::Raw => {
-            output.write_chunk(chunk)?;
-            *total_raw += chunk.len();
-            Ok(())
-        }
-        Mode::Struct => {
-            records.clear();
-            forwarder.feed(chunk, wall_clock, records);
-            if records.is_empty() {
-                Ok(())
-            } else {
-                output.write_chunk(records)
-            }
-        }
-    }
-}
-
 fn main() -> ExitCode {
     let args = Args::parse();
     let mut output = match open_output(&args.uart, args.baud) {
         Ok(output) => output,
         Err(code) => return code,
     };
+    let interval = Duration::from_secs_f64(args.interval.max(0.2));
 
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -187,68 +103,48 @@ fn main() -> ExitCode {
         }
     }
 
-    let mut forwarder = StructForwarder::new();
-    let mut total_raw = 0usize;
-    let mut last_log = Instant::now();
-    let mut buf = [0u8; 4096];
-    let mut records = Vec::with_capacity(4096);
     eprintln!(
-        "mode={} uart={} baud={} beast={}:{}",
-        args.mode, args.uart, args.baud, args.beast_host, args.beast_port
+        "json={} uart={} baud={} interval={}s",
+        args.json,
+        args.uart,
+        args.baud,
+        interval.as_secs_f64()
     );
 
     while !stop.load(Ordering::Relaxed) {
-        let Some(mut sock) = connect(&args.beast_host, args.beast_port, &stop) else {
-            break;
-        };
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                break;
-            }
-            match sock.read(&mut buf) {
-                Ok(0) => {
-                    eprintln!("readsb closed the connection");
-                    break;
-                }
-                Ok(n) => {
-                    if let Err(err) = forward_chunk(
-                        args.mode,
-                        output.as_mut(),
-                        &mut forwarder,
-                        &mut records,
-                        &mut total_raw,
-                        &buf[..n],
-                    ) {
+        match fs::read(&args.json) {
+            Ok(bytes) => match snapshot_from_aircraft_json(&bytes) {
+                Ok(snapshot) => {
+                    let packet = pack_snapshot(&snapshot);
+                    if let Err(err) = output.write_chunk(&packet) {
                         eprintln!("uart write failed: {err}");
-                        break;
+                        return ExitCode::from(1);
                     }
-                }
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::WouldBlock
-                            | io::ErrorKind::TimedOut
-                            | io::ErrorKind::Interrupted
-                    ) => {}
-                Err(err) => {
-                    eprintln!("beast connection lost: {err}");
-                    break;
-                }
-            }
-            if last_log.elapsed() >= Duration::from_secs(1) {
-                if args.mode == Mode::Raw {
-                    eprintln!("raw forwarded {total_raw} bytes");
-                } else {
                     eprintln!(
-                        "struct sent {} crc_dropped {}",
-                        forwarder.sent, forwarder.crc_drops
+                        "snapshot t={} aircraft={}",
+                        snapshot.unix_s,
+                        snapshot.aircraft.len()
                     );
                 }
-                last_log = Instant::now();
-            }
+                Err(err) => eprintln!("aircraft.json: {err}"),
+            },
+            Err(err) => eprintln!("waiting for aircraft.json at {}: {err}", args.json),
         }
+        sleep_until_stop(&stop, interval);
     }
 
     eprintln!("stopped");
     ExitCode::SUCCESS
+}
+
+fn sleep_until_stop(stop: &AtomicBool, mut left: Duration) {
+    let step = Duration::from_millis(50);
+    while left > Duration::ZERO {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let slice = left.min(step);
+        thread::sleep(slice);
+        left = left.saturating_sub(slice);
+    }
 }

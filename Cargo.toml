@@ -2,7 +2,7 @@
 name = "adsb-uart-sender"
 version = "0.1.0"
 edition = "2021"
-description = "Forward readsb Beast output to a UART as raw Beast or packed structs."
+description = "Send readsb aircraft tracks to a UART once a second."
 
 [[bin]]
 name = "adsb-uart-sender"
@@ -12,5 +12,5 @@ path = "src/main.rs"
 clap = { version = "4.5", features = ["derive"] }
 crc = "3.2"
 ctrlc = "3.4"
-rs1090 = { version = "0.7", default-features = false }
+serde_json = "1"
 serialport = { version = "4.6", default-features = false }
