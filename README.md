@@ -45,3 +45,9 @@ Then one 20-byte record per aircraft:
 | 18 | u16 | heading, degrees, 0–359 |
 
 A CRC-16/CCITT-FALSE over every preceding byte follows the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`). `CRC("123456789") = 0x29B1`.
+
+`--format json` sends the same snapshot as one JSON object per line:
+
+```
+{"unix_s":1700000000,"aircraft":[{"icao":4219421,"latitude_e7":522572021,"longitude_e7":39193726,"altitude_ft":38000,"ground_speed_kt":450,"heading_deg":271}]}
+```
