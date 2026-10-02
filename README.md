@@ -34,26 +34,25 @@ Little-endian. Magic is the ASCII bytes `TRCK`.
 | Offset | Size | Field |
 | --- | --- | --- |
 | 0 | 4 | `TRCK` |
-| 4 | u8 | version `1` |
+| 4 | u8 | version `2` |
 | 5 | u8 | reserved `0` |
 | 6 | u16 | aircraft count |
 | 8 | u32 | Unix time, seconds, from the file's `now` |
 
-Then one 28-byte record per aircraft:
+Then one 20-byte record per aircraft:
 
 | Offset | Size | Field |
 | --- | --- | --- |
 | 0 | u32 | ICAO address in the low 24 bits |
-| 4 | 8 | callsign, ASCII, space-padded |
-| 12 | i32 | latitude, degrees × 1e7 |
-| 16 | i32 | longitude, degrees × 1e7 |
-| 20 | i32 | altitude, feet |
-| 24 | u16 | ground speed, knots |
-| 26 | u16 | heading, degrees, 0–359 |
+| 4 | i32 | latitude, degrees × 1e7 |
+| 8 | i32 | longitude, degrees × 1e7 |
+| 12 | i32 | altitude, feet |
+| 16 | u16 | ground speed, knots |
+| 18 | u16 | heading, degrees, 0–359 |
 
 A CRC-16/CCITT-FALSE over every preceding byte follows the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`). `CRC("123456789") = 0x29B1`.
 
-Only aircraft with a latitude, longitude, and `seen_pos` of at most 2 seconds are included, at most 64, freshest first. The header time is the file's `now`. A fix in the packet can be up to 2 seconds older than that. Unknown speed or heading is `65535`. Unknown altitude is `0x80000000`. A missing callsign is eight spaces. `alt_baro` of `"ground"` is 0 feet.
+Only aircraft with a latitude, longitude, and `seen_pos` of at most 2 seconds are included, at most 64, freshest first. The header time is the file's `now`. A fix in the packet can be up to 2 seconds older than that. Unknown speed or heading is `65535`. Unknown altitude is `0x80000000`. `alt_baro` of `"ground"` is 0 feet. The `flight` callsign in `aircraft.json` is not sent.
 
 ## Host test
 

@@ -77,7 +77,6 @@ fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64)> {
     Some((
         Aircraft {
             icao,
-            callsign: callsign(entry.get("flight").and_then(Value::as_str)),
             latitude_e7: deg_e7(latitude),
             longitude_e7: deg_e7(longitude),
             altitude_ft: altitude(entry),
@@ -99,24 +98,6 @@ fn parse_icao(hex: &str) -> Option<u32> {
 
 fn finite_number(value: &Value) -> Option<f64> {
     value.as_f64().filter(|number| number.is_finite())
-}
-
-fn callsign(flight: Option<&str>) -> [u8; 8] {
-    let mut out = [b' '; 8];
-    let Some(flight) = flight else {
-        return out;
-    };
-    let mut index = 0;
-    for byte in flight.trim().bytes() {
-        if index == 8 {
-            break;
-        }
-        if byte.is_ascii_alphanumeric() || byte == b' ' {
-            out[index] = byte.to_ascii_uppercase();
-            index += 1;
-        }
-    }
-    out
 }
 
 fn altitude(entry: &Value) -> i32 {

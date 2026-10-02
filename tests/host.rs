@@ -26,7 +26,6 @@ fn published_track_and_crc() {
     assert_eq!(snapshot.aircraft.len(), 1);
     let aircraft = &snapshot.aircraft[0];
     assert_eq!(aircraft.icao, 0x40621D);
-    assert_eq!(&aircraft.callsign, b"RYR123  ");
     assert_eq!(aircraft.latitude_e7, 522_572_021);
     assert_eq!(aircraft.longitude_e7, 39_193_726);
     assert_eq!(aircraft.altitude_ft, 38000);
@@ -35,6 +34,7 @@ fn published_track_and_crc() {
 
     let packet = pack_snapshot(&snapshot);
     assert_eq!(&packet[0..4], b"TRCK");
+    assert_eq!(packet[4], 2);
     assert_eq!(packet.len(), TRACK_HEADER_LEN + TRACK_RECORD_LEN + 2);
     assert_eq!(unpack_snapshot(&packet).as_ref(), Some(&snapshot));
 
@@ -52,7 +52,6 @@ fn skips_aircraft_without_a_position() {
     assert_eq!(snapshot.aircraft.len(), 2);
     assert_eq!(snapshot.aircraft[0].icao, 1);
     assert_eq!(snapshot.aircraft[0].altitude_ft, 3280);
-    assert_eq!(&snapshot.aircraft[0].callsign, b"        ");
     assert_eq!(snapshot.aircraft[0].ground_speed_kt, SPEED_UNKNOWN);
     assert_eq!(snapshot.aircraft[0].heading_deg, HEADING_UNKNOWN);
     assert_eq!(snapshot.aircraft[1].icao, 0x40621D);

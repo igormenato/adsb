@@ -7,9 +7,9 @@ use crc::{Crc, CRC_16_IBM_3740};
 const CCITT_FALSE: Crc<u16> = Crc::<u16>::new(&CRC_16_IBM_3740);
 
 pub const TRACK_MAGIC: &[u8; 4] = b"TRCK";
-pub const TRACK_VERSION: u8 = 1;
+pub const TRACK_VERSION: u8 = 2;
 pub const TRACK_HEADER_LEN: usize = 12;
-pub const TRACK_RECORD_LEN: usize = 28;
+pub const TRACK_RECORD_LEN: usize = 20;
 pub const TRACK_MAX_AIRCRAFT: usize = 64;
 pub const SPEED_UNKNOWN: u16 = 0xFFFF;
 pub const HEADING_UNKNOWN: u16 = 0xFFFF;
@@ -24,7 +24,6 @@ pub fn crc16_ccitt_false(data: &[u8]) -> u16 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Aircraft {
     pub icao: u32,
-    pub callsign: [u8; 8],
     pub latitude_e7: i32,
     pub longitude_e7: i32,
     pub altitude_ft: i32,
@@ -60,7 +59,6 @@ pub fn pack_snapshot(snapshot: &Snapshot) -> Vec<u8> {
     raw.extend_from_slice(&snapshot.unix_s.to_le_bytes());
     for aircraft in &snapshot.aircraft {
         raw.extend_from_slice(&(aircraft.icao & 0x00ff_ffff).to_le_bytes());
-        raw.extend_from_slice(&aircraft.callsign);
         raw.extend_from_slice(&aircraft.latitude_e7.to_le_bytes());
         raw.extend_from_slice(&aircraft.longitude_e7.to_le_bytes());
         raw.extend_from_slice(&aircraft.altitude_ft.to_le_bytes());
@@ -96,16 +94,13 @@ pub fn unpack_snapshot(bytes: &[u8]) -> Option<Snapshot> {
     let mut aircraft = Vec::with_capacity(count);
     for index in 0..count {
         let rec = &bytes[TRACK_HEADER_LEN + index * TRACK_RECORD_LEN..];
-        let mut callsign = [0u8; 8];
-        callsign.copy_from_slice(&rec[4..12]);
         aircraft.push(Aircraft {
             icao: u32::from_le_bytes(rec[0..4].try_into().ok()?) & 0x00ff_ffff,
-            callsign,
-            latitude_e7: i32::from_le_bytes(rec[12..16].try_into().ok()?),
-            longitude_e7: i32::from_le_bytes(rec[16..20].try_into().ok()?),
-            altitude_ft: i32::from_le_bytes(rec[20..24].try_into().ok()?),
-            ground_speed_kt: u16::from_le_bytes(rec[24..26].try_into().ok()?),
-            heading_deg: u16::from_le_bytes(rec[26..28].try_into().ok()?),
+            latitude_e7: i32::from_le_bytes(rec[4..8].try_into().ok()?),
+            longitude_e7: i32::from_le_bytes(rec[8..12].try_into().ok()?),
+            altitude_ft: i32::from_le_bytes(rec[12..16].try_into().ok()?),
+            ground_speed_kt: u16::from_le_bytes(rec[16..18].try_into().ok()?),
+            heading_deg: u16::from_le_bytes(rec[18..20].try_into().ok()?),
         });
     }
     Some(Snapshot { unix_s, aircraft })
