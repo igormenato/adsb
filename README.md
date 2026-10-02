@@ -43,5 +43,3 @@ Then one 20-byte record per aircraft:
 | 18 | u16 | heading, degrees, 0–359 |
 
 A CRC-16/CCITT-FALSE over every preceding byte follows the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`). `CRC("123456789") = 0x29B1`.
-
-Only aircraft with a latitude, longitude, and `seen_pos` of at most 2 seconds are included, at most 64, freshest first. The header time is the file's `now`. A fix in the packet can be up to 2 seconds older than that. Unknown speed or heading is `65535`. Unknown altitude is `0x80000000`. `alt_baro` of `"ground"` is 0 feet. The `flight` callsign in `aircraft.json` is not sent.
