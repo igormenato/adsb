@@ -88,12 +88,13 @@ fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64)> {
     ))
 }
 
+/// readsb writes six hex digits, optionally with one leading `~`.
 fn parse_icao(hex: &str) -> Option<u32> {
-    let digits: String = hex.chars().filter(char::is_ascii_hexdigit).collect();
-    if digits.is_empty() || digits.len() > 6 {
+    let digits = hex.strip_prefix('~').unwrap_or(hex);
+    if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
-    u32::from_str_radix(&digits, 16).ok()
+    u32::from_str_radix(digits, 16).ok()
 }
 
 fn finite_number(value: &Value) -> Option<f64> {

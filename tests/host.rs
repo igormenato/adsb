@@ -102,6 +102,17 @@ fn unknown_speed_heading_and_altitude() {
 }
 
 #[test]
+fn drops_a_bad_hex() {
+    let snapshot = one(r#"{"hex":"~40621d","lat":1,"lon":2,"seen_pos":0.1},
+           {"hex":"40G621","lat":1,"lon":2,"seen_pos":0.2},
+           {"hex":"abcdefg","lat":1,"lon":2,"seen_pos":0.3},
+           {"hex":" abc","lat":1,"lon":2,"seen_pos":0.4},
+           {"hex":"~~40621d","lat":1,"lon":2,"seen_pos":0.5}"#);
+    assert_eq!(snapshot.aircraft.len(), 1);
+    assert_eq!(snapshot.aircraft[0].icao, 0x40621D);
+}
+
+#[test]
 fn drops_a_stale_position() {
     assert_eq!(POSITION_MAX_AGE_S, 2.0);
     let snapshot = one(r#"{"hex":"000001","lat":1,"lon":2,"seen_pos":2},

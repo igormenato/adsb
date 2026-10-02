@@ -30,7 +30,7 @@ cargo build --release
 ./target/release/adsb-uart-sender --json /run/readsb/aircraft.json --uart /dev/serial0 --baud 115200
 ```
 
-`--interval` defaults to 1 second. Stderr prints one line per snapshot. A missing file is retried. An empty sky is a snapshot with zero aircraft. Each snapshot keeps at most 64 aircraft, freshest `seen_pos` first. A position older than 2 seconds, or one with no `seen_pos`, is left out, so the snapshot time is the time of the fix.
+`--interval` defaults to 1 second. Stderr prints one line per snapshot. A missing file is retried. An empty sky is a snapshot with zero aircraft. Each snapshot keeps at most 64 aircraft, freshest `seen_pos` first. A position older than 2 seconds, or one with no `seen_pos`, is left out. The header time is the file's `now`, and a fix in the packet can be up to 2 seconds older than that.
 
 ## Snapshot
 
