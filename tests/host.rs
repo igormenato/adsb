@@ -156,6 +156,7 @@ impl Drop for StopSender {
 }
 
 fn sender_bin() -> std::path::PathBuf {
+    // The test executable is target/<profile>/deps/<test>. The sender sits beside deps.
     let mut path = std::env::current_exe().expect("test executable");
     path.pop();
     path.pop();

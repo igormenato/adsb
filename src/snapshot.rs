@@ -50,11 +50,7 @@ pub fn snapshot_from_aircraft_json(bytes: &[u8]) -> Result<Snapshot, SnapshotErr
             ranked.push((seen_pos, index, aircraft));
         }
     }
-    ranked.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.1.cmp(&b.1))
-    });
+    ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     ranked.truncate(TRACK_MAX_AIRCRAFT);
 
     Ok(Snapshot {
@@ -154,10 +150,11 @@ fn ground_speed(entry: &Value) -> u16 {
         return SPEED_UNKNOWN;
     }
     let rounded = knots.round();
-    if rounded > f64::from(u16::MAX) {
-        return 65534;
+    if rounded >= 65535.0 {
+        65534
+    } else {
+        rounded as u16
     }
-    (rounded as u16).min(65534)
 }
 
 fn heading(entry: &Value) -> u16 {

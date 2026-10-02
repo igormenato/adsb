@@ -55,35 +55,31 @@ struct UartOut {
 impl Output for UartOut {
     fn write_chunk(&mut self, data: &[u8]) -> io::Result<()> {
         self.port.write_all(data)?;
-        // flush is tcdrain: this chunk leaves the port before the next write.
         self.port.flush()
     }
+}
+
+fn open_failed(path: &str, err: impl std::fmt::Display) -> ExitCode {
+    eprintln!("cannot open {path}: {err}");
+    ExitCode::from(1)
 }
 
 fn open_output(path: &str, baud: u32) -> Result<Box<dyn Output>, ExitCode> {
     if path == "-" {
         return Ok(Box::new(StdoutOut));
     }
-    let port = match serialport::new(path, baud)
+    let port = serialport::new(path, baud)
         .data_bits(DataBits::Eight)
         .parity(Parity::None)
         .stop_bits(StopBits::One)
         .flow_control(FlowControl::None)
-        // Writes block until the kernel accepts them. tcdrain then waits
+        // Writes block until the kernel accepts them. flush() then waits
         // until those bytes have left the adapter.
         .timeout(Duration::from_secs(30))
         .open()
-    {
-        Ok(port) => port,
-        Err(err) => {
-            eprintln!("cannot open {path}: {err}");
-            return Err(ExitCode::from(1));
-        }
-    };
-    if let Err(err) = port.clear(ClearBuffer::All) {
-        eprintln!("cannot open {path}: {err}");
-        return Err(ExitCode::from(1));
-    }
+        .map_err(|err| open_failed(path, err))?;
+    port.clear(ClearBuffer::All)
+        .map_err(|err| open_failed(path, err))?;
     Ok(Box::new(UartOut { port }))
 }
 
@@ -93,7 +89,8 @@ fn main() -> ExitCode {
         Ok(output) => output,
         Err(code) => return code,
     };
-    let interval = Duration::from_secs_f64(args.interval.max(0.2));
+    let interval =
+        Duration::try_from_secs_f64(args.interval.max(0.2)).unwrap_or(Duration::from_secs(1));
 
     let stop = Arc::new(AtomicBool::new(false));
     {

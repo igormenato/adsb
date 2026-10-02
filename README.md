@@ -65,6 +65,8 @@ Unknown speed or heading is `65535`. Unknown altitude is `0x80000000`. A missing
 No radio and no UART:
 
 ```
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
