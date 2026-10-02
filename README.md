@@ -34,7 +34,7 @@ Little-endian. Magic is the ASCII bytes `TRCK`.
 | Offset | Size | Field |
 | --- | --- | --- |
 | 0 | 4 | `TRCK` |
-| 4 | u8 | version `2` |
+| 4 | u8 | version `1` |
 | 5 | u8 | reserved `0` |
 | 6 | u16 | aircraft count |
 | 8 | u32 | Unix time, seconds, from the file's `now` |

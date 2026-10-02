@@ -34,7 +34,7 @@ fn published_track_and_crc() {
 
     let packet = pack_snapshot(&snapshot);
     assert_eq!(&packet[0..4], b"TRCK");
-    assert_eq!(packet[4], 2);
+    assert_eq!(packet[4], 1);
     assert_eq!(packet.len(), TRACK_HEADER_LEN + TRACK_RECORD_LEN + 2);
     assert_eq!(unpack_snapshot(&packet).as_ref(), Some(&snapshot));
 

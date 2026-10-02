@@ -7,7 +7,7 @@ use crc::{Crc, CRC_16_IBM_3740};
 const CCITT_FALSE: Crc<u16> = Crc::<u16>::new(&CRC_16_IBM_3740);
 
 pub const TRACK_MAGIC: &[u8; 4] = b"TRCK";
-pub const TRACK_VERSION: u8 = 2;
+pub const TRACK_VERSION: u8 = 1;
 pub const TRACK_HEADER_LEN: usize = 12;
 pub const TRACK_RECORD_LEN: usize = 20;
 pub const TRACK_MAX_AIRCRAFT: usize = 64;
