@@ -9,6 +9,7 @@ dependencies = [
  "clap",
  "crc",
  "ctrlc",
+ "libc",
  "serde_json",
  "serialport",
 ]

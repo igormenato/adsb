@@ -9,7 +9,7 @@ tests/host.rs                host test, no Pi required
 
 ## UART
 
-Default device `/dev/serial0`, 115200 8N1. Override with `--uart` and `--baud`. `--uart -` writes the bytes to stdout.
+Default device `/dev/serial0`, 115200 8N1. Override with `--uart` and `--baud`. `--uart -` writes the bytes to stdout. A write that has not left the port within 30 seconds fails. Ctrl-C stops the sender during that wait.
 
 Disable the serial login shell and leave the UART enabled (`raspi-config` → Interface Options → Serial Port), or the console will share the port.
 
