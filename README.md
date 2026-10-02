@@ -14,10 +14,20 @@ Disable the serial login shell and leave the UART enabled (`raspi-config` → In
 
 ## Run
 
+On the Pi:
+
 ```
 cargo build --release
 ./target/release/adsb-uart-sender
 ```
+
+From another machine, for a 64-bit Pi (`gcc-aarch64-linux-gnu`):
+
+```
+cargo build --release --target aarch64-unknown-linux-gnu
+```
+
+The binary is `target/aarch64-unknown-linux-gnu/release/adsb-uart-sender`.
 
 `--format json` sends one JSON object per line instead of the binary snapshot.
 
