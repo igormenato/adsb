@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use adsb_uart_sender::{pack_snapshot, pack_snapshot_json, snapshot_from_aircraft_json};
+use trck::{pack_snapshot, pack_snapshot_json, snapshot_from_aircraft_json};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
