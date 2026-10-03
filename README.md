@@ -24,7 +24,9 @@ The binary is `target/aarch64-unknown-linux-gnu/release/adsb-uart-sender`. On th
 
 `--sample` sends two built-in aircraft instead of the live file.
 
-`--format json` is the default. `--format struct` sends the binary packet.
+`--format json` is the default.
+
+`--format struct` sends the binary packet.
 
 ## Snapshot
 
