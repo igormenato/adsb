@@ -18,8 +18,6 @@ To build it (`gcc-aarch64-linux-gnu`):
 cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
-The binary is `target/aarch64-unknown-linux-gnu/release/adsb-uart-sender`. On the Pi, omit `--target`.
-
 ## Flags
 
 `--sample` sends two built-in aircraft instead of the live file.
