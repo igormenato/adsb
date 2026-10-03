@@ -6,22 +6,25 @@ Disable the serial login shell and leave the UART enabled, or the console will s
 
 ## Run
 
-On the Pi:
+Copy `adsb-uart-sender` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi, then:
 
 ```
-cargo build --release
-./target/release/adsb-uart-sender
+./adsb-uart-sender
 ```
 
-`--sample` sends two built-in aircraft instead of the live file.
-
-From another machine, for a 64-bit Pi (`gcc-aarch64-linux-gnu`):
+To build it (`gcc-aarch64-linux-gnu`):
 
 ```
 cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
-The binary is `target/aarch64-unknown-linux-gnu/release/adsb-uart-sender`.
+The binary is `target/aarch64-unknown-linux-gnu/release/adsb-uart-sender`. On the Pi, omit `--target`.
+
+## Flags
+
+`--sample` sends two built-in aircraft instead of the live file.
+
+`--format struct` sends the binary packet.
 
 ## Snapshot
 
