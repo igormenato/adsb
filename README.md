@@ -1,4 +1,4 @@
-# adsb
+# trck
 
 ## UART
 
@@ -6,10 +6,10 @@ Disable the serial login shell and leave the UART enabled, or the console will s
 
 ## Run
 
-Copy `adsb-uart-sender` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi, then:
+Copy `trck` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi, then:
 
 ```
-./adsb-uart-sender
+./trck
 ```
 
 To build it (`gcc-aarch64-linux-gnu`):

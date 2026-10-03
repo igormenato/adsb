@@ -1,6 +1,6 @@
 //! Host test: aircraft.json becomes one TRCK snapshot. No radio and no UART.
 
-use adsb_uart_sender::{
+use trck::{
     crc16_ccitt_false, pack_snapshot, pack_snapshot_json, snapshot_from_aircraft_json,
     unpack_snapshot, SnapshotError, ALT_UNKNOWN, HEADING_UNKNOWN, POSITION_MAX_AGE_S,
     SPEED_UNKNOWN, TRACK_HEADER_LEN, TRACK_MAGIC, TRACK_MAX_AIRCRAFT, TRACK_RECORD_LEN,
@@ -10,7 +10,7 @@ fn json(body: &str) -> Vec<u8> {
     format!(r#"{{"now": 1700000000.9, "aircraft": [{body}]}}"#).into_bytes()
 }
 
-fn one(body: &str) -> adsb_uart_sender::Snapshot {
+fn one(body: &str) -> trck::Snapshot {
     snapshot_from_aircraft_json(&json(body)).expect("fixture")
 }
 
@@ -168,7 +168,7 @@ fn rejects_a_bad_document() {
 
 fn scratch_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "adsb-uart-sender-{name}-{}-{}",
+        "trck-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -193,7 +193,7 @@ fn sender_bin() -> std::path::PathBuf {
     let mut path = std::env::current_exe().expect("test executable");
     path.pop();
     path.pop();
-    path.push("adsb-uart-sender");
+    path.push("trck");
     path
 }
 
