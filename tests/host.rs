@@ -94,8 +94,13 @@ fn empty_sky_is_a_valid_snapshot() {
     assert_eq!(snapshot.unix_s, 10);
     assert!(snapshot.aircraft.is_empty());
     let packet = pack_snapshot(&snapshot);
-    assert_eq!(packet.len(), TRACK_HEADER_LEN + 2);
-    assert_eq!(unpack_snapshot(&packet).unwrap().aircraft.len(), 0);
+    assert_eq!(
+        packet,
+        [
+            0x54, 0x52, 0x43, 0x4b, 0x02, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0xdc, 0xad,
+        ]
+    );
+    assert_eq!(unpack_snapshot(&packet).as_ref(), Some(&snapshot));
 }
 
 #[test]
