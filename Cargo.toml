@@ -2,7 +2,7 @@
 name = "trck"
 version = "0.1.0"
 edition = "2021"
-description = "Send readsb aircraft tracks and emergency alerts to a UART once a second."
+description = "Send readsb aircraft tracks to a UART once a second."
 
 [[bin]]
 name = "trck"

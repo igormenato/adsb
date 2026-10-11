@@ -2,9 +2,9 @@
 
 use serde_json::Value;
 
-use crate::alert::EmergencyKind;
 use crate::frame::{
-    deg_e7, Aircraft, Snapshot, ALT_UNKNOWN, HEADING_UNKNOWN, SPEED_UNKNOWN, TRACK_MAX_AIRCRAFT,
+    deg_e7, Aircraft, EmergencyKind, Snapshot, ALT_UNKNOWN, HEADING_UNKNOWN, SPEED_UNKNOWN,
+    TRACK_MAX_AIRCRAFT,
 };
 
 /// A position older than this is left out. The snapshot time would otherwise label a stale fix as current.
@@ -30,28 +30,12 @@ impl std::fmt::Display for SnapshotError {
     }
 }
 
-/// The snapshot plus the emergency state of each selected aircraft, in the same order.
-pub(crate) struct SnapshotEmergency {
-    pub snapshot: Snapshot,
-    pub emergency: Vec<Option<EmergencyKind>>,
-}
-
 /// Aircraft with a latitude and longitude no older than [`POSITION_MAX_AGE_S`], freshest `seen_pos` first, at most 64.
 pub fn snapshot_from_aircraft_json(bytes: &[u8]) -> Result<Snapshot, SnapshotError> {
-    Ok(snapshot_with_emergency(bytes)?.snapshot)
-}
-
-pub(crate) fn snapshot_with_emergency(bytes: &[u8]) -> Result<SnapshotEmergency, SnapshotError> {
     let (unix_s, ranked) = ranked_aircraft(bytes)?;
-    let mut aircraft = Vec::with_capacity(ranked.len());
-    let mut emergency = Vec::with_capacity(ranked.len());
-    for entry in ranked {
-        aircraft.push(entry.aircraft);
-        emergency.push(entry.emergency);
-    }
-    Ok(SnapshotEmergency {
-        snapshot: Snapshot { unix_s, aircraft },
-        emergency,
+    Ok(Snapshot {
+        unix_s,
+        aircraft: ranked.into_iter().map(|entry| entry.aircraft).collect(),
     })
 }
 
@@ -59,7 +43,6 @@ struct Ranked {
     seen_pos: f64,
     index: usize,
     aircraft: Aircraft,
-    emergency: Option<EmergencyKind>,
 }
 
 fn ranked_aircraft(bytes: &[u8]) -> Result<(u32, Vec<Ranked>), SnapshotError> {
@@ -78,12 +61,11 @@ fn ranked_aircraft(bytes: &[u8]) -> Result<(u32, Vec<Ranked>), SnapshotError> {
 
     let mut ranked = Vec::new();
     for (index, entry) in list.iter().enumerate() {
-        if let Some((aircraft, seen_pos, emergency)) = aircraft_from_entry(entry) {
+        if let Some((aircraft, seen_pos)) = aircraft_from_entry(entry) {
             ranked.push(Ranked {
                 seen_pos,
                 index,
                 aircraft,
-                emergency,
             });
         }
     }
@@ -96,7 +78,7 @@ fn ranked_aircraft(bytes: &[u8]) -> Result<(u32, Vec<Ranked>), SnapshotError> {
     Ok((now.trunc() as u32, ranked))
 }
 
-fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64, Option<EmergencyKind>)> {
+fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64)> {
     let hex = entry.get("hex")?.as_str()?;
     let icao = parse_icao(hex)?;
     let latitude = finite_number(entry.get("lat")?)?;
@@ -116,26 +98,28 @@ fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64, Option<Emergency
             altitude_ft: altitude(entry),
             ground_speed_kt: ground_speed(entry),
             heading_deg: heading(entry),
+            emergency: emergency_kind(entry),
         },
         seen_pos,
-        emergency_kind(entry),
     ))
 }
 
-/// readsb `emergency` other than `none`, otherwise squawk 7700, 7600, or 7500.
-/// The emergency field wins when both are set.
+/// A readsb emergency name, or squawk 7700, 7600, or 7500 when that name is absent or `none`.
 fn emergency_kind(entry: &Value) -> Option<EmergencyKind> {
-    if let Some(kind) = kind_from_emergency_field(entry) {
-        return Some(kind);
+    match entry.get("emergency").and_then(Value::as_str) {
+        Some(text) => {
+            let text = text.trim();
+            if text.is_empty() || text.eq_ignore_ascii_case("none") {
+                kind_from_squawk(entry)
+            } else {
+                kind_from_name(text)
+            }
+        }
+        _ => kind_from_squawk(entry),
     }
-    kind_from_squawk(entry)
 }
 
-fn kind_from_emergency_field(entry: &Value) -> Option<EmergencyKind> {
-    let text = entry.get("emergency")?.as_str()?.trim();
-    if text.is_empty() || text.eq_ignore_ascii_case("none") {
-        return None;
-    }
+fn kind_from_name(text: &str) -> Option<EmergencyKind> {
     Some(if text.eq_ignore_ascii_case("general") {
         EmergencyKind::General
     } else if text.eq_ignore_ascii_case("lifeguard") {
@@ -149,7 +133,7 @@ fn kind_from_emergency_field(entry: &Value) -> Option<EmergencyKind> {
     } else if text.eq_ignore_ascii_case("downed") {
         EmergencyKind::Downed
     } else {
-        EmergencyKind::Reserved
+        return None;
     })
 }
 

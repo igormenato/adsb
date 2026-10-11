@@ -39,12 +39,12 @@ The sender writes one JSON object per line. Nothing is written when the snapshot
 | Offset | Size | Field |
 | --- | --- | --- |
 | 0 | 4 | `TRCK` |
-| 4 | u8 | version `1` |
+| 4 | u8 | version `2` |
 | 5 | u8 | reserved `0` |
 | 6 | u16 | aircraft count |
 | 8 | u32 | Unix time, seconds, from the file's `now` |
 
-Then one 20-byte record per aircraft:
+Then one 22-byte record per aircraft:
 
 | Offset | Size | Field |
 | --- | --- | --- |
@@ -54,13 +54,15 @@ Then one 20-byte record per aircraft:
 | 12 | i32 | altitude, feet |
 | 16 | u16 | ground speed, knots |
 | 18 | u16 | heading, degrees, 0–359 |
+| 20 | u8 | emergency, `0` when none |
+| 21 | u8 | reserved `0` |
 
 A CRC-16/CCITT-FALSE over every preceding byte follows the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`). `CRC("123456789") = 0x29B1`.
 
-## Alerts
+## Emergency
 
-Squawk 7700, 7600, or 7500, or an emergency state, opens a separate message after two cycles in a row. The aircraft stays in the snapshot. The alert is written first, and again each cycle until one cleared message. See `docs/esp32-alert.md`.
+`"emergency"` is present on an aircraft object only while one is active. The names are `general`, `lifeguard`, `minfuel`, `nordo`, `unlawful`, and `downed`. Squawk 7700, 7600, and 7500 map to `general`, `nordo`, and `unlawful` when readsb leaves the field unset or `none`. The first snapshot that includes the aircraft carries it. In the binary record the same state is the byte at offset 20: `0` none, `1` general, `2` unlawful, `3` nordo, `4` lifeguard, `5` minfuel, `6` downed. See `docs/esp32-alert.md`.
 
 ```
-{"alert":{"icao":4219421,"emergency":"general","latitude_e7":522572021,"longitude_e7":39193726,"altitude_ft":38000,"unix_s":1700000000,"cleared":false}}
+{"unix_s":1700000000,"aircraft":[{"icao":4219421,"latitude_e7":522572021,"longitude_e7":39193726,"altitude_ft":38000,"ground_speed_kt":450,"heading_deg":271,"emergency":"general"}]}
 ```

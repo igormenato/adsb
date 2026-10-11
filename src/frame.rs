@@ -7,9 +7,9 @@ use crc::{Crc, CRC_16_IBM_3740};
 const CCITT_FALSE: Crc<u16> = Crc::<u16>::new(&CRC_16_IBM_3740);
 
 pub const TRACK_MAGIC: &[u8; 4] = b"TRCK";
-pub const TRACK_VERSION: u8 = 1;
+pub const TRACK_VERSION: u8 = 2;
 pub const TRACK_HEADER_LEN: usize = 12;
-pub const TRACK_RECORD_LEN: usize = 20;
+pub const TRACK_RECORD_LEN: usize = 22;
 pub const TRACK_MAX_AIRCRAFT: usize = 64;
 pub const SPEED_UNKNOWN: u16 = 0xFFFF;
 pub const HEADING_UNKNOWN: u16 = 0xFFFF;
@@ -18,6 +18,48 @@ pub const ALT_UNKNOWN: i32 = i32::MIN;
 /// CRC-16/CCITT-FALSE. `crc16_ccitt_false(b"123456789") == 0x29B1`.
 pub fn crc16_ccitt_false(data: &[u8]) -> u16 {
     CCITT_FALSE.checksum(data)
+}
+
+/// Emergency on the aircraft record. `0` in the binary record, and the JSON key omitted, when none is set.
+/// Codes: 1 general, 2 unlawful, 3 nordo, 4 lifeguard, 5 minfuel, 6 downed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EmergencyKind {
+    General = 1,
+    Unlawful = 2,
+    Nordo = 3,
+    Lifeguard = 4,
+    MinFuel = 5,
+    Downed = 6,
+}
+
+impl EmergencyKind {
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            1 => Self::General,
+            2 => Self::Unlawful,
+            3 => Self::Nordo,
+            4 => Self::Lifeguard,
+            5 => Self::MinFuel,
+            6 => Self::Downed,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Unlawful => "unlawful",
+            Self::Nordo => "nordo",
+            Self::Lifeguard => "lifeguard",
+            Self::MinFuel => "minfuel",
+            Self::Downed => "downed",
+        }
+    }
 }
 
 /// One aircraft that already has a position.
@@ -29,6 +71,7 @@ pub struct Aircraft {
     pub altitude_ft: i32,
     pub ground_speed_kt: u16,
     pub heading_deg: u16,
+    pub emergency: Option<EmergencyKind>,
 }
 
 /// The tracks from one `aircraft.json`, capped at [`TRACK_MAX_AIRCRAFT`].
@@ -64,6 +107,8 @@ pub fn pack_snapshot(snapshot: &Snapshot) -> Vec<u8> {
         raw.extend_from_slice(&aircraft.altitude_ft.to_le_bytes());
         raw.extend_from_slice(&aircraft.ground_speed_kt.to_le_bytes());
         raw.extend_from_slice(&aircraft.heading_deg.to_le_bytes());
+        raw.push(aircraft.emergency.map(EmergencyKind::code).unwrap_or(0));
+        raw.push(0);
     }
     let crc = crc16_ccitt_false(&raw);
     raw.extend_from_slice(&crc.to_le_bytes());
@@ -92,6 +137,11 @@ pub fn pack_snapshot_json(snapshot: &Snapshot) -> Vec<u8> {
         push_num(&mut raw, aircraft.ground_speed_kt);
         raw.extend_from_slice(b",\"heading_deg\":");
         push_num(&mut raw, aircraft.heading_deg);
+        if let Some(emergency) = aircraft.emergency {
+            raw.extend_from_slice(b",\"emergency\":\"");
+            raw.extend_from_slice(emergency.as_str().as_bytes());
+            raw.push(b'"');
+        }
         raw.push(b'}');
     }
     raw.extend_from_slice(b"]}\n");
@@ -127,6 +177,9 @@ pub fn unpack_snapshot(bytes: &[u8]) -> Option<Snapshot> {
     let mut aircraft = Vec::with_capacity(count);
     for index in 0..count {
         let rec = &bytes[TRACK_HEADER_LEN + index * TRACK_RECORD_LEN..];
+        if rec[21] != 0 {
+            return None;
+        }
         aircraft.push(Aircraft {
             icao: u32::from_le_bytes(rec[0..4].try_into().ok()?) & 0x00ff_ffff,
             latitude_e7: i32::from_le_bytes(rec[4..8].try_into().ok()?),
@@ -134,6 +187,10 @@ pub fn unpack_snapshot(bytes: &[u8]) -> Option<Snapshot> {
             altitude_ft: i32::from_le_bytes(rec[12..16].try_into().ok()?),
             ground_speed_kt: u16::from_le_bytes(rec[16..18].try_into().ok()?),
             heading_deg: u16::from_le_bytes(rec[18..20].try_into().ok()?),
+            emergency: match rec[20] {
+                0 => None,
+                code => Some(EmergencyKind::from_code(code)?),
+            },
         });
     }
     Some(Snapshot { unix_s, aircraft })

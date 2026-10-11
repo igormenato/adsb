@@ -1,88 +1,74 @@
-# ESP32 alert forwarding
+# ESP32 snapshot forwarding
 
-The Raspberry Pi detects aircraft emergencies. The ESP32 does not decode ADS-B. It recognizes an alert message, forwards that message unchanged, and sends it ahead of the routine snapshot.
+The Raspberry Pi sends one aircraft snapshot per second. An emergency is a field on an aircraft in that snapshot. There is one packet type. The ESP32 does not decode ADS-B. It forwards each snapshot unchanged.
 
 JSON is the default. `--format struct` is the binary snapshot. Do not mix the two on one link.
 
 ## What you do
 
 1. Read the UART at 115200 baud, 8 data bits, no parity, 1 stop bit.
-2. Recognize an alert by its prefix only. Do not read the ICAO, the emergency name, the position, or the altitude.
-3. Forward the alert bytes unchanged, as their own telemetry message.
-4. Send every alert before the routine snapshot from the same cycle. The Pi already writes alerts first. If you buffer a cycle, drain the alerts before the snapshot.
-5. Leave the aircraft in the snapshot. Do not merge the alert into the snapshot, and do not split the alert across snapshot slices.
+2. Forward each snapshot unchanged, as one telemetry message.
+3. An empty sky produces no bytes.
 
-A cycle may be one or more alerts and then one snapshot, alerts only, or a snapshot only. The first cycle an emergency appears, there is no alert yet. The alert starts on the second consecutive cycle.
+The ground station highlights an aircraft whose emergency field is set, and clears that highlight when a later snapshot has no emergency for that ICAO.
 
 ## JSON lines
 
-This is the default (`--format json`). Each message is one line ending in `0x0A`.
+This is the default (`--format json`). Each snapshot is one line ending in `0x0A`. A line starts with `{"unix_s":`.
 
-An alert line starts with `{"alert":`. A snapshot line starts with `{"unix_s":`.
-
-Active alert, sent when the alert opens and again every cycle while it stays open:
+`"emergency"` is present on an aircraft object only while an emergency is active. The names are `general`, `lifeguard`, `minfuel`, `nordo`, `unlawful`, and `downed`. When there is no emergency, the key is absent.
 
 ```
-{"alert":{"icao":4219421,"emergency":"general","latitude_e7":522572021,"longitude_e7":39193726,"altitude_ft":38000,"unix_s":1700000000,"cleared":false}}
+{"unix_s":1700000000,"aircraft":[{"icao":4197052,"latitude_e7":105000000,"longitude_e7":-202500000,"altitude_ft":12000,"ground_speed_kt":280,"heading_deg":90},{"icao":4219421,"latitude_e7":522572021,"longitude_e7":39193726,"altitude_ft":38000,"ground_speed_kt":450,"heading_deg":271,"emergency":"general"}]}
 ```
 
-Cleared alert, sent once when the emergency ends or the aircraft leaves the snapshot:
-
-```
-{"alert":{"icao":4219421,"emergency":"general","latitude_e7":522572021,"longitude_e7":39193726,"altitude_ft":38000,"unix_s":1700000002,"cleared":true}}
-```
-
-Forward the whole line, including the newline. The cleared line is still an alert: same prefix, `"cleared":true`.
-
-| Bytes | Message |
-| --- | --- |
-| `{"alert":` | alert, including the cleared line |
-| `{"unix_s":` | routine snapshot |
+Forward the whole line, including the newline. Squawk 7700, 7600, and 7500 become `general`, `nordo`, and `unlawful` when readsb leaves `emergency` unset or `none`. A readsb emergency name is used as written.
 
 ## Struct packets
 
-Only when the Pi is started with `--format struct`. Messages are back to back, with no extra bytes between them.
+Only when the Pi is started with `--format struct`. Each snapshot starts with `TRCK` (`54 52 43 4B`).
 
-An alert starts with `ALRT` (`41 4C 52 54`) and is always 30 bytes. A snapshot starts with `TRCK` and keeps its existing layout.
+The header stays 12 bytes. The version byte is `2`. Each aircraft record is 22 bytes: the previous 20-byte track, then the emergency byte, then a reserved byte that is `0`.
 
-Active alert, the same aircraft as the JSON line above:
-
-```
-41 4C 52 54 01 00 01 00 1D 62 40 00 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 00 F1 53 65 C9 DD
-```
-
-Cleared alert (`unix_s` 1700000002):
+The same two aircraft as the JSON line above:
 
 ```
-41 4C 52 54 01 01 01 00 1D 62 40 00 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 02 F1 53 65 AA 55
+54 52 43 4B 02 00 02 00 00 F1 53 65 BC 0A 40 00 40 2C 42 06 60 18 EE F3 E0 2E 00 00 18 01 5A 00 00 00 1D 62 40 00 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 0F 01 01 00 5D FD
 ```
 
-Forward those 30 bytes unchanged.
+Forward those bytes unchanged. The length is `14 + 22N` for `N` aircraft.
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 0 | 4 | `ALRT` |
-| 4 | u8 | version `1` |
-| 5 | u8 | `0` active, `1` cleared |
-| 6 | u8 | emergency type |
-| 7 | u8 | reserved `0` |
-| 8 | u32 | ICAO address in the low 24 bits |
-| 12 | i32 | latitude, degrees × 1e7 |
-| 16 | i32 | longitude, degrees × 1e7 |
-| 20 | i32 | altitude, feet |
-| 24 | u32 | Unix time, seconds |
-| 28 | u16 | CRC-16/CCITT-FALSE over the preceding bytes |
+| 0 | 4 | `TRCK` |
+| 4 | u8 | version `2` |
+| 5 | u8 | reserved `0` |
+| 6 | u16 | aircraft count |
+| 8 | u32 | Unix time, seconds |
 
-Little-endian. The CRC is the same one as `TRCK`: poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`. Drop a packet whose CRC fails. The next `ALRT` or `TRCK` realigns the stream.
+Then one record per aircraft:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | u32 | ICAO address in the low 24 bits |
+| 4 | i32 | latitude, degrees × 1e7 |
+| 8 | i32 | longitude, degrees × 1e7 |
+| 12 | i32 | altitude, feet |
+| 16 | u16 | ground speed, knots |
+| 18 | u16 | heading, degrees, 0–359 |
+| 20 | u8 | emergency |
+| 21 | u8 | reserved `0` |
+
+Little-endian. CRC-16/CCITT-FALSE covers the header and the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`) and follows them as a `u16`. Drop a packet whose CRC fails. The next `TRCK` realigns the stream.
 
 | Code | Name |
 | --- | --- |
+| 0 | none |
 | 1 | general (squawk 7700) |
-| 2 | lifeguard |
-| 3 | minfuel |
-| 4 | nordo (squawk 7600, radio failure) |
-| 5 | unlawful (squawk 7500) |
+| 2 | unlawful (squawk 7500) |
+| 3 | nordo (squawk 7600, radio failure) |
+| 4 | lifeguard |
+| 5 | minfuel |
 | 6 | downed |
-| 7 | reserved |
 
 You do not need the code to forward the packet. The ground station reads it.
