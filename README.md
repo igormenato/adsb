@@ -56,3 +56,11 @@ Then one 20-byte record per aircraft:
 | 18 | u16 | heading, degrees, 0–359 |
 
 A CRC-16/CCITT-FALSE over every preceding byte follows the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`). `CRC("123456789") = 0x29B1`.
+
+## Alerts
+
+Squawk 7700, 7600, or 7500, or an emergency state, opens a separate message after two cycles in a row. The aircraft stays in the snapshot. The alert is written first, and again each cycle until one cleared message. See `docs/esp32-alert.md`.
+
+```
+{"alert":{"icao":4219421,"emergency":"general","latitude_e7":522572021,"longitude_e7":39193726,"altitude_ft":38000,"unix_s":1700000000,"cleared":false}}
+```

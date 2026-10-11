@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{pack_snapshot, pack_snapshot_json, snapshot_from_aircraft_json};
+use trck::{pack_alert, pack_alert_json, pack_snapshot, pack_snapshot_json, AlertTracker};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
@@ -23,7 +23,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_SLICE: Duration = Duration::from_millis(50);
 
 #[derive(Parser, Debug)]
-#[command(about = "Send readsb aircraft tracks to a UART once a second.")]
+#[command(about = "Send readsb aircraft tracks and emergency alerts to a UART once a second.")]
 struct Args {
     /// Path to readsb aircraft.json.
     #[arg(long, default_value = DEFAULT_JSON)]
@@ -214,6 +214,7 @@ fn main() -> ExitCode {
         }
     );
 
+    let mut alerts = AlertTracker::new();
     while !stop.load(Ordering::Relaxed) {
         let loaded = if args.sample {
             Ok(SAMPLE_AIRCRAFT_JSON.as_bytes().to_vec())
@@ -221,14 +222,23 @@ fn main() -> ExitCode {
             fs::read(&args.json)
         };
         match loaded {
-            Ok(bytes) => match snapshot_from_aircraft_json(&bytes) {
-                Ok(snapshot) => {
-                    if !snapshot.aircraft.is_empty() {
-                        let packet = match args.format {
-                            Format::Struct => pack_snapshot(&snapshot),
-                            Format::Json => pack_snapshot_json(&snapshot),
-                        };
-                        if let Err(err) = output.write_chunk(&packet) {
+            Ok(bytes) => match alerts.cycle(&bytes) {
+                Ok(cycle) => {
+                    let mut packets = Vec::with_capacity(cycle.alerts.len() + 1);
+                    for alert in &cycle.alerts {
+                        packets.push(match args.format {
+                            Format::Struct => pack_alert(alert),
+                            Format::Json => pack_alert_json(alert),
+                        });
+                    }
+                    if !cycle.snapshot.aircraft.is_empty() {
+                        packets.push(match args.format {
+                            Format::Struct => pack_snapshot(&cycle.snapshot),
+                            Format::Json => pack_snapshot_json(&cycle.snapshot),
+                        });
+                    }
+                    for packet in &packets {
+                        if let Err(err) = output.write_chunk(packet) {
                             return match err {
                                 ChunkError::Stopped => {
                                     eprintln!("stopped");
@@ -242,9 +252,10 @@ fn main() -> ExitCode {
                         }
                     }
                     eprintln!(
-                        "snapshot t={} aircraft={}",
-                        snapshot.unix_s,
-                        snapshot.aircraft.len()
+                        "snapshot t={} aircraft={} alerts={}",
+                        cycle.snapshot.unix_s,
+                        cycle.snapshot.aircraft.len(),
+                        cycle.alerts.len()
                     );
                 }
                 Err(err) => eprintln!("aircraft.json: {err}"),
