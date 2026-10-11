@@ -71,6 +71,8 @@ pub struct Aircraft {
     pub altitude_ft: i32,
     pub ground_speed_kt: u16,
     pub heading_deg: u16,
+    /// Whole seconds of `seen_pos`, from 0 through 255.
+    pub position_age_s: u8,
     pub emergency: Option<EmergencyKind>,
 }
 
@@ -108,7 +110,7 @@ pub fn pack_snapshot(snapshot: &Snapshot) -> Vec<u8> {
         raw.extend_from_slice(&aircraft.ground_speed_kt.to_le_bytes());
         raw.extend_from_slice(&aircraft.heading_deg.to_le_bytes());
         raw.push(aircraft.emergency.map(EmergencyKind::code).unwrap_or(0));
-        raw.push(0);
+        raw.push(aircraft.position_age_s);
     }
     let crc = crc16_ccitt_false(&raw);
     raw.extend_from_slice(&crc.to_le_bytes());
@@ -137,6 +139,8 @@ pub fn pack_snapshot_json(snapshot: &Snapshot) -> Vec<u8> {
         push_num(&mut raw, aircraft.ground_speed_kt);
         raw.extend_from_slice(b",\"heading_deg\":");
         push_num(&mut raw, aircraft.heading_deg);
+        raw.extend_from_slice(b",\"position_age_s\":");
+        push_num(&mut raw, aircraft.position_age_s);
         if let Some(emergency) = aircraft.emergency {
             raw.extend_from_slice(b",\"emergency\":\"");
             raw.extend_from_slice(emergency.as_str().as_bytes());
@@ -177,9 +181,6 @@ pub fn unpack_snapshot(bytes: &[u8]) -> Option<Snapshot> {
     let mut aircraft = Vec::with_capacity(count);
     for index in 0..count {
         let rec = &bytes[TRACK_HEADER_LEN + index * TRACK_RECORD_LEN..];
-        if rec[21] != 0 {
-            return None;
-        }
         aircraft.push(Aircraft {
             icao: u32::from_le_bytes(rec[0..4].try_into().ok()?) & 0x00ff_ffff,
             latitude_e7: i32::from_le_bytes(rec[4..8].try_into().ok()?),
@@ -187,6 +188,7 @@ pub fn unpack_snapshot(bytes: &[u8]) -> Option<Snapshot> {
             altitude_ft: i32::from_le_bytes(rec[12..16].try_into().ok()?),
             ground_speed_kt: u16::from_le_bytes(rec[16..18].try_into().ok()?),
             heading_deg: u16::from_le_bytes(rec[18..20].try_into().ok()?),
+            position_age_s: rec[21],
             emergency: match rec[20] {
                 0 => None,
                 code => Some(EmergencyKind::from_code(code)?),

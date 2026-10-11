@@ -2,9 +2,9 @@
 
 use trck::{
     crc16_ccitt_false, pack_snapshot, pack_snapshot_json, snapshot_from_aircraft_json,
-    unpack_snapshot, EmergencyKind, SnapshotError, ALT_UNKNOWN, HEADING_UNKNOWN,
-    POSITION_MAX_AGE_S, SPEED_UNKNOWN, TRACK_HEADER_LEN, TRACK_MAGIC, TRACK_MAX_AIRCRAFT,
-    TRACK_RECORD_LEN, TRACK_VERSION,
+    unpack_snapshot, EmergencyKind, SnapshotError, ALT_UNKNOWN, EMERGENCY_POSITION_MAX_AGE_S,
+    HEADING_UNKNOWN, POSITION_MAX_AGE_S, SPEED_UNKNOWN, TRACK_HEADER_LEN, TRACK_MAGIC,
+    TRACK_MAX_AIRCRAFT, TRACK_RECORD_LEN, TRACK_VERSION,
 };
 
 fn json(body: &str) -> Vec<u8> {
@@ -33,13 +33,14 @@ fn published_track_and_crc() {
     assert_eq!(aircraft.ground_speed_kt, 450);
     assert_eq!(aircraft.heading_deg, 271);
     assert_eq!(aircraft.emergency, None);
+    assert_eq!(aircraft.position_age_s, 1);
 
     let packet = pack_snapshot(&snapshot);
     assert_eq!(&packet[0..4], b"TRCK");
     assert_eq!(packet[4], TRACK_VERSION);
     assert_eq!(TRACK_VERSION, 2);
     assert_eq!(packet[TRACK_HEADER_LEN + 20], 0);
-    assert_eq!(packet[TRACK_HEADER_LEN + 21], 0);
+    assert_eq!(packet[TRACK_HEADER_LEN + 21], 1);
     assert_eq!(packet.len(), TRACK_HEADER_LEN + TRACK_RECORD_LEN + 2);
     assert_eq!(unpack_snapshot(&packet).as_ref(), Some(&snapshot));
 
@@ -72,7 +73,7 @@ fn json_line_uses_the_struct_fields() {
     );
     assert_eq!(
         pack_snapshot_json(&snapshot),
-        b"{\"unix_s\":1700000000,\"aircraft\":[{\"icao\":4219421,\"latitude_e7\":522572021,\"longitude_e7\":39193726,\"altitude_ft\":38000,\"ground_speed_kt\":450,\"heading_deg\":271}]}\n"
+        b"{\"unix_s\":1700000000,\"aircraft\":[{\"icao\":4219421,\"latitude_e7\":522572021,\"longitude_e7\":39193726,\"altitude_ft\":38000,\"ground_speed_kt\":450,\"heading_deg\":271,\"position_age_s\":1}]}\n"
     );
     let empty = snapshot_from_aircraft_json(br#"{"now": 10, "aircraft": []}"#).unwrap();
     assert_eq!(
@@ -96,9 +97,7 @@ fn empty_sky_is_a_valid_snapshot() {
     let packet = pack_snapshot(&snapshot);
     assert_eq!(
         packet,
-        [
-            0x54, 0x52, 0x43, 0x4b, 0x02, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0xdc, 0xad,
-        ]
+        [0x54, 0x52, 0x43, 0x4b, 0x02, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0xdc, 0xad,]
     );
     assert_eq!(unpack_snapshot(&packet).as_ref(), Some(&snapshot));
 }
@@ -147,6 +146,7 @@ fn drops_a_bad_hex() {
 #[test]
 fn drops_a_stale_position() {
     assert_eq!(POSITION_MAX_AGE_S, 2.0);
+    assert_eq!(EMERGENCY_POSITION_MAX_AGE_S, 30.0);
     let snapshot = one(r#"{"hex":"000001","lat":1,"lon":2,"seen_pos":2},
            {"hex":"000002","lat":1,"lon":2,"seen_pos":2.01},
            {"hex":"000003","lat":1,"lon":2},
@@ -447,34 +447,36 @@ fn emergency_is_on_the_aircraft_in_the_first_snapshot() {
     let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
     let aircraft = value["aircraft"].as_array().unwrap();
     assert_eq!(aircraft.len(), 2);
-    assert!(aircraft[0].get("emergency").is_none());
-    assert_eq!(aircraft[0]["icao"], 0x400ABC);
-    assert_eq!(aircraft[1]["emergency"], "general");
-    assert_eq!(aircraft[1]["icao"], 0x40621D);
+    assert_eq!(aircraft[0]["icao"], 0x40621D);
+    assert_eq!(aircraft[0]["emergency"], "general");
+    assert_eq!(aircraft[0]["position_age_s"], 1);
+    assert_eq!(aircraft[1]["icao"], 0x400ABC);
+    assert!(aircraft[1].get("emergency").is_none());
+    assert_eq!(aircraft[1]["position_age_s"], 0);
 
     let packet = pack_snapshot(&snapshot);
     assert_eq!(
         packet,
         [
-            0x54, 0x52, 0x43, 0x4b, 0x02, 0x00, 0x02, 0x00, 0x00, 0xf1, 0x53, 0x65, 0xbc, 0x0a,
-            0x40, 0x00, 0x40, 0x2c, 0x42, 0x06, 0x60, 0x18, 0xee, 0xf3, 0xe0, 0x2e, 0x00, 0x00,
-            0x18, 0x01, 0x5a, 0x00, 0x00, 0x00, 0x1d, 0x62, 0x40, 0x00, 0xf5, 0xd0, 0x25, 0x1f,
-            0x7e, 0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00, 0xc2, 0x01, 0x0f, 0x01, 0x01, 0x00,
-            0x5d, 0xfd,
+            0x54, 0x52, 0x43, 0x4b, 0x02, 0x00, 0x02, 0x00, 0x00, 0xf1, 0x53, 0x65, 0x1d, 0x62,
+            0x40, 0x00, 0xf5, 0xd0, 0x25, 0x1f, 0x7e, 0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00,
+            0xc2, 0x01, 0x0f, 0x01, 0x01, 0x01, 0xbc, 0x0a, 0x40, 0x00, 0x40, 0x2c, 0x42, 0x06,
+            0x60, 0x18, 0xee, 0xf3, 0xe0, 0x2e, 0x00, 0x00, 0x18, 0x01, 0x5a, 0x00, 0x00, 0x00,
+            0xed, 0x1c,
         ]
     );
     assert_eq!(&packet[..4], TRACK_MAGIC);
     assert_eq!(packet[4], TRACK_VERSION);
     assert_eq!(packet.len(), TRACK_HEADER_LEN + 2 * TRACK_RECORD_LEN + 2);
-    assert_eq!(packet[TRACK_HEADER_LEN + 20], 0);
-    assert_eq!(packet[TRACK_HEADER_LEN + 21], 0);
-    let emergency_at = TRACK_HEADER_LEN + TRACK_RECORD_LEN;
-    assert_eq!(packet[emergency_at + 20], EmergencyKind::General.code());
-    assert_eq!(packet[emergency_at + 21], 0);
+    assert_eq!(packet[TRACK_HEADER_LEN + 20], EmergencyKind::General.code());
+    assert_eq!(packet[TRACK_HEADER_LEN + 21], 1);
+    let normal_at = TRACK_HEADER_LEN + TRACK_RECORD_LEN;
+    assert_eq!(packet[normal_at + 20], 0);
+    assert_eq!(packet[normal_at + 21], 0);
     assert_eq!(unpack_snapshot(&packet).as_ref(), Some(&snapshot));
 
     let mut flipped = packet.clone();
-    flipped[emergency_at + 20] ^= 0x01;
+    flipped[TRACK_HEADER_LEN + 20] ^= 0x01;
     assert!(unpack_snapshot(&flipped).is_none());
 }
 
@@ -586,12 +588,12 @@ fn emergency_json_and_record_bytes() {
     );
     assert_eq!(
         pack_snapshot_json(&snapshot),
-        b"{\"unix_s\":1700000000,\"aircraft\":[{\"icao\":4219421,\"latitude_e7\":522572021,\"longitude_e7\":39193726,\"altitude_ft\":38000,\"ground_speed_kt\":450,\"heading_deg\":271,\"emergency\":\"general\"}]}\n"
+        b"{\"unix_s\":1700000000,\"aircraft\":[{\"icao\":4219421,\"latitude_e7\":522572021,\"longitude_e7\":39193726,\"altitude_ft\":38000,\"ground_speed_kt\":450,\"heading_deg\":271,\"position_age_s\":1,\"emergency\":\"general\"}]}\n"
     );
     let packet = [
         0x54, 0x52, 0x43, 0x4b, 0x02, 0x00, 0x01, 0x00, 0x00, 0xf1, 0x53, 0x65, 0x1d, 0x62, 0x40,
         0x00, 0xf5, 0xd0, 0x25, 0x1f, 0x7e, 0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00, 0xc2, 0x01,
-        0x0f, 0x01, 0x01, 0x00, 0x1e, 0x74,
+        0x0f, 0x01, 0x01, 0x01, 0x3f, 0x64,
     ];
     assert_eq!(packet.len(), TRACK_HEADER_LEN + TRACK_RECORD_LEN + 2);
     assert_eq!(pack_snapshot(&snapshot), packet);
@@ -601,9 +603,13 @@ fn emergency_json_and_record_bytes() {
     version_one[4] = 1;
     assert!(unpack_snapshot(&signed_packet(version_one)).is_none());
 
-    let mut reserved = packet[..packet.len() - 2].to_vec();
-    reserved[TRACK_HEADER_LEN + 21] = 1;
-    assert!(unpack_snapshot(&signed_packet(reserved)).is_none());
+    let mut aged = packet[..packet.len() - 2].to_vec();
+    aged[TRACK_HEADER_LEN + 21] = 10;
+    let aged = signed_packet(aged);
+    assert_eq!(
+        unpack_snapshot(&aged).unwrap().aircraft[0].position_age_s,
+        10
+    );
 
     let mut unknown = packet[..packet.len() - 2].to_vec();
     unknown[TRACK_HEADER_LEN + 20] = 7;
@@ -611,28 +617,82 @@ fn emergency_json_and_record_bytes() {
 }
 
 #[test]
-fn an_emergency_without_a_fresh_position_is_left_out() {
+fn an_emergency_without_a_position_is_left_out() {
     let body = r#"{"hex":"40621d","squawk":"7700","emergency":"general"},
-        {"hex":"40621e","lat":53,"lon":4,"seen_pos":2.01,"squawk":"7600"},
+        {"hex":"40621e","lat":53,"lon":4,"seen_pos":30.01,"squawk":"7600"},
         {"hex":"40621f","lat":53,"lon":4,"squawk":"7500"},
+        {"hex":"000001","lat":1,"lon":2,"seen_pos":2.01},
         {"hex":"400abc","lat":10.5,"lon":-20.25,"alt_baro":12000,"seen_pos":0.4,"alert":1,"squawk":"1000","emergency":"none"}"#;
     let snapshot = snapshot_from_aircraft_json(&doc(30, body)).unwrap();
     assert_eq!(snapshot.aircraft.len(), 1);
     assert_eq!(snapshot.aircraft[0].icao, 0x400ABC);
     assert_eq!(snapshot.aircraft[0].emergency, None);
+    assert_eq!(snapshot.aircraft[0].position_age_s, 0);
     let line = pack_snapshot_json(&snapshot);
-    assert!(
-        serde_json::from_slice::<serde_json::Value>(&line).unwrap()["aircraft"][0]
-            .get("emergency")
-            .is_none()
+    assert_eq!(
+        line,
+        b"{\"unix_s\":30,\"aircraft\":[{\"icao\":4197052,\"latitude_e7\":105000000,\"longitude_e7\":-202500000,\"altitude_ft\":12000,\"ground_speed_kt\":65535,\"heading_deg\":65535,\"position_age_s\":0}]}\n"
+    );
+}
+
+#[test]
+fn an_emergency_position_is_kept_for_thirty_seconds() {
+    let kept = one(
+        r#"{"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"seen_pos":30,"emergency":"general"}"#,
+    );
+    assert_eq!(kept.aircraft.len(), 1);
+    assert_eq!(kept.aircraft[0].icao, 0x40621D);
+    assert_eq!(kept.aircraft[0].emergency, Some(EmergencyKind::General));
+    assert_eq!(kept.aircraft[0].position_age_s, 30);
+    assert_eq!(
+        pack_snapshot_json(&kept),
+        b"{\"unix_s\":1700000000,\"aircraft\":[{\"icao\":4219421,\"latitude_e7\":522572021,\"longitude_e7\":39193726,\"altitude_ft\":38000,\"ground_speed_kt\":450,\"heading_deg\":271,\"position_age_s\":30,\"emergency\":\"general\"}]}\n"
+    );
+    assert_eq!(
+        pack_snapshot(&kept),
+        [
+            0x54, 0x52, 0x43, 0x4b, 0x02, 0x00, 0x01, 0x00, 0x00, 0xf1, 0x53, 0x65, 0x1d, 0x62,
+            0x40, 0x00, 0xf5, 0xd0, 0x25, 0x1f, 0x7e, 0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00,
+            0xc2, 0x01, 0x0f, 0x01, 0x01, 0x1e, 0xe1, 0x87,
+        ]
     );
 
-    let kept = snapshot_from_aircraft_json(&doc(
-        31,
-        r#"{"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"seen_pos":2,"squawk":"7700"}"#,
-    ))
-    .unwrap();
-    assert_eq!(kept.aircraft[0].emergency, Some(EmergencyKind::General));
+    let fractional = one(
+        r#"{"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"seen_pos":2.9,"emergency":"general"}"#,
+    );
+    assert_eq!(fractional.aircraft[0].position_age_s, 2);
+    assert_eq!(pack_snapshot(&fractional)[TRACK_HEADER_LEN + 21], 2);
+
+    let boundary = one(r#"{"hex":"000002","lat":1,"lon":2,"seen_pos":2,"squawk":"7700"}"#);
+    assert_eq!(boundary.aircraft[0].position_age_s, 2);
+    assert_eq!(boundary.aircraft[0].emergency, Some(EmergencyKind::General));
+}
+
+#[test]
+fn keeps_an_older_emergency_when_sixty_four_normals_are_fresh() {
+    let mut entries = Vec::new();
+    for index in 0..64 {
+        entries.push(format!(
+            r#"{{"hex":"{index:06x}","lat":1,"lon":2,"seen_pos":{}}}"#,
+            index as f64 / 100.0
+        ));
+    }
+    entries.push(r#"{"hex":"000100","lat":3,"lon":4,"seen_pos":10,"squawk":"7700"}"#.to_string());
+    let snapshot = one(&entries.join(","));
+    assert_eq!(snapshot.aircraft.len(), TRACK_MAX_AIRCRAFT);
+    assert_eq!(snapshot.aircraft[0].icao, 0x100);
+    assert_eq!(snapshot.aircraft[0].emergency, Some(EmergencyKind::General));
+    assert_eq!(snapshot.aircraft[0].position_age_s, 10);
+    assert!(snapshot.aircraft.iter().any(|aircraft| aircraft.icao == 0));
+    assert!(snapshot.aircraft.iter().all(|aircraft| aircraft.icao != 63));
+    let packet = pack_snapshot(&snapshot);
+    assert_eq!(
+        &packet[TRACK_HEADER_LEN..TRACK_HEADER_LEN + TRACK_RECORD_LEN],
+        &[
+            0x00, 0x01, 0x00, 0x00, 0x80, 0xc3, 0xc9, 0x01, 0x00, 0x5a, 0x62, 0x02, 0x00, 0x00,
+            0x00, 0x80, 0xff, 0xff, 0xff, 0xff, 0x01, 0x0a,
+        ]
+    );
 }
 
 fn read_stdout(
@@ -716,7 +776,7 @@ fn positionless_emergency_sends_an_empty_snapshot() {
     let path = dir.join("aircraft.json");
     std::fs::write(
         &path,
-        r#"{"now":10,"aircraft":[{"hex":"40621d","squawk":"7700","emergency":"general"},{"hex":"40621e","lat":53,"lon":4,"seen_pos":5,"squawk":"7600"}]}"#,
+        r#"{"now":10,"aircraft":[{"hex":"40621d","squawk":"7700","emergency":"general"},{"hex":"40621e","lat":53,"lon":4,"seen_pos":31,"squawk":"7600"}]}"#,
     )
     .unwrap();
     let mut sender = spawn_sender(&path);

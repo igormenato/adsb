@@ -8,4 +8,6 @@ pub use frame::{
     EmergencyKind, Snapshot, ALT_UNKNOWN, HEADING_UNKNOWN, SPEED_UNKNOWN, TRACK_HEADER_LEN,
     TRACK_MAGIC, TRACK_MAX_AIRCRAFT, TRACK_RECORD_LEN, TRACK_VERSION,
 };
-pub use snapshot::{snapshot_from_aircraft_json, SnapshotError, POSITION_MAX_AGE_S};
+pub use snapshot::{
+    snapshot_from_aircraft_json, SnapshotError, EMERGENCY_POSITION_MAX_AGE_S, POSITION_MAX_AGE_S,
+};

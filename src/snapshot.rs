@@ -7,8 +7,11 @@ use crate::frame::{
     TRACK_MAX_AIRCRAFT,
 };
 
-/// A position older than this is left out. The snapshot time would otherwise label a stale fix as current.
+/// A non-emergency position older than this is left out. The snapshot time would otherwise label a stale fix as current.
 pub const POSITION_MAX_AGE_S: f64 = 2.0;
+
+/// An emergency that still has a latitude and longitude is kept until this age.
+pub const EMERGENCY_POSITION_MAX_AGE_S: f64 = 30.0;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -30,7 +33,7 @@ impl std::fmt::Display for SnapshotError {
     }
 }
 
-/// Aircraft with a latitude and longitude no older than [`POSITION_MAX_AGE_S`], freshest `seen_pos` first, at most 64.
+/// Qualifying aircraft, emergencies first, then the freshest `seen_pos`, at most 64.
 pub fn snapshot_from_aircraft_json(bytes: &[u8]) -> Result<Snapshot, SnapshotError> {
     let (unix_s, ranked) = ranked_aircraft(bytes)?;
     Ok(Snapshot {
@@ -70,8 +73,11 @@ fn ranked_aircraft(bytes: &[u8]) -> Result<(u32, Vec<Ranked>), SnapshotError> {
         }
     }
     ranked.sort_by(|a, b| {
-        a.seen_pos
-            .total_cmp(&b.seen_pos)
+        b.aircraft
+            .emergency
+            .is_some()
+            .cmp(&a.aircraft.emergency.is_some())
+            .then(a.seen_pos.total_cmp(&b.seen_pos))
             .then(a.index.cmp(&b.index))
     });
     ranked.truncate(TRACK_MAX_AIRCRAFT);
@@ -87,7 +93,13 @@ fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64)> {
         return None;
     }
     let seen_pos = finite_number(entry.get("seen_pos")?)?;
-    if seen_pos > POSITION_MAX_AGE_S {
+    let emergency = emergency_kind(entry);
+    let max_age = if emergency.is_some() {
+        EMERGENCY_POSITION_MAX_AGE_S
+    } else {
+        POSITION_MAX_AGE_S
+    };
+    if seen_pos > max_age {
         return None;
     }
     Some((
@@ -98,10 +110,24 @@ fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64)> {
             altitude_ft: altitude(entry),
             ground_speed_kt: ground_speed(entry),
             heading_deg: heading(entry),
-            emergency: emergency_kind(entry),
+            position_age_s: position_age_s(seen_pos),
+            emergency,
         },
         seen_pos,
     ))
+}
+
+/// Whole seconds. A fraction does not count, a negative age is 0, and 255 is the top of the byte.
+fn position_age_s(seen_pos: f64) -> u8 {
+    if seen_pos <= 0.0 {
+        return 0;
+    }
+    let whole = seen_pos.floor();
+    if whole >= 255.0 {
+        255
+    } else {
+        whole as u8
+    }
 }
 
 /// A readsb emergency name, or squawk 7700, 7600, or 7500 when that name is absent or `none`.
@@ -227,5 +253,20 @@ fn heading(entry: &Value) -> u16 {
         0
     } else {
         degrees
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::position_age_s;
+
+    #[test]
+    fn position_age_is_whole_seconds_through_255() {
+        assert_eq!(position_age_s(1.9), 1);
+        assert_eq!(position_age_s(0.0), 0);
+        assert_eq!(position_age_s(-3.0), 0);
+        assert_eq!(position_age_s(255.0), 255);
+        assert_eq!(position_age_s(255.9), 255);
+        assert_eq!(position_age_s(1000.0), 255);
     }
 }
