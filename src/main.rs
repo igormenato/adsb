@@ -346,12 +346,15 @@ mod tests {
     }
 
     #[test]
-    fn a_drained_port_accepts_the_chunk() {
+    fn the_pty_master_returns_the_empty_snapshot() {
         let pty = Pty::open();
         let master = pty.master;
         let stop = Arc::new(AtomicBool::new(false));
         let mut uart = open_uart(&pty.path, 115_200, stop).expect("pty");
-        uart.write_within(b"TRCK", Duration::from_secs(2))
+        let packet = [
+            0x54, 0x52, 0x43, 0x4b, 0x02, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0xdc, 0xad,
+        ];
+        uart.write_within(&packet, Duration::from_secs(2))
             .expect("chunk");
         let mut buf = [0u8; 64];
         let mut pollfd = libc::pollfd {
@@ -360,9 +363,14 @@ mod tests {
             revents: 0,
         };
         let ready = unsafe { libc::poll(&mut pollfd, 1, 1_000) };
-        assert_eq!(ready, 1, "{}", io::Error::last_os_error());
+        if ready < 0 {
+            panic!("poll failed: {}", io::Error::last_os_error());
+        }
+        assert_eq!(ready, 1, "poll returned {ready}");
         let n = unsafe { libc::read(master, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
-        assert!(n > 0, "{}", io::Error::last_os_error());
-        assert_eq!(&buf[..n as usize], b"TRCK");
+        if n < 0 {
+            panic!("read failed: {}", io::Error::last_os_error());
+        }
+        assert_eq!(&buf[..n as usize], &packet);
     }
 }
