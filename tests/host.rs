@@ -362,27 +362,21 @@ fn sample_flag_sends_two_aircraft_without_a_file() {
 }
 
 #[test]
-fn empty_sky_sends_no_packet() {
+fn empty_sky_sends_the_snapshot() {
     let dir = scratch_dir("empty");
     let path = dir.join("aircraft.json");
     std::fs::write(&path, r#"{"now":10,"aircraft":[]}"#).unwrap();
-    let mut sender = spawn_sender(&path);
-    let mut stdout = sender.0.stdout.take().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        use std::io::Read;
-        let mut tmp = [0u8; 16];
-        let n = stdout.read(&mut tmp).unwrap_or(0);
-        let _ = tx.send(n);
-    });
-    match rx.recv_timeout(std::time::Duration::from_millis(700)) {
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            panic!("reader disconnected");
-        }
-        Ok(0) => panic!("sender exited before writing a packet"),
-        Ok(n) => panic!("empty sky wrote {n} bytes"),
-    }
+    let mut sender = spawn_sender_with(&path, &["--format", "struct"]);
+    let stdout = sender.0.stdout.take().unwrap();
+    let packet = [
+        0x54, 0x52, 0x43, 0x4b, 0x02, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0xdc, 0xad,
+    ];
+    let buf = read_stdout(stdout, move |buf| buf.len() >= packet.len());
+    assert!(
+        buf.starts_with(&packet),
+        "empty sky wrote {:02x?}",
+        &buf[..buf.len().min(packet.len())]
+    );
     assert!(sender.0.try_wait().unwrap().is_none());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -717,7 +711,7 @@ fn sender_struct_includes_the_emergency_on_the_first_packet() {
 }
 
 #[test]
-fn positionless_emergency_sends_no_packet() {
+fn positionless_emergency_sends_an_empty_snapshot() {
     let dir = scratch_dir("positionless");
     let path = dir.join("aircraft.json");
     std::fs::write(
@@ -726,22 +720,13 @@ fn positionless_emergency_sends_no_packet() {
     )
     .unwrap();
     let mut sender = spawn_sender(&path);
-    let mut stdout = sender.0.stdout.take().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        use std::io::Read;
-        let mut tmp = [0u8; 16];
-        let n = stdout.read(&mut tmp).unwrap_or(0);
-        let _ = tx.send(n);
-    });
-    match rx.recv_timeout(std::time::Duration::from_millis(700)) {
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            panic!("reader disconnected");
-        }
-        Ok(0) => panic!("sender exited before writing a packet"),
-        Ok(n) => panic!("positionless emergency wrote {n} bytes"),
-    }
+    let stdout = sender.0.stdout.take().unwrap();
+    let buf = read_stdout(stdout, |buf| buf.contains(&b'\n'));
+    let line_end = buf
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("json line");
+    assert_eq!(&buf[..=line_end], b"{\"unix_s\":10,\"aircraft\":[]}\n");
     assert!(sender.0.try_wait().unwrap().is_none());
     let _ = std::fs::remove_dir_all(dir);
 }

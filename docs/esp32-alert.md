@@ -8,13 +8,15 @@ JSON is the default. `--format struct` is the binary snapshot. Do not mix the tw
 
 1. Read the UART at 115200 baud, 8 data bits, no parity, 1 stop bit.
 2. Forward each snapshot unchanged, as one telemetry message.
-3. An empty sky produces no bytes.
+3. Forward a snapshot whose aircraft count is 0. No bytes means the link sent nothing. A count of 0 means the receiver is alive and the sky has no aircraft to report. The ground uses a count of 0 to clear tracks and emergency highlights.
 
 The ground station highlights an aircraft whose emergency field is set, and clears that highlight when a later snapshot has no emergency for that ICAO.
 
 ## JSON lines
 
 This is the default (`--format json`). Each snapshot is one line ending in `0x0A`. A line starts with `{"unix_s":`.
+
+An empty sky is one line, `{"unix_s":N,"aircraft":[]}`.
 
 `"emergency"` is present on an aircraft object only while an emergency is active. The names are `general`, `lifeguard`, `minfuel`, `nordo`, `unlawful`, and `downed`. When there is no emergency, the key is absent.
 
@@ -28,7 +30,7 @@ Forward the whole line, including the newline. Squawk 7700, 7600, and 7500 becom
 
 Only when the Pi is started with `--format struct`. Each snapshot starts with `TRCK` (`54 52 43 4B`).
 
-The header stays 12 bytes. The version byte is `2`. Each aircraft record is 22 bytes: the previous 20-byte track, then the emergency byte, then a reserved byte that is `0`.
+The header stays 12 bytes. The version byte is `2`. A count of 0 is that header plus the CRC and no records. For Unix time 10 the bytes are `54 52 43 4B 02 00 00 00 0A 00 00 00 DC AD`. Each aircraft record is 22 bytes: the previous 20-byte track, then the emergency byte, then a reserved byte that is `0`.
 
 The same two aircraft as the JSON line above:
 

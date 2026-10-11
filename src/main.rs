@@ -223,23 +223,21 @@ fn main() -> ExitCode {
         match loaded {
             Ok(bytes) => match snapshot_from_aircraft_json(&bytes) {
                 Ok(snapshot) => {
-                    if !snapshot.aircraft.is_empty() {
-                        let packet = match args.format {
-                            Format::Struct => pack_snapshot(&snapshot),
-                            Format::Json => pack_snapshot_json(&snapshot),
+                    let packet = match args.format {
+                        Format::Struct => pack_snapshot(&snapshot),
+                        Format::Json => pack_snapshot_json(&snapshot),
+                    };
+                    if let Err(err) = output.write_chunk(&packet) {
+                        return match err {
+                            ChunkError::Stopped => {
+                                eprintln!("stopped");
+                                ExitCode::SUCCESS
+                            }
+                            ChunkError::Failed(err) => {
+                                eprintln!("uart write failed: {err}");
+                                ExitCode::from(1)
+                            }
                         };
-                        if let Err(err) = output.write_chunk(&packet) {
-                            return match err {
-                                ChunkError::Stopped => {
-                                    eprintln!("stopped");
-                                    ExitCode::SUCCESS
-                                }
-                                ChunkError::Failed(err) => {
-                                    eprintln!("uart write failed: {err}");
-                                    ExitCode::from(1)
-                                }
-                            };
-                        }
                     }
                     eprintln!(
                         "snapshot t={} aircraft={}",

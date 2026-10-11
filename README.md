@@ -28,7 +28,13 @@ cargo build --release --target aarch64-unknown-linux-gnu
 
 ## Snapshot
 
-The sender writes one JSON object per line. Nothing is written when the snapshot has no aircraft.
+The sender writes one JSON object per line. An empty aircraft list is still one snapshot.
+
+```
+{"unix_s":10,"aircraft":[]}
+```
+
+No bytes means the link sent nothing. A count of 0 means the receiver is alive and the sky has no aircraft to report. The ground uses a count of 0 to clear tracks and emergency highlights.
 
 ```
 {"unix_s":1700000000,"aircraft":[{"icao":4219421,"latitude_e7":522572021,"longitude_e7":39193726,"altitude_ft":38000,"ground_speed_kt":450,"heading_deg":271}]}
