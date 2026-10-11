@@ -349,29 +349,20 @@ mod tests {
     fn a_drained_port_accepts_the_chunk() {
         let pty = Pty::open();
         let master = pty.master;
-        let stop_reader = Arc::new(AtomicBool::new(false));
-        let reader_stop = Arc::clone(&stop_reader);
-        let reader = thread::spawn(move || {
-            let mut buf = [0u8; 64];
-            while !reader_stop.load(Ordering::Relaxed) {
-                let mut pollfd = libc::pollfd {
-                    fd: master,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                let ready = unsafe { libc::poll(&mut pollfd, 1, 50) };
-                if ready > 0 {
-                    unsafe {
-                        libc::read(master, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len());
-                    }
-                }
-            }
-        });
         let stop = Arc::new(AtomicBool::new(false));
         let mut uart = open_uart(&pty.path, 115_200, stop).expect("pty");
         uart.write_within(b"TRCK", Duration::from_secs(2))
             .expect("chunk");
-        stop_reader.store(true, Ordering::Relaxed);
-        reader.join().expect("reader");
+        let mut buf = [0u8; 64];
+        let mut pollfd = libc::pollfd {
+            fd: master,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut pollfd, 1, 1_000) };
+        assert_eq!(ready, 1, "{}", io::Error::last_os_error());
+        let n = unsafe { libc::read(master, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+        assert!(n > 0, "{}", io::Error::last_os_error());
+        assert_eq!(&buf[..n as usize], b"TRCK");
     }
 }
