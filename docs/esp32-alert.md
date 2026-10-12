@@ -32,36 +32,34 @@ The line includes the trailing newline. The ESP32 does not send this line as the
 
 Only when the Pi is started with `--format struct`. Each snapshot starts with `TRCK` (`54 52 43 4B`).
 
-The header stays 12 bytes. The version byte is `2`. A count of 0 is that header plus the CRC and no records. For Unix time 10 the bytes are `54 52 43 4B 02 00 00 00 0A 00 00 00 DC AD`. Each aircraft record is 22 bytes: the previous 20-byte track, then the emergency byte, then the position age in whole seconds. The age saturates at 255. Emergencies are kept ahead of other aircraft.
+The header is 9 bytes. There is no version byte. A count of 0 is that header plus the CRC and no records. For Unix time 10 the bytes are `54 52 43 4B 00 0A 00 00 00 0F 08`. Each aircraft record is 21 bytes. The ICAO address is 3 bytes, then latitude, longitude, altitude, ground speed, heading, the emergency byte, and the position age in whole seconds. The age saturates at 255. Emergencies are kept ahead of other aircraft.
 
 The same two aircraft as the JSON line above:
 
 ```
-54 52 43 4B 02 00 02 00 00 F1 53 65 1D 62 40 00 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 0F 01 01 01 BC 0A 40 00 40 2C 42 06 60 18 EE F3 E0 2E 00 00 18 01 5A 00 00 00 ED 1C
+54 52 43 4B 02 00 F1 53 65 1D 62 40 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 0F 01 01 01 BC 0A 40 40 2C 42 06 60 18 EE F3 E0 2E 00 00 18 01 5A 00 00 00 D4 4D
 ```
 
-Copy the aircraft fields into the telemetry. Do not send the snapshot bytes as the radio payload. The length is `14 + 22N` for `N` aircraft.
+Copy the aircraft fields into the telemetry. Do not send the snapshot bytes as the radio payload. The length is `11 + 21N` for `N` aircraft.
 
 | Offset | Size | Field |
 | --- | --- | --- |
 | 0 | 4 | `TRCK` |
-| 4 | u8 | version `2` |
-| 5 | u8 | reserved `0` |
-| 6 | u16 | aircraft count |
-| 8 | u32 | Unix time, seconds |
+| 4 | u8 | aircraft count |
+| 5 | u32 | Unix time, seconds |
 
 Then one record per aircraft:
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 0 | u32 | ICAO address in the low 24 bits |
-| 4 | i32 | latitude, degrees × 1e7 |
-| 8 | i32 | longitude, degrees × 1e7 |
-| 12 | i32 | altitude, feet |
-| 16 | u16 | ground speed, knots |
-| 18 | u16 | heading, degrees, 0–359 |
-| 20 | u8 | emergency |
-| 21 | u8 | position age, whole seconds, at most 255 |
+| 0 | 3 | ICAO address, 24 bits |
+| 3 | i32 | latitude, degrees × 1e7 |
+| 7 | i32 | longitude, degrees × 1e7 |
+| 11 | i32 | altitude, feet |
+| 15 | u16 | ground speed, knots |
+| 17 | u16 | heading, degrees, 0–359 |
+| 19 | u8 | emergency |
+| 20 | u8 | position age, whole seconds, at most 255 |
 
 Little-endian. CRC-16/CCITT-FALSE covers the header and the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`) and follows them as a `u16`. If the CRC matches, copy the aircraft fields into the telemetry. If it does not match, drop that snapshot. The next `TRCK` realigns the stream.
 

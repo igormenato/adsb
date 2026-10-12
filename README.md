@@ -45,29 +45,27 @@ No bytes means the link sent nothing. A count of 0 means the receiver is alive a
 | Offset | Size | Field |
 | --- | --- | --- |
 | 0 | 4 | `TRCK` |
-| 4 | u8 | version `2` |
-| 5 | u8 | reserved `0` |
-| 6 | u16 | aircraft count |
-| 8 | u32 | Unix time, seconds, from the file's `now` |
+| 4 | u8 | aircraft count |
+| 5 | u32 | Unix time, seconds, from the file's `now` |
 
-Then one 22-byte record per aircraft:
+Then one 21-byte record per aircraft:
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 0 | u32 | ICAO address in the low 24 bits |
-| 4 | i32 | latitude, degrees × 1e7 |
-| 8 | i32 | longitude, degrees × 1e7 |
-| 12 | i32 | altitude, feet |
-| 16 | u16 | ground speed, knots |
-| 18 | u16 | heading, degrees, 0–359 |
-| 20 | u8 | emergency, `0` when none |
-| 21 | u8 | position age, whole seconds, at most 255 |
+| 0 | 3 | ICAO address, 24 bits |
+| 3 | i32 | latitude, degrees × 1e7 |
+| 7 | i32 | longitude, degrees × 1e7 |
+| 11 | i32 | altitude, feet |
+| 15 | u16 | ground speed, knots |
+| 17 | u16 | heading, degrees, 0–359 |
+| 19 | u8 | emergency, `0` when none |
+| 20 | u8 | position age, whole seconds, at most 255 |
 
 A CRC-16/CCITT-FALSE over every preceding byte follows the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`). `CRC("123456789") = 0x29B1`.
 
 ## Emergency
 
-`"emergency"` is present on an aircraft object only while one is active. The names are `general`, `lifeguard`, `minfuel`, `nordo`, `unlawful`, and `downed`. Squawk 7700, 7600, and 7500 map to `general`, `nordo`, and `unlawful` when readsb leaves the field unset or `none`. The first snapshot that includes the aircraft carries it. In the binary record the same state is the byte at offset 20: `0` none, `1` general, `2` unlawful, `3` nordo, `4` lifeguard, `5` minfuel, `6` downed. See `docs/esp32-alert.md`.
+`"emergency"` is present on an aircraft object only while one is active. The names are `general`, `lifeguard`, `minfuel`, `nordo`, `unlawful`, and `downed`. Squawk 7700, 7600, and 7500 map to `general`, `nordo`, and `unlawful` when readsb leaves the field unset or `none`. The first snapshot that includes the aircraft carries it. In the binary record the same state is the byte at offset 19: `0` none, `1` general, `2` unlawful, `3` nordo, `4` lifeguard, `5` minfuel, `6` downed. See `docs/esp32-alert.md`.
 
 `"position_age_s"` is on every aircraft. It is the whole seconds of `seen_pos`, and the same value is the last byte of the binary record. It saturates at 255. An emergency that still has a latitude and longitude stays while `seen_pos` is above 2 seconds and at most 30. An emergency with no latitude and longitude is left out. Other aircraft are left out once `seen_pos` is above 2. When more than 64 aircraft qualify, emergencies are kept first, then the freshest positions.
 
