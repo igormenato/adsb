@@ -1,16 +1,16 @@
-//! Turn one readsb `aircraft.json` document into a [`Snapshot`].
+//! Turn readsb JSON into a [`Fix`] or a file [`Snapshot`].
 
 use serde_json::Value;
 
 use crate::frame::{
-    deg_e7, Aircraft, EmergencyKind, Snapshot, ALT_UNKNOWN, HEADING_UNKNOWN, SPEED_UNKNOWN,
+    deg_e7, Aircraft, EmergencyKind, Fix, Snapshot, ALT_UNKNOWN, HEADING_UNKNOWN, SPEED_UNKNOWN,
     TRACK_MAX_AIRCRAFT,
 };
 
-/// A non-emergency position older than this is left out. The snapshot time would otherwise label a stale fix as current.
+/// File parser only. A JSON-port line is one accepted position and is not aged.
 pub const POSITION_MAX_AGE_S: f64 = 2.0;
 
-/// An emergency that still has a latitude and longitude is kept until this age.
+/// File parser only. An emergency that still has a latitude and longitude is kept until this age.
 pub const EMERGENCY_POSITION_MAX_AGE_S: f64 = 30.0;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -33,12 +33,25 @@ impl std::fmt::Display for SnapshotError {
     }
 }
 
-/// Qualifying aircraft, emergencies first, then the freshest `seen_pos`, at most 64.
+/// Qualifying aircraft from one `aircraft.json`, emergencies first, then the freshest `seen_pos`, at most 64.
 pub fn snapshot_from_aircraft_json(bytes: &[u8]) -> Result<Snapshot, SnapshotError> {
     let (unix_s, ranked) = ranked_aircraft(bytes)?;
     Ok(Snapshot {
         unix_s,
         aircraft: ranked.into_iter().map(|entry| entry.aircraft).collect(),
+    })
+}
+
+/// One `--net-json-port` line. `None` means skip the line.
+///
+/// `now` has to be a Unix second that fits in a `u32`. Latitude and longitude have to be present.
+/// `seen_pos` is ignored. On this port it is 0, and the line's `now` is the fix time.
+pub fn fix_from_json_line(bytes: &[u8]) -> Option<Fix> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    let unix_s = parse_now(&value).ok()?;
+    Some(Fix {
+        unix_s,
+        aircraft: aircraft_from_position(&value)?,
     })
 }
 
@@ -50,13 +63,7 @@ struct Ranked {
 
 fn ranked_aircraft(bytes: &[u8]) -> Result<(u32, Vec<Ranked>), SnapshotError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| SnapshotError::Json)?;
-    let now = value
-        .get("now")
-        .and_then(Value::as_f64)
-        .ok_or(SnapshotError::MissingNow)?;
-    if !now.is_finite() || now < 0.0 || now > f64::from(u32::MAX) {
-        return Err(SnapshotError::BadNow);
-    }
+    let unix_s = parse_now(&value)?;
     let list = value
         .get("aircraft")
         .and_then(Value::as_array)
@@ -64,7 +71,7 @@ fn ranked_aircraft(bytes: &[u8]) -> Result<(u32, Vec<Ranked>), SnapshotError> {
 
     let mut ranked = Vec::new();
     for (index, entry) in list.iter().enumerate() {
-        if let Some((aircraft, seen_pos)) = aircraft_from_entry(entry) {
+        if let Some((aircraft, seen_pos)) = aircraft_from_file_entry(entry) {
             ranked.push(Ranked {
                 seen_pos,
                 index,
@@ -81,20 +88,24 @@ fn ranked_aircraft(bytes: &[u8]) -> Result<(u32, Vec<Ranked>), SnapshotError> {
             .then(a.index.cmp(&b.index))
     });
     ranked.truncate(TRACK_MAX_AIRCRAFT);
-    Ok((now.trunc() as u32, ranked))
+    Ok((unix_s, ranked))
 }
 
-fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64)> {
-    let hex = entry.get("hex")?.as_str()?;
-    let icao = parse_icao(hex)?;
-    let latitude = finite_number(entry.get("lat")?)?;
-    let longitude = finite_number(entry.get("lon")?)?;
-    if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
-        return None;
+fn parse_now(value: &Value) -> Result<u32, SnapshotError> {
+    let now = value
+        .get("now")
+        .and_then(Value::as_f64)
+        .ok_or(SnapshotError::MissingNow)?;
+    if !now.is_finite() || now < 0.0 || now > f64::from(u32::MAX) {
+        return Err(SnapshotError::BadNow);
     }
+    Ok(now.trunc() as u32)
+}
+
+fn aircraft_from_file_entry(entry: &Value) -> Option<(Aircraft, f64)> {
+    let aircraft = aircraft_from_position(entry)?;
     let seen_pos = finite_number(entry.get("seen_pos")?)?;
-    let emergency = emergency_kind(entry);
-    let max_age = if emergency.is_some() {
+    let max_age = if aircraft.emergency.is_some() {
         EMERGENCY_POSITION_MAX_AGE_S
     } else {
         POSITION_MAX_AGE_S
@@ -102,32 +113,26 @@ fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64)> {
     if seen_pos > max_age {
         return None;
     }
-    Some((
-        Aircraft {
-            icao,
-            latitude_e7: deg_e7(latitude),
-            longitude_e7: deg_e7(longitude),
-            altitude_ft: altitude(entry),
-            ground_speed_kt: ground_speed(entry),
-            heading_deg: heading(entry),
-            position_age_s: position_age_s(seen_pos),
-            emergency,
-        },
-        seen_pos,
-    ))
+    Some((aircraft, seen_pos))
 }
 
-/// Whole seconds. A fraction does not count, a negative age is 0, and 255 is the top of the byte.
-fn position_age_s(seen_pos: f64) -> u8 {
-    if seen_pos <= 0.0 {
-        return 0;
+fn aircraft_from_position(entry: &Value) -> Option<Aircraft> {
+    let hex = entry.get("hex")?.as_str()?;
+    let icao = parse_icao(hex)?;
+    let latitude = finite_number(entry.get("lat")?)?;
+    let longitude = finite_number(entry.get("lon")?)?;
+    if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
+        return None;
     }
-    let whole = seen_pos.floor();
-    if whole >= 255.0 {
-        255
-    } else {
-        whole as u8
-    }
+    Some(Aircraft {
+        icao,
+        latitude_e7: deg_e7(latitude),
+        longitude_e7: deg_e7(longitude),
+        altitude_ft: altitude(entry),
+        ground_speed_kt: ground_speed(entry),
+        heading_deg: heading(entry),
+        emergency: emergency_kind(entry),
+    })
 }
 
 /// A readsb emergency name, or squawk 7700, 7600, or 7500 when that name is absent or `none`.
@@ -248,20 +253,5 @@ fn heading(entry: &Value) -> u16 {
         0
     } else {
         degrees
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::position_age_s;
-
-    #[test]
-    fn position_age_is_whole_seconds_through_255() {
-        assert_eq!(position_age_s(1.9), 1);
-        assert_eq!(position_age_s(0.0), 0);
-        assert_eq!(position_age_s(-3.0), 0);
-        assert_eq!(position_age_s(255.0), 255);
-        assert_eq!(position_age_s(255.9), 255);
-        assert_eq!(position_age_s(1000.0), 255);
     }
 }
