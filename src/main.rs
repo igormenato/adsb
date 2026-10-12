@@ -270,39 +270,21 @@ fn sleep_until_stop(stop: &AtomicBool, mut left: Duration) {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::CStr;
+    use std::io::Read;
 
     use super::*;
 
     struct Pty {
-        master: i32,
+        master: TTYPort,
         path: String,
     }
 
     impl Pty {
         fn open() -> Self {
-            let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-            assert!(master >= 0, "{}", io::Error::last_os_error());
-            assert_eq!(unsafe { libc::grantpt(master) }, 0);
-            assert_eq!(unsafe { libc::unlockpt(master) }, 0);
-            let mut name = [0u8; 64];
-            let rc = unsafe {
-                libc::ptsname_r(master, name.as_mut_ptr().cast::<libc::c_char>(), name.len())
-            };
-            assert_eq!(rc, 0, "{}", io::Error::last_os_error());
-            let path = CStr::from_bytes_until_nul(&name)
-                .expect("pty name")
-                .to_string_lossy()
-                .into_owned();
+            let (master, slave) = TTYPort::pair().expect("pty");
+            let path = slave.name().expect("pty name");
+            drop(slave);
             Self { master, path }
-        }
-    }
-
-    impl Drop for Pty {
-        fn drop(&mut self) {
-            unsafe {
-                libc::close(self.master);
-            }
         }
     }
 
@@ -345,8 +327,7 @@ mod tests {
 
     #[test]
     fn the_pty_master_returns_the_empty_snapshot() {
-        let pty = Pty::open();
-        let master = pty.master;
+        let mut pty = Pty::open();
         let stop = Arc::new(AtomicBool::new(false));
         let mut uart = open_uart(&pty.path, 115_200, stop).expect("pty");
         let packet = [
@@ -354,21 +335,11 @@ mod tests {
         ];
         uart.write_within(&packet, Duration::from_secs(2))
             .expect("chunk");
+        pty.master
+            .set_timeout(Duration::from_secs(1))
+            .expect("timeout");
         let mut buf = [0u8; 64];
-        let mut pollfd = libc::pollfd {
-            fd: master,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = unsafe { libc::poll(&mut pollfd, 1, 1_000) };
-        if ready < 0 {
-            panic!("poll failed: {}", io::Error::last_os_error());
-        }
-        assert_eq!(ready, 1, "poll returned {ready}");
-        let n = unsafe { libc::read(master, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
-        if n < 0 {
-            panic!("read failed: {}", io::Error::last_os_error());
-        }
-        assert_eq!(&buf[..n as usize], &packet);
+        let n = pty.master.read(&mut buf).expect("read");
+        assert_eq!(&buf[..n], &packet);
     }
 }
