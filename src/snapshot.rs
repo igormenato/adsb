@@ -171,12 +171,7 @@ fn kind_from_squawk(entry: &Value) -> Option<EmergencyKind> {
     let number = value
         .as_u64()
         .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))?;
-    match number {
-        7700 => Some(EmergencyKind::General),
-        7600 => Some(EmergencyKind::Nordo),
-        7500 => Some(EmergencyKind::Unlawful),
-        _ => None,
-    }
+    squawk_code(&number.to_string())
 }
 
 fn squawk_code(text: &str) -> Option<EmergencyKind> {
