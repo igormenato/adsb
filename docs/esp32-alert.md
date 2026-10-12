@@ -1,0 +1,76 @@
+# ESP32 satellite telemetry
+
+The Raspberry Pi sends one aircraft snapshot per second. An emergency is a field on an aircraft in that snapshot. There is one packet type. The ESP32 reads the binary TRCK snapshot and places the aircraft fields into the satellite telemetry that goes to the ground. It does not forward the raw snapshot as the radio payload. It does not decode 1090 MHz ADS-B.
+
+JSON is the default. `--format struct` is the binary snapshot. Do not mix the two on one link.
+
+## What you do
+
+1. Read the UART at 115200 baud, 8 data bits, no parity, 1 stop bit.
+2. Read the UART struct. Check CRC-16/CCITT-FALSE (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`) over the header and records. If the CRC matches, copy the aircraft fields into the telemetry. If it does not match, drop that snapshot.
+3. A count of 0 is a real snapshot and means the sky is empty. No bytes means the Pi sent nothing. The ground uses a count of 0 to clear tracks and emergency highlights.
+
+The ground station highlights an aircraft whose emergency field is set, and clears that highlight when a later snapshot has no emergency for that ICAO.
+
+## JSON lines
+
+This is the default (`--format json`). Each snapshot is one line ending in `0x0A`. A line starts with `{"unix_s":`.
+
+An empty sky is one line, `{"unix_s":N,"aircraft":[]}`.
+
+`"emergency"` is present on an aircraft object only while an emergency is active. The names are `general`, `lifeguard`, `minfuel`, `nordo`, `unlawful`, and `downed`. When there is no emergency, the key is absent.
+
+`"position_age_s"` is on every aircraft. It is the whole seconds of the position age, saturating at 255. An emergency that still has a latitude and longitude can be up to 30 seconds old. Other aircraft are omitted once the position is older than 2 seconds.
+
+```
+{"unix_s":1700000000,"aircraft":[{"icao":4219421,"latitude_e7":522572021,"longitude_e7":39193726,"altitude_ft":38000,"ground_speed_kt":450,"heading_deg":271,"position_age_s":1,"emergency":"general"},{"icao":4197052,"latitude_e7":105000000,"longitude_e7":-202500000,"altitude_ft":12000,"ground_speed_kt":280,"heading_deg":90,"position_age_s":0}]}
+```
+
+The line includes the trailing newline. The ESP32 does not send this line as the radio payload. Squawk 7700, 7600, and 7500 become `general`, `nordo`, and `unlawful` when readsb leaves `emergency` unset or `none`. A readsb emergency name is used as written.
+
+## Struct packets
+
+Only when the Pi is started with `--format struct`. Each snapshot starts with `TRCK` (`54 52 43 4B`).
+
+The header is 9 bytes. There is no version byte. A count of 0 is that header plus the CRC and no records. For Unix time 10 the bytes are `54 52 43 4B 00 0A 00 00 00 0F 08`. Each aircraft record is 21 bytes. The ICAO address is 3 bytes, then latitude, longitude, altitude, ground speed, heading, the emergency byte, and the position age in whole seconds. The age saturates at 255. Emergencies are kept ahead of other aircraft.
+
+The same two aircraft as the JSON line above:
+
+```
+54 52 43 4B 02 00 F1 53 65 1D 62 40 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 0F 01 01 01 BC 0A 40 40 2C 42 06 60 18 EE F3 E0 2E 00 00 18 01 5A 00 00 00 D4 4D
+```
+
+Copy the aircraft fields into the telemetry. Do not send the snapshot bytes as the radio payload. The length is `11 + 21N` for `N` aircraft.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | `TRCK` |
+| 4 | u8 | aircraft count |
+| 5 | u32 | Unix time, seconds |
+
+Then one record per aircraft:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 3 | ICAO address, 24 bits |
+| 3 | i32 | latitude, degrees × 1e7 |
+| 7 | i32 | longitude, degrees × 1e7 |
+| 11 | i32 | altitude, feet |
+| 15 | u16 | ground speed, knots |
+| 17 | u16 | heading, degrees, 0–359 |
+| 19 | u8 | emergency |
+| 20 | u8 | position age, whole seconds, at most 255 |
+
+Little-endian. CRC-16/CCITT-FALSE covers the header and the records (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`) and follows them as a `u16`. If the CRC matches, copy the aircraft fields into the telemetry. If it does not match, drop that snapshot. The next `TRCK` realigns the stream.
+
+| Code | Name |
+| --- | --- |
+| 0 | none |
+| 1 | general (squawk 7700) |
+| 2 | unlawful (squawk 7500) |
+| 3 | nordo (squawk 7600, radio failure) |
+| 4 | lifeguard |
+| 5 | minfuel |
+| 6 | downed |
+
+The ESP32 reads the struct and copies the aircraft fields into the satellite telemetry. The ground station reads that telemetry.

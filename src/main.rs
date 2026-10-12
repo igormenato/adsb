@@ -223,23 +223,21 @@ fn main() -> ExitCode {
         match loaded {
             Ok(bytes) => match snapshot_from_aircraft_json(&bytes) {
                 Ok(snapshot) => {
-                    if !snapshot.aircraft.is_empty() {
-                        let packet = match args.format {
-                            Format::Struct => pack_snapshot(&snapshot),
-                            Format::Json => pack_snapshot_json(&snapshot),
+                    let packet = match args.format {
+                        Format::Struct => pack_snapshot(&snapshot),
+                        Format::Json => pack_snapshot_json(&snapshot),
+                    };
+                    if let Err(err) = output.write_chunk(&packet) {
+                        return match err {
+                            ChunkError::Stopped => {
+                                eprintln!("stopped");
+                                ExitCode::SUCCESS
+                            }
+                            ChunkError::Failed(err) => {
+                                eprintln!("uart write failed: {err}");
+                                ExitCode::from(1)
+                            }
                         };
-                        if let Err(err) = output.write_chunk(&packet) {
-                            return match err {
-                                ChunkError::Stopped => {
-                                    eprintln!("stopped");
-                                    ExitCode::SUCCESS
-                                }
-                                ChunkError::Failed(err) => {
-                                    eprintln!("uart write failed: {err}");
-                                    ExitCode::from(1)
-                                }
-                            };
-                        }
                     }
                     eprintln!(
                         "snapshot t={} aircraft={}",
@@ -272,39 +270,21 @@ fn sleep_until_stop(stop: &AtomicBool, mut left: Duration) {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::CStr;
+    use std::io::Read;
 
     use super::*;
 
     struct Pty {
-        master: i32,
+        master: TTYPort,
         path: String,
     }
 
     impl Pty {
         fn open() -> Self {
-            let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-            assert!(master >= 0, "{}", io::Error::last_os_error());
-            assert_eq!(unsafe { libc::grantpt(master) }, 0);
-            assert_eq!(unsafe { libc::unlockpt(master) }, 0);
-            let mut name = [0u8; 64];
-            let rc = unsafe {
-                libc::ptsname_r(master, name.as_mut_ptr().cast::<libc::c_char>(), name.len())
-            };
-            assert_eq!(rc, 0, "{}", io::Error::last_os_error());
-            let path = CStr::from_bytes_until_nul(&name)
-                .expect("pty name")
-                .to_string_lossy()
-                .into_owned();
+            let (master, slave) = TTYPort::pair().expect("pty");
+            let path = slave.name().expect("pty name");
+            drop(slave);
             Self { master, path }
-        }
-    }
-
-    impl Drop for Pty {
-        fn drop(&mut self) {
-            unsafe {
-                libc::close(self.master);
-            }
         }
     }
 
@@ -346,32 +326,20 @@ mod tests {
     }
 
     #[test]
-    fn a_drained_port_accepts_the_chunk() {
-        let pty = Pty::open();
-        let master = pty.master;
-        let stop_reader = Arc::new(AtomicBool::new(false));
-        let reader_stop = Arc::clone(&stop_reader);
-        let reader = thread::spawn(move || {
-            let mut buf = [0u8; 64];
-            while !reader_stop.load(Ordering::Relaxed) {
-                let mut pollfd = libc::pollfd {
-                    fd: master,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                let ready = unsafe { libc::poll(&mut pollfd, 1, 50) };
-                if ready > 0 {
-                    unsafe {
-                        libc::read(master, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len());
-                    }
-                }
-            }
-        });
+    fn the_pty_master_returns_the_empty_snapshot() {
+        let mut pty = Pty::open();
         let stop = Arc::new(AtomicBool::new(false));
         let mut uart = open_uart(&pty.path, 115_200, stop).expect("pty");
-        uart.write_within(b"TRCK", Duration::from_secs(2))
+        let packet = [
+            0x54, 0x52, 0x43, 0x4b, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x0f, 0x08,
+        ];
+        uart.write_within(&packet, Duration::from_secs(2))
             .expect("chunk");
-        stop_reader.store(true, Ordering::Relaxed);
-        reader.join().expect("reader");
+        pty.master
+            .set_timeout(Duration::from_secs(1))
+            .expect("timeout");
+        let mut buf = [0u8; 64];
+        let n = pty.master.read(&mut buf).expect("read");
+        assert_eq!(&buf[..n], &packet);
     }
 }

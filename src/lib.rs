@@ -5,7 +5,9 @@ mod snapshot;
 
 pub use frame::{
     crc16_ccitt_false, deg_e7, pack_snapshot, pack_snapshot_json, unpack_snapshot, Aircraft,
-    Snapshot, ALT_UNKNOWN, HEADING_UNKNOWN, SPEED_UNKNOWN, TRACK_HEADER_LEN, TRACK_MAGIC,
-    TRACK_MAX_AIRCRAFT, TRACK_RECORD_LEN, TRACK_VERSION,
+    EmergencyKind, Snapshot, ALT_UNKNOWN, HEADING_UNKNOWN, SPEED_UNKNOWN, TRACK_HEADER_LEN,
+    TRACK_MAGIC, TRACK_MAX_AIRCRAFT, TRACK_RECORD_LEN,
 };
-pub use snapshot::{snapshot_from_aircraft_json, SnapshotError, POSITION_MAX_AGE_S};
+pub use snapshot::{
+    snapshot_from_aircraft_json, SnapshotError, EMERGENCY_POSITION_MAX_AGE_S, POSITION_MAX_AGE_S,
+};
