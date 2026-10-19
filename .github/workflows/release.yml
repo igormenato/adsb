@@ -19,8 +19,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: cargo test --locked
-      - name: Install ARMv6 hard-float linker
-        run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf
+      - name: Install Raspberry Pi ARMv6 linker and sysroot
+        run: |
+          sudo mkdir -p /opt/rpi-armv6/bin
+          curl -fsSL https://github.com/tttapa/toolchains/releases/download/1.4.0/x-tools-armv6-rpi-linux-gnueabihf-gcc14.tar.xz \
+            | sudo tar -xJ -C /opt/rpi-armv6 --strip-components=1
+          sudo ln -sfn /opt/rpi-armv6/armv6-rpi-linux-gnueabihf/bin/armv6-rpi-linux-gnueabihf-gcc /opt/rpi-armv6/bin/arm-linux-gnueabihf-gcc
       - run: cargo build --locked --release --target arm-unknown-linux-gnueabihf
       - run: cp target/arm-unknown-linux-gnueabihf/release/trck trck-pi-zero-w
       - env:
