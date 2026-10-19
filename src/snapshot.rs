@@ -135,7 +135,8 @@ fn aircraft_from_position(entry: &Value) -> Option<Aircraft> {
     })
 }
 
-/// A readsb emergency name, or squawk 7700, 7600, or 7500 when that name is absent or `none`.
+/// A known readsb emergency name wins. Squawk 7700, 7600, or 7500 applies when that
+/// name is absent, empty, `none`, or not one of the six names, including `reserved`.
 fn emergency_kind(entry: &Value) -> Option<EmergencyKind> {
     match entry.get("emergency").and_then(Value::as_str) {
         Some(text) => {
@@ -143,7 +144,7 @@ fn emergency_kind(entry: &Value) -> Option<EmergencyKind> {
             if text.is_empty() || text.eq_ignore_ascii_case("none") {
                 kind_from_squawk(entry)
             } else {
-                kind_from_name(text)
+                kind_from_name(text).or_else(|| kind_from_squawk(entry))
             }
         }
         _ => kind_from_squawk(entry),

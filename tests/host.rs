@@ -338,8 +338,20 @@ fn emergency_names_and_squawks_on_a_line() {
         (r#""emergency":"none""#, None),
         (r#""squawk":"1000""#, None),
         (r#""emergency":"medical""#, None),
-        (r#""emergency":"medical","squawk":"7700""#, None),
+        (r#""emergency":"medical","squawk":"7700""#, Some(EmergencyKind::General)),
         (r#""emergency":"reserved""#, None),
+        (
+            r#""emergency":"reserved","squawk":"7700""#,
+            Some(EmergencyKind::General),
+        ),
+        (
+            r#""emergency":"reserved","squawk":"7600""#,
+            Some(EmergencyKind::Nordo),
+        ),
+        (
+            r#""emergency":"reserved","squawk":"7500""#,
+            Some(EmergencyKind::Unlawful),
+        ),
     ];
     assert_eq!(
         [

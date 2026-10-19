@@ -40,7 +40,7 @@ Unknown altitude is the minimum signed 32-bit integer. Unknown ground speed is 6
 | 5 | minfuel |
 | 6 | downed |
 
-Squawk 7700, 7600, and 7500 become `general`, `nordo`, and `unlawful` when readsb leaves `emergency` unset, empty, or `none`. A readsb emergency name is the byte that is sent.
+Squawk 7700, 7600, and 7500 become `general`, `nordo`, and `unlawful` when readsb leaves `emergency` unset, empty, or `none`, and when the name is anything else, including `reserved`. A known readsb emergency name is the byte that is sent.
 
 One position, no emergency, Unix time `1700000000`:
 
