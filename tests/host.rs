@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use trck::{
     crc16_ccitt_false, fix_from_json_line, pack_frame, snapshot_from_aircraft_json, unpack_frame,
-    EmergencyKind, SnapshotError, ALT_UNKNOWN, FRAME_LEN, TRACK_UNKNOWN, SPEED_UNKNOWN,
-    TRACK_MAGIC, TRACK_MAX_AIRCRAFT,
+    EmergencyKind, SnapshotError, ALT_UNKNOWN, FRAME_LEN, SPEED_UNKNOWN, TRACK_MAGIC,
+    TRACK_MAX_AIRCRAFT, TRACK_UNKNOWN,
 };
 
 const PUBLISHED_LINE: &str = r#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4}"#;
@@ -338,8 +338,16 @@ fn emergency_names_and_squawks_on_a_line() {
         (r#""emergency":"none""#, None),
         (r#""squawk":"1000""#, None),
         (r#""emergency":"medical""#, None),
-        (r#""emergency":"medical","squawk":"7700""#, Some(EmergencyKind::General)),
-        (r#""emergency":"reserved""#, None),
+        (
+            r#""emergency":"medical","squawk":"7700""#,
+            Some(EmergencyKind::General),
+        ),
+        (r#""emergency":"reserved""#, Some(EmergencyKind::Reserved)),
+        (r#""emergency":"RESERVED""#, Some(EmergencyKind::Reserved)),
+        (
+            r#""emergency":"reserved","squawk":"1000""#,
+            Some(EmergencyKind::Reserved),
+        ),
         (
             r#""emergency":"reserved","squawk":"7700""#,
             Some(EmergencyKind::General),
@@ -356,13 +364,14 @@ fn emergency_names_and_squawks_on_a_line() {
     assert_eq!(
         [
             EmergencyKind::General.code(),
-            EmergencyKind::Unlawful.code(),
-            EmergencyKind::Nordo.code(),
             EmergencyKind::Lifeguard.code(),
             EmergencyKind::MinFuel.code(),
+            EmergencyKind::Nordo.code(),
+            EmergencyKind::Unlawful.code(),
             EmergencyKind::Downed.code(),
+            EmergencyKind::Reserved.code(),
         ],
-        [1, 2, 3, 4, 5, 6]
+        [1, 2, 3, 4, 5, 6, 7]
     );
     for (extra, kind) in cases {
         let line = format!(
@@ -397,10 +406,19 @@ fn emergency_names_and_squawks_on_a_line() {
     assert_eq!(pack_frame(&squawk), EMERGENCY);
 
     let mut unknown = EMERGENCY;
-    unknown[27] = 7;
+    unknown[27] = 8;
     let crc = crc16_ccitt_false(&unknown[..28]);
     unknown[28..30].copy_from_slice(&crc.to_le_bytes());
     assert!(unpack_frame(&unknown).is_none());
+
+    let mut reserved = EMERGENCY;
+    reserved[27] = 7;
+    let crc = crc16_ccitt_false(&reserved[..28]);
+    reserved[28..30].copy_from_slice(&crc.to_le_bytes());
+    assert_eq!(
+        unpack_frame(&reserved).unwrap().aircraft.emergency,
+        Some(EmergencyKind::Reserved)
+    );
 }
 
 #[test]

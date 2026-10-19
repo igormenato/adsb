@@ -34,13 +34,14 @@ Unknown altitude is the minimum signed 32-bit integer. Unknown ground speed is 6
 | --- | --- |
 | 0 | none |
 | 1 | general (squawk 7700) |
-| 2 | unlawful (squawk 7500) |
-| 3 | nordo (squawk 7600, radio failure) |
-| 4 | lifeguard |
-| 5 | minfuel |
+| 2 | lifeguard |
+| 3 | minfuel |
+| 4 | nordo (squawk 7600, radio failure) |
+| 5 | unlawful (squawk 7500) |
 | 6 | downed |
+| 7 | reserved |
 
-Squawk 7700, 7600, and 7500 become `general`, `nordo`, and `unlawful` when readsb leaves `emergency` unset, empty, or `none`, and when the name is anything else, including `reserved`. A known readsb emergency name is the byte that is sent.
+Squawk 7700, 7600, and 7500 become `general`, `nordo`, and `unlawful` when readsb leaves `emergency` unset, empty, or `none`, and when the name is any word that is not one of the eight (`none`, `general`, `lifeguard`, `minfuel`, `nordo`, `unlawful`, `downed`, `reserved`). A known readsb emergency name is the byte that is sent. `reserved` with squawk 7700, 7600, or 7500 is that squawk's code. `reserved` with no emergency squawk is 7.
 
 One position, no emergency, Unix time `1700000000`:
 

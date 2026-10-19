@@ -19,16 +19,19 @@ pub fn crc16_ccitt_false(data: &[u8]) -> u16 {
 }
 
 /// Emergency byte on the frame. `0` means none.
-/// Codes: 1 general, 2 unlawful, 3 nordo, 4 lifeguard, 5 minfuel, 6 downed.
+/// Codes match the ADS-B emergency/priority status field, and each
+/// discriminant is explicit: 1 general, 2 lifeguard, 3 minfuel, 4 nordo,
+/// 5 unlawful, 6 downed, 7 reserved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EmergencyKind {
     General = 1,
-    Unlawful = 2,
-    Nordo = 3,
-    Lifeguard = 4,
-    MinFuel = 5,
+    Lifeguard = 2,
+    MinFuel = 3,
+    Nordo = 4,
+    Unlawful = 5,
     Downed = 6,
+    Reserved = 7,
 }
 
 impl EmergencyKind {
@@ -39,11 +42,12 @@ impl EmergencyKind {
     pub fn from_code(code: u8) -> Option<Self> {
         Some(match code {
             1 => Self::General,
-            2 => Self::Unlawful,
-            3 => Self::Nordo,
-            4 => Self::Lifeguard,
-            5 => Self::MinFuel,
+            2 => Self::Lifeguard,
+            3 => Self::MinFuel,
+            4 => Self::Nordo,
+            5 => Self::Unlawful,
             6 => Self::Downed,
+            7 => Self::Reserved,
             _ => return None,
         })
     }

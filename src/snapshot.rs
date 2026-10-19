@@ -3,8 +3,8 @@
 use serde_json::Value;
 
 use crate::frame::{
-    deg_e7, Aircraft, EmergencyKind, Fix, Snapshot, ALT_UNKNOWN, TRACK_UNKNOWN, SPEED_UNKNOWN,
-    TRACK_MAX_AIRCRAFT,
+    deg_e7, Aircraft, EmergencyKind, Fix, Snapshot, ALT_UNKNOWN, SPEED_UNKNOWN, TRACK_MAX_AIRCRAFT,
+    TRACK_UNKNOWN,
 };
 
 /// File parser only. A JSON-port line is one accepted position and is not aged.
@@ -135,8 +135,9 @@ fn aircraft_from_position(entry: &Value) -> Option<Aircraft> {
     })
 }
 
-/// A known readsb emergency name wins. Squawk 7700, 7600, or 7500 applies when that
-/// name is absent, empty, `none`, or not one of the six names, including `reserved`.
+/// A known readsb emergency name wins. Squawk 7700, 7600, or 7500 applies when the
+/// name is absent, empty, `none`, or not one of the eight names. `reserved` is 7,
+/// and those three squawks still replace it so a 7700 is not dropped.
 fn emergency_kind(entry: &Value) -> Option<EmergencyKind> {
     match entry.get("emergency").and_then(Value::as_str) {
         Some(text) => {
@@ -144,7 +145,13 @@ fn emergency_kind(entry: &Value) -> Option<EmergencyKind> {
             if text.is_empty() || text.eq_ignore_ascii_case("none") {
                 kind_from_squawk(entry)
             } else {
-                kind_from_name(text).or_else(|| kind_from_squawk(entry))
+                match kind_from_name(text) {
+                    Some(EmergencyKind::Reserved) => {
+                        kind_from_squawk(entry).or(Some(EmergencyKind::Reserved))
+                    }
+                    Some(kind) => Some(kind),
+                    None => kind_from_squawk(entry),
+                }
             }
         }
         _ => kind_from_squawk(entry),
@@ -164,6 +171,8 @@ fn kind_from_name(text: &str) -> Option<EmergencyKind> {
         EmergencyKind::Unlawful
     } else if text.eq_ignore_ascii_case("downed") {
         EmergencyKind::Downed
+    } else if text.eq_ignore_ascii_case("reserved") {
+        EmergencyKind::Reserved
     } else {
         return None;
     })
