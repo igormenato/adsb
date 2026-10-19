@@ -64,7 +64,7 @@ This is one accepted position. The bytes below are ICAO `40621d`, latitude `5225
 
 ## Emergency
 
-The names are `general`, `lifeguard`, `minfuel`, `nordo`, `unlawful`, `downed`, and `reserved`. Squawk 7700, 7600, and 7500 map to `general`, `nordo`, and `unlawful` when readsb leaves the field unset, empty, or `none`, and when the name is not one of those eight. A known name wins over the squawk. `reserved` is 7, and 7700, 7600, or 7500 still replaces it. `reserved` with no emergency squawk stays 7. In the frame the byte at offset 27 is `0` none, `1` general, `2` lifeguard, `3` minfuel, `4` nordo, `5` unlawful, `6` downed, `7` reserved. See `docs/esp32-alert.md`.
+The eight names are `none`, `general`, `lifeguard`, `minfuel`, `nordo`, `unlawful`, `downed`, and `reserved`. Squawk 7700, 7600, and 7500 map to `general`, `nordo`, and `unlawful` when readsb leaves the field unset, empty, or `none`, and when the name is any word that is not one of the eight. A known name wins over the squawk. `reserved` is 7, and 7700, 7600, or 7500 still replaces it. `reserved` with no emergency squawk stays 7. In the frame the byte at offset 27 is `0` none, `1` general, `2` lifeguard, `3` minfuel, `4` nordo, `5` unlawful, `6` downed, `7` reserved. See `docs/esp32-alert.md`.
 
 The same position with `emergency` `general`, or with squawk 7700 and no name, is the frame above with byte 27 set to `01`. The CRC changes with it.
 
