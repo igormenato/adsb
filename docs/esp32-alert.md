@@ -24,11 +24,11 @@ No bytes means the Pi sent nothing. There is no count of 0 and no heartbeat. Do 
 | 15 | i32 | longitude, degrees × 1e7 |
 | 19 | i32 | altitude, feet |
 | 23 | u16 | ground speed, knots |
-| 25 | u16 | heading, degrees, 0 to 359 |
+| 25 | u16 | track, degrees, 0 to 359 |
 | 27 | u8 | emergency |
 | 28 | u16 | CRC over bytes 0..27 |
 
-Unknown altitude is the minimum signed 32-bit integer. Unknown ground speed is 65535. Unknown heading is 65535.
+Unknown altitude is the minimum signed 32-bit integer. Unknown ground speed is 65535. Unknown track is 65535.
 
 | Code | Name |
 | --- | --- |

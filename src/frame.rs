@@ -10,7 +10,7 @@ pub const TRACK_MAGIC: &[u8; 4] = b"TRCK";
 pub const FRAME_LEN: usize = 30;
 pub const TRACK_MAX_AIRCRAFT: usize = 64;
 pub const SPEED_UNKNOWN: u16 = 0xFFFF;
-pub const HEADING_UNKNOWN: u16 = 0xFFFF;
+pub const TRACK_UNKNOWN: u16 = 0xFFFF;
 pub const ALT_UNKNOWN: i32 = i32::MIN;
 
 /// CRC-16/CCITT-FALSE. `crc16_ccitt_false(b"123456789") == 0x29B1`.
@@ -57,7 +57,7 @@ pub struct Aircraft {
     pub longitude_e7: i32,
     pub altitude_ft: i32,
     pub ground_speed_kt: u16,
-    pub heading_deg: u16,
+    pub track_deg: u16,
     pub emergency: Option<EmergencyKind>,
 }
 
@@ -96,7 +96,7 @@ pub fn pack_frame(fix: &Fix) -> [u8; FRAME_LEN] {
     raw[15..19].copy_from_slice(&fix.aircraft.longitude_e7.to_le_bytes());
     raw[19..23].copy_from_slice(&fix.aircraft.altitude_ft.to_le_bytes());
     raw[23..25].copy_from_slice(&fix.aircraft.ground_speed_kt.to_le_bytes());
-    raw[25..27].copy_from_slice(&fix.aircraft.heading_deg.to_le_bytes());
+    raw[25..27].copy_from_slice(&fix.aircraft.track_deg.to_le_bytes());
     raw[27] = fix.aircraft.emergency.map(EmergencyKind::code).unwrap_or(0);
     let crc = crc16_ccitt_false(&raw[..28]);
     raw[28..30].copy_from_slice(&crc.to_le_bytes());
@@ -123,7 +123,7 @@ pub fn unpack_frame(bytes: &[u8]) -> Option<Fix> {
             longitude_e7: i32::from_le_bytes(bytes[15..19].try_into().ok()?),
             altitude_ft: i32::from_le_bytes(bytes[19..23].try_into().ok()?),
             ground_speed_kt: u16::from_le_bytes(bytes[23..25].try_into().ok()?),
-            heading_deg: u16::from_le_bytes(bytes[25..27].try_into().ok()?),
+            track_deg: u16::from_le_bytes(bytes[25..27].try_into().ok()?),
             emergency: match bytes[27] {
                 0 => None,
                 code => Some(EmergencyKind::from_code(code)?),

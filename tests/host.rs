@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use trck::{
     crc16_ccitt_false, fix_from_json_line, pack_frame, snapshot_from_aircraft_json, unpack_frame,
-    EmergencyKind, SnapshotError, ALT_UNKNOWN, FRAME_LEN, HEADING_UNKNOWN, SPEED_UNKNOWN,
+    EmergencyKind, SnapshotError, ALT_UNKNOWN, FRAME_LEN, TRACK_UNKNOWN, SPEED_UNKNOWN,
     TRACK_MAGIC, TRACK_MAX_AIRCRAFT,
 };
 
@@ -85,7 +85,7 @@ fn published_track_and_crc() {
     assert_eq!(aircraft.longitude_e7, 39_193_726);
     assert_eq!(aircraft.altitude_ft, 38000);
     assert_eq!(aircraft.ground_speed_kt, 450);
-    assert_eq!(aircraft.heading_deg, 271);
+    assert_eq!(aircraft.track_deg, 271);
     assert_eq!(aircraft.emergency, None);
 
     let frame = pack_frame(&trck::Fix {
@@ -151,13 +151,13 @@ fn a_line_uses_now_and_ignores_seen_pos() {
 }
 
 #[test]
-fn line_sentinels_and_heading_wrap() {
+fn line_sentinels_and_track_wrap() {
     let unknown =
         fix_from_json_line(br#"{"now":10,"hex":"abc123","lat":0,"lon":0,"gs":-1,"track":-5}"#)
             .expect("unknown");
     assert_eq!(unknown.aircraft.altitude_ft, ALT_UNKNOWN);
     assert_eq!(unknown.aircraft.ground_speed_kt, SPEED_UNKNOWN);
-    assert_eq!(unknown.aircraft.heading_deg, HEADING_UNKNOWN);
+    assert_eq!(unknown.aircraft.track_deg, TRACK_UNKNOWN);
     assert_eq!(pack_frame(&unknown), UNKNOWN);
 
     let saturated = fix_from_json_line(
@@ -166,7 +166,7 @@ fn line_sentinels_and_heading_wrap() {
     .expect("saturated");
     assert_eq!(saturated.aircraft.altitude_ft, 0);
     assert_eq!(saturated.aircraft.ground_speed_kt, 65534);
-    assert_eq!(saturated.aircraft.heading_deg, 0);
+    assert_eq!(saturated.aircraft.track_deg, 0);
     assert_eq!(pack_frame(&saturated), SATURATED);
 }
 
@@ -179,7 +179,7 @@ fn skips_aircraft_without_a_position() {
     assert_eq!(snapshot.aircraft[0].icao, 1);
     assert_eq!(snapshot.aircraft[0].altitude_ft, 3280);
     assert_eq!(snapshot.aircraft[0].ground_speed_kt, SPEED_UNKNOWN);
-    assert_eq!(snapshot.aircraft[0].heading_deg, HEADING_UNKNOWN);
+    assert_eq!(snapshot.aircraft[0].track_deg, TRACK_UNKNOWN);
     assert_eq!(snapshot.aircraft[1].icao, 0x40621D);
     assert_eq!(snapshot.aircraft[1].altitude_ft, 0);
     assert_eq!(snapshot.aircraft[1].latitude_e7, 105_000_000);
@@ -209,17 +209,17 @@ fn keeps_the_sixty_four_freshest() {
 }
 
 #[test]
-fn unknown_speed_heading_and_altitude_in_the_file() {
+fn unknown_speed_track_and_altitude_in_the_file() {
     let snapshot = one(
         r#"{"hex":"abc123","lat":0,"lon":0,"gs":-1,"track":-5,"seen_pos":0},
            {"hex":"abc124","lat":0,"lon":1,"gs":65534.6,"track":360,"seen_pos":0.1},
            {"hex":"abc125","lat":0,"lon":2,"alt_baro":"ground","seen_pos":0.2}"#,
     );
     assert_eq!(snapshot.aircraft[0].ground_speed_kt, SPEED_UNKNOWN);
-    assert_eq!(snapshot.aircraft[0].heading_deg, HEADING_UNKNOWN);
+    assert_eq!(snapshot.aircraft[0].track_deg, TRACK_UNKNOWN);
     assert_eq!(snapshot.aircraft[0].altitude_ft, ALT_UNKNOWN);
     assert_eq!(snapshot.aircraft[1].ground_speed_kt, 65534);
-    assert_eq!(snapshot.aircraft[1].heading_deg, 0);
+    assert_eq!(snapshot.aircraft[1].track_deg, 0);
     assert_eq!(snapshot.aircraft[2].altitude_ft, 0);
 }
 
