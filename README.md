@@ -25,7 +25,7 @@ cargo test --locked
 nix build
 ```
 
-Inside that shell, `cargo build --release --target arm-unknown-linux-gnueabihf` is the same link, and Cargo reuses the incremental cache.
+Inside that shell, `cargo build --release --target arm-unknown-linux-gnueabihf` is the same link, and Cargo reuses the incremental cache. `cargo test --locked --target arm-unknown-linux-gnueabihf` runs the suite under QEMU on an ARM1176.
 
 ## Flags
 

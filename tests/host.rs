@@ -497,9 +497,31 @@ impl Drop for StopSender {
     }
 }
 
+fn trck_command() -> Command {
+    let bin = env!("CARGO_BIN_EXE_trck");
+    // QEMU forwards a guest execve to the host. The kernel rejects the ARM
+    // file unless binfmt_misc is registered, so the test starts QEMU itself.
+    if cfg!(target_arch = "arm") {
+        if let Ok(runner) = std::env::var("CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_RUNNER") {
+            if let Some((prog, args)) = runner.split_once(|c: char| c.is_whitespace()) {
+                let mut cmd = Command::new(prog);
+                cmd.args(args.split_whitespace());
+                cmd.arg(bin);
+                return cmd;
+            }
+            if !runner.is_empty() {
+                let mut cmd = Command::new(runner);
+                cmd.arg(bin);
+                return cmd;
+            }
+        }
+    }
+    Command::new(bin)
+}
+
 fn spawn_net(port: u16) -> StopSender {
     let addr = format!("127.0.0.1:{port}");
-    let child = Command::new(env!("CARGO_BIN_EXE_trck"))
+    let child = trck_command()
         .args(["--net-json", &addr, "--uart", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -509,7 +531,7 @@ fn spawn_net(port: u16) -> StopSender {
 }
 
 fn spawn_sample() -> StopSender {
-    let child = Command::new(env!("CARGO_BIN_EXE_trck"))
+    let child = trck_command()
         .args(["--sample", "--uart", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

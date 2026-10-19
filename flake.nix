@@ -54,6 +54,8 @@
         '';
       };
       linker = "${rpiGcc}/bin/arm-linux-gnueabihf-gcc";
+      sysroot = "${rpiGcc}/armv6-rpi-linux-gnueabihf/armv6-rpi-linux-gnueabihf/sysroot";
+      runner = "${pkgs.qemu-user}/bin/qemu-arm -cpu arm1176 -L ${sysroot}";
 
       src = lib.cleanSourceWith {
         src = lib.cleanSource ./.;
@@ -72,12 +74,12 @@
       trck = craneLib.buildPackage {
         inherit src cargoVendorDir;
         strictDeps = true;
-        doCheck = false;
         dontStrip = true;
         dontPatchELF = true;
         CARGO_BUILD_TARGET = target;
         CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER = linker;
-        nativeBuildInputs = [ rpiGcc ];
+        CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_RUNNER = runner;
+        nativeBuildInputs = [ rpiGcc pkgs.qemu-user ];
       };
 
       tests = craneLib.cargoTest {
@@ -93,8 +95,9 @@
       };
 
       devShells.${system}.default = craneLib.devShell {
-        packages = [ rpiGcc ];
+        packages = [ rpiGcc pkgs.qemu-user ];
         CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER = linker;
+        CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_RUNNER = runner;
       };
     };
 }
