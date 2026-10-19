@@ -31,7 +31,7 @@ cargo build --release --target aarch64-unknown-linux-gnu
 
 `--interval` is the pause between `--sample` passes. A value below 0.2 seconds is treated as 0.2. The JSON port ignores it.
 
-A dead socket writes nothing. `trck` connects again after one second, then two, then four, and so on, up to 30 seconds. A line with a missing or bad `now`, or with no latitude or longitude, is skipped. The process stays up.
+A dead socket writes nothing. `trck` connects again after one second, then two, then four, and so on, up to 30 seconds. If the peer dies without closing, `trck` probes after 30 seconds of silence, then every 10 seconds, three times. Failed probes count as a dead socket. A quiet sky stays connected. A line with a missing or bad `now`, or with no latitude or longitude, is skipped. The process stays up.
 
 ## Frame
 

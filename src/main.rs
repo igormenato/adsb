@@ -24,6 +24,9 @@ const READ_SLICE: Duration = Duration::from_millis(200);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_MIN: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(30);
+const KEEPALIVE_IDLE_S: u32 = 30;
+const KEEPALIVE_INTERVAL_S: u32 = 10;
+const KEEPALIVE_PROBES: u32 = 3;
 /// readsb builds one JSON line in an 8192-byte buffer and drops what does not fit.
 const MAX_LINE: usize = 8192;
 
@@ -323,9 +326,46 @@ fn run_port(addr: SocketAddr, text: &str, output: &mut dyn Output, stop: &Atomic
     ExitCode::SUCCESS
 }
 
+fn set_socket_int(fd: i32, level: libc::c_int, name: libc::c_int, value: u32) -> io::Result<()> {
+    let value = value as libc::c_int;
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            name,
+            &value as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// A timed-out read is an empty sky. These probes turn a peer that dies without
+/// a FIN into a read error, so the caller reconnects.
+fn enable_keepalive(stream: &TcpStream) -> io::Result<()> {
+    let fd = stream.as_raw_fd();
+    set_socket_int(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1)?;
+    set_socket_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, KEEPALIVE_IDLE_S)?;
+    set_socket_int(
+        fd,
+        libc::IPPROTO_TCP,
+        libc::TCP_KEEPINTVL,
+        KEEPALIVE_INTERVAL_S,
+    )?;
+    set_socket_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, KEEPALIVE_PROBES)
+}
+
 fn pump(stream: TcpStream, output: &mut dyn Output, stop: &AtomicBool) -> Pump {
     if let Err(err) = stream.set_read_timeout(Some(READ_SLICE)) {
         eprintln!("net-json read timeout: {err}");
+        return Pump::Disconnected;
+    }
+    if let Err(err) = enable_keepalive(&stream) {
+        eprintln!("net-json keepalive: {err}");
         return Pump::Disconnected;
     }
     let mut lines = JsonLines {
@@ -381,8 +421,46 @@ fn sleep_until_stop(stop: &AtomicBool, mut left: Duration) {
 #[cfg(test)]
 mod tests {
     use std::io::Read;
+    use std::os::fd::AsRawFd;
 
     use super::*;
+
+    fn socket_int(fd: i32, level: libc::c_int, name: libc::c_int) -> libc::c_int {
+        let mut value: libc::c_int = -1;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                level,
+                name,
+                &mut value as *mut libc::c_int as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        value
+    }
+
+    #[test]
+    fn the_readsb_socket_probes_a_silent_peer() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let stream = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        enable_keepalive(&stream).expect("keepalive");
+        let fd = stream.as_raw_fd();
+        assert_eq!(socket_int(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE), 1);
+        assert_eq!(
+            socket_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE),
+            KEEPALIVE_IDLE_S as libc::c_int
+        );
+        assert_eq!(
+            socket_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL),
+            KEEPALIVE_INTERVAL_S as libc::c_int
+        );
+        assert_eq!(
+            socket_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT),
+            KEEPALIVE_PROBES as libc::c_int
+        );
+    }
 
     struct Pty {
         master: TTYPort,
