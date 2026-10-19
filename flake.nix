@@ -62,6 +62,8 @@
         linkerName = "aarch64-linux-gnu-gcc";
         hash = "sha256-OcQq5fDiYSA/FvaSkvwadEk4FQfF8giJOfuOJYyJLOw=";
       };
+      zeroLinker = "${zeroGcc}/bin/arm-linux-gnueabihf-gcc";
+      pi3Linker = "${pi3Gcc}/bin/aarch64-linux-gnu-gcc";
 
       src = lib.cleanSourceWith {
         src = lib.cleanSource ./.;
@@ -77,7 +79,7 @@
         inherit src cargoVendorDir;
       };
 
-      crossPackage = target: linkerDrv: linkerName:
+      crossPackage = target: linkerDrv: linker:
         let
           cargoTarget = lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] target);
         in
@@ -88,12 +90,12 @@
           dontStrip = true;
           dontPatchELF = true;
           CARGO_BUILD_TARGET = target;
-          "CARGO_TARGET_${cargoTarget}_LINKER" = "${linkerDrv}/bin/${linkerName}";
+          "CARGO_TARGET_${cargoTarget}_LINKER" = linker;
           nativeBuildInputs = [ linkerDrv ];
         };
 
-      piZero = crossPackage "arm-unknown-linux-gnueabihf" zeroGcc "arm-linux-gnueabihf-gcc";
-      pi3 = crossPackage "aarch64-unknown-linux-gnu" pi3Gcc "aarch64-linux-gnu-gcc";
+      piZero = crossPackage "arm-unknown-linux-gnueabihf" zeroGcc zeroLinker;
+      pi3 = crossPackage "aarch64-unknown-linux-gnu" pi3Gcc pi3Linker;
 
       tests = craneLib.cargoTest {
         inherit src cargoVendorDir;
@@ -116,8 +118,8 @@
 
       devShells.${system}.default = craneLib.devShell {
         packages = [ zeroGcc pi3Gcc ];
-        CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER = "${zeroGcc}/bin/arm-linux-gnueabihf-gcc";
-        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "${pi3Gcc}/bin/aarch64-linux-gnu-gcc";
+        CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER = zeroLinker;
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = pi3Linker;
       };
     };
 }
