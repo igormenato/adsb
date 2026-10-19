@@ -63,7 +63,6 @@
       devShells.${system}.default = pkgs.mkShell {
         packages = [ rust rpiGcc ];
         env.CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER = "${rpiGcc}/bin/arm-linux-gnueabihf-gcc";
-        env.CC_arm_unknown_linux_gnueabihf = "${rpiGcc}/bin/arm-linux-gnueabihf-gcc";
       };
     };
 }
