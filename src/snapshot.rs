@@ -3,7 +3,7 @@
 use serde_json::Value;
 
 use crate::frame::{
-    deg_e7, Aircraft, EmergencyKind, Fix, Snapshot, ALT_UNKNOWN, HEADING_UNKNOWN, SPEED_UNKNOWN,
+    deg_e7, Aircraft, EmergencyKind, Fix, Snapshot, ALT_UNKNOWN, TRACK_UNKNOWN, SPEED_UNKNOWN,
     TRACK_MAX_AIRCRAFT,
 };
 
@@ -130,12 +130,13 @@ fn aircraft_from_position(entry: &Value) -> Option<Aircraft> {
         longitude_e7: deg_e7(longitude),
         altitude_ft: altitude(entry),
         ground_speed_kt: ground_speed(entry),
-        heading_deg: heading(entry),
+        track_deg: track(entry),
         emergency: emergency_kind(entry),
     })
 }
 
-/// A readsb emergency name, or squawk 7700, 7600, or 7500 when that name is absent or `none`.
+/// A known readsb emergency name wins. Squawk 7700, 7600, or 7500 applies when that
+/// name is absent, empty, `none`, or not one of the six names, including `reserved`.
 fn emergency_kind(entry: &Value) -> Option<EmergencyKind> {
     match entry.get("emergency").and_then(Value::as_str) {
         Some(text) => {
@@ -143,7 +144,7 @@ fn emergency_kind(entry: &Value) -> Option<EmergencyKind> {
             if text.is_empty() || text.eq_ignore_ascii_case("none") {
                 kind_from_squawk(entry)
             } else {
-                kind_from_name(text)
+                kind_from_name(text).or_else(|| kind_from_squawk(entry))
             }
         }
         _ => kind_from_squawk(entry),
@@ -240,13 +241,13 @@ fn ground_speed(entry: &Value) -> u16 {
     }
 }
 
-fn heading(entry: &Value) -> u16 {
+fn track(entry: &Value) -> u16 {
     let Some(degrees) = entry.get("track").and_then(finite_number) else {
-        return HEADING_UNKNOWN;
+        return TRACK_UNKNOWN;
     };
     let rounded = degrees.round();
     if !(0.0..=360.0).contains(&rounded) {
-        return HEADING_UNKNOWN;
+        return TRACK_UNKNOWN;
     }
     let degrees = rounded as u16;
     if degrees == 360 {
