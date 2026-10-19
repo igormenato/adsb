@@ -43,7 +43,6 @@
         strictDeps = true;
         doCheck = false;
         dontStrip = true;
-        dontPatchELF = true;
         CARGO_BUILD_TARGET = "arm-unknown-linux-musleabihf";
         CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER = rustLld;
         CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS = staticMusl;
@@ -59,7 +58,6 @@
         default = pkgs.linkFarm "trck" [
           { name = "bin/trck-pi-zero-w"; path = "${piZero}/bin/trck"; }
         ];
-        pi-zero-w = piZero;
       };
 
       checks.${system} = {
