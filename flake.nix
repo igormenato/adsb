@@ -38,29 +38,15 @@
         inherit src cargoVendorDir;
       };
 
-      board = { target, rustflags }:
-        let
-          cargoTarget = lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] target);
-        in
-        craneLib.buildPackage {
-          inherit src cargoVendorDir;
-          strictDeps = true;
-          doCheck = false;
-          dontStrip = true;
-          dontPatchELF = true;
-          CARGO_BUILD_TARGET = target;
-          "CARGO_TARGET_${cargoTarget}_LINKER" = rustLld;
-          "CARGO_TARGET_${cargoTarget}_RUSTFLAGS" = rustflags;
-        };
-
-      piZero = board {
-        target = "arm-unknown-linux-musleabihf";
-        rustflags = staticMusl;
-      };
-      # rustc adds the Cortex-A53 workaround only when the linker is gcc.
-      pi3 = board {
-        target = "aarch64-unknown-linux-musl";
-        rustflags = "${staticMusl} -C link-arg=--fix-cortex-a53-843419";
+      piZero = craneLib.buildPackage {
+        inherit src cargoVendorDir;
+        strictDeps = true;
+        doCheck = false;
+        dontStrip = true;
+        dontPatchELF = true;
+        CARGO_BUILD_TARGET = "arm-unknown-linux-musleabihf";
+        CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER = rustLld;
+        CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS = staticMusl;
       };
 
       tests = craneLib.cargoTest {
@@ -72,21 +58,17 @@
       packages.${system} = {
         default = pkgs.linkFarm "trck" [
           { name = "bin/trck-pi-zero-w"; path = "${piZero}/bin/trck"; }
-          { name = "bin/trck-pi-3b"; path = "${pi3}/bin/trck"; }
         ];
         pi-zero-w = piZero;
-        pi-3b = pi3;
       };
 
       checks.${system} = {
-        inherit piZero pi3 tests;
+        inherit piZero tests;
       };
 
       devShells.${system}.default = craneLib.devShell {
         CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER = rustLld;
         CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS = staticMusl;
-        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER = rustLld;
-        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS = "${staticMusl} -C link-arg=--fix-cortex-a53-843419";
       };
     };
 }

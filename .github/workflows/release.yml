@@ -20,13 +20,12 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - run: nix flake check
       - run: nix build
-      - run: cp result/bin/trck-pi-zero-w result/bin/trck-pi-3b .
+      - run: cp result/bin/trck-pi-zero-w .
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
           gh release create "${{ inputs.tag }}"
           trck-pi-zero-w
-          trck-pi-3b
           --title "${{ inputs.tag }}"
           --generate-notes
           --target "${{ github.sha }}"
