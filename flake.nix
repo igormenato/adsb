@@ -1,20 +1,25 @@
 {
   description = "Rust and the ARMv6 hard-float toolchain for building trck for the Pi Zero W";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   inputs.rust-overlay = {
     url = "github:oxalica/rust-overlay";
     inputs.nixpkgs.follows = "nixpkgs";
   };
+  inputs.crane.url = "github:ipetkov/crane/v0.24.0";
 
-  outputs = { self, nixpkgs, rust-overlay }:
+  outputs = { nixpkgs, rust-overlay, crane, ... }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs {
         inherit system;
         overlays = [ rust-overlay.overlays.default ];
       };
+      lib = pkgs.lib;
       rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+      craneLib = (crane.mkLib pkgs).overrideToolchain rust;
+
+      target = "arm-unknown-linux-gnueabihf";
       rpiGcc = pkgs.stdenvNoCC.mkDerivation {
         pname = "armv6-rpi-linux-gnueabihf-gcc";
         version = "14.4.0";
@@ -48,13 +53,48 @@
           runHook postInstall
         '';
       };
+      linker = "${rpiGcc}/bin/arm-linux-gnueabihf-gcc";
+
+      src = lib.cleanSourceWith {
+        src = lib.cleanSource ./.;
+        filter = path: type:
+          (craneLib.filterCargoSources path type)
+          || lib.hasSuffix "/sample" path
+          || lib.hasInfix "/sample/" path;
+      };
+
+      cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+
+      hostArtifacts = craneLib.buildDepsOnly {
+        inherit src cargoVendorDir;
+      };
+
+      trck = craneLib.buildPackage {
+        inherit src cargoVendorDir;
+        strictDeps = true;
+        doCheck = false;
+        dontStrip = true;
+        dontPatchELF = true;
+        CARGO_BUILD_TARGET = target;
+        CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER = linker;
+        nativeBuildInputs = [ rpiGcc ];
+      };
+
+      tests = craneLib.cargoTest {
+        inherit src cargoVendorDir;
+        cargoArtifacts = hostArtifacts;
+      };
     in
     {
-      packages.${system}.default = rpiGcc;
+      packages.${system}.default = trck;
 
-      devShells.${system}.default = pkgs.mkShell {
-        packages = [ rust rpiGcc ];
-        env.CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER = "${rpiGcc}/bin/arm-linux-gnueabihf-gcc";
+      checks.${system} = {
+        inherit trck tests;
+      };
+
+      devShells.${system}.default = craneLib.devShell {
+        packages = [ rpiGcc ];
+        CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER = linker;
       };
     };
 }

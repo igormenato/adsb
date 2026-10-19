@@ -15,24 +15,17 @@ readsb --net-json-port 30005
 
 `30005` is an example. `trck` has no default port. Pass the same host and port readsb is listening on.
 
-Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. Ubuntu's `gcc-arm-linux-gnueabihf` links an ARMv7 libc, which this board cannot run.
+Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. That asset is `result/bin/trck` from `nix build`. Ubuntu's `gcc-arm-linux-gnueabihf` links an ARMv7 libc, which this board cannot run.
 
-On an x86 machine, `nix develop` provides stable Rust from `rust-toolchain.toml`, the `arm-unknown-linux-gnueabihf` target, and the Raspberry Pi ARMv6 hard-float toolchain:
+Nix is the build. `nix develop` loads stable Rust from `rust-toolchain.toml` and the Raspberry Pi ARMv6 hard-float gcc. `cargo test --locked` runs on this machine. `nix build` writes the Pi binary.
 
 ```
 nix develop
 cargo test --locked
-cargo build --release --target arm-unknown-linux-gnueabihf
+nix build
 ```
 
-Without Nix, install that same toolchain under `/opt/rpi-armv6`:
-
-```
-sudo mkdir -p /opt/rpi-armv6/bin
-curl -fsSL https://github.com/tttapa/toolchains/releases/download/1.4.0/x-tools-armv6-rpi-linux-gnueabihf-gcc14.tar.xz | sudo tar -xJ -C /opt/rpi-armv6 --strip-components=1
-sudo ln -sfn /opt/rpi-armv6/armv6-rpi-linux-gnueabihf/bin/armv6-rpi-linux-gnueabihf-gcc /opt/rpi-armv6/bin/arm-linux-gnueabihf-gcc
-cargo build --release --target arm-unknown-linux-gnueabihf
-```
+Inside that shell, `cargo build --release --target arm-unknown-linux-gnueabihf` is the same link, and Cargo reuses the incremental cache.
 
 ## Flags
 

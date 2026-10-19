@@ -1,2 +1,0 @@
-[target.arm-unknown-linux-gnueabihf]
-linker = "/opt/rpi-armv6/bin/arm-linux-gnueabihf-gcc"
