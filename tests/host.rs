@@ -467,17 +467,9 @@ impl Drop for StopSender {
     }
 }
 
-fn sender_bin() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().expect("test executable");
-    path.pop();
-    path.pop();
-    path.push("trck");
-    path
-}
-
 fn spawn_net(port: u16) -> StopSender {
     let addr = format!("127.0.0.1:{port}");
-    let child = Command::new(sender_bin())
+    let child = Command::new(env!("CARGO_BIN_EXE_trck"))
         .args(["--net-json", &addr, "--uart", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -487,7 +479,7 @@ fn spawn_net(port: u16) -> StopSender {
 }
 
 fn spawn_sample() -> StopSender {
-    let child = Command::new(sender_bin())
+    let child = Command::new(env!("CARGO_BIN_EXE_trck"))
         .args(["--sample", "--uart", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
