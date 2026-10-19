@@ -17,7 +17,7 @@ readsb --net-json-port 30005
 
 Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. Ubuntu's `gcc-arm-linux-gnueabihf` links an ARMv7 libc, which this board cannot run.
 
-On an x86 machine, `nix develop` installs the Raspberry Pi ARMv6 hard-float toolchain and points Cargo at it:
+On an x86 machine, `nix develop` installs the Raspberry Pi ARMv6 hard-float toolchain and points Cargo at it. Rust still comes from `rust-toolchain.toml`:
 
 ```
 nix develop
