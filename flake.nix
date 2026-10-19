@@ -15,7 +15,6 @@
         overlays = [ rust-overlay.overlays.default ];
       };
       rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-      glibc = pkgs.glibc;
       rpiGcc = pkgs.stdenvNoCC.mkDerivation {
         pname = "armv6-rpi-linux-gnueabihf-gcc";
         version = "14.4.0";
@@ -25,7 +24,11 @@
           hash = "sha256-mzVBPS7tqOU4wRl9+/a8QWMrdOypKX/D4BZI30vWgm0=";
         };
 
-        nativeBuildInputs = [ pkgs.binutils pkgs.patchelf ];
+        nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+
+        # libcc1 and its plugins need a host libstdc++. The tarball only
+        # ships the ARM copies, and the compiler driver never loads them.
+        autoPatchelfIgnoreMissingDeps = [ "libstdc++.so.6" "libgcc_s.so.1" ];
 
         sourceRoot = "x-tools";
         dontConfigure = true;
@@ -40,18 +43,8 @@
             "$out/bin/arm-linux-gnueabihf-gcc"
 
           prefix="$out/armv6-rpi-linux-gnueabihf"
-          interp="${glibc}/lib/ld-linux-x86-64.so.2"
-          rpath="${glibc}/lib"
-          find "$prefix/bin" "$prefix/lib" "$prefix/libexec" \
-              "$prefix/armv6-rpi-linux-gnueabihf/bin" -type f -print0 |
-            while IFS= read -r -d $'\0' bin; do
-              readelf -h "$bin" 2>/dev/null | grep -q 'Machine:[[:space:]]*Advanced Micro Devices X86-64' || continue
-              if readelf -l "$bin" 2>/dev/null | grep -q 'Requesting program interpreter'; then
-                patchelf --set-interpreter "$interp" --set-rpath "$rpath" "$bin"
-              else
-                patchelf --set-rpath "$rpath" "$bin"
-              fi
-            done
+          autoPatchelf "$prefix/bin" "$prefix/lib" "$prefix/libexec" \
+            "$prefix/armv6-rpi-linux-gnueabihf/bin"
           runHook postInstall
         '';
       };
