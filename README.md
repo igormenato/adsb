@@ -15,7 +15,16 @@ readsb --net-json-port 30005
 
 `30005` is an example. `trck` has no default port. Pass the same host and port readsb is listening on.
 
-Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. Ubuntu's `gcc-arm-linux-gnueabihf` links an ARMv7 libc, which this board cannot run. Build with the Raspberry Pi ARMv6 hard-float toolchain and its sysroot:
+Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. Ubuntu's `gcc-arm-linux-gnueabihf` links an ARMv7 libc, which this board cannot run.
+
+On an x86 machine, `nix develop` installs the Raspberry Pi ARMv6 hard-float toolchain and points Cargo at it:
+
+```
+nix develop
+cargo build --release --target arm-unknown-linux-gnueabihf
+```
+
+Without Nix, install that same toolchain under `/opt/rpi-armv6`:
 
 ```
 sudo mkdir -p /opt/rpi-armv6/bin

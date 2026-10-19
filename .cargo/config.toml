@@ -1,5 +1,2 @@
 [target.arm-unknown-linux-gnueabihf]
 linker = "/opt/rpi-armv6/bin/arm-linux-gnueabihf-gcc"
-rustflags = [
-  "-C", "link-arg=--sysroot=/opt/rpi-armv6/armv6-rpi-linux-gnueabihf/armv6-rpi-linux-gnueabihf/sysroot",
-]
