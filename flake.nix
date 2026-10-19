@@ -19,8 +19,6 @@
       rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
       craneLib = (crane.mkLib pkgs).overrideToolchain rust;
 
-      # libcc1 and its plugins need a host libstdc++. The tarball only
-      # ships the target copies, and the compiler driver never loads them.
       rpiGcc = { triple, linkerName, hash }:
         pkgs.stdenvNoCC.mkDerivation {
           pname = "${triple}-gcc";
@@ -52,19 +50,6 @@
           '';
         };
 
-      zeroGcc = rpiGcc {
-        triple = "armv6-rpi-linux-gnueabihf";
-        linkerName = "arm-linux-gnueabihf-gcc";
-        hash = "sha256-mzVBPS7tqOU4wRl9+/a8QWMrdOypKX/D4BZI30vWgm0=";
-      };
-      pi3Gcc = rpiGcc {
-        triple = "aarch64-rpi3-linux-gnu";
-        linkerName = "aarch64-linux-gnu-gcc";
-        hash = "sha256-OcQq5fDiYSA/FvaSkvwadEk4FQfF8giJOfuOJYyJLOw=";
-      };
-      zeroLinker = "${zeroGcc}/bin/arm-linux-gnueabihf-gcc";
-      pi3Linker = "${pi3Gcc}/bin/aarch64-linux-gnu-gcc";
-
       src = lib.cleanSourceWith {
         src = lib.cleanSource ./.;
         filter = path: type:
@@ -79,23 +64,38 @@
         inherit src cargoVendorDir;
       };
 
-      crossPackage = target: linkerDrv: linker:
+      board = { target, triple, linkerName, hash }:
         let
+          gcc = rpiGcc { inherit triple linkerName hash; };
+          linker = "${gcc}/bin/${linkerName}";
           cargoTarget = lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] target);
         in
-        craneLib.buildPackage {
-          inherit src cargoVendorDir;
-          strictDeps = true;
-          doCheck = false;
-          dontStrip = true;
-          dontPatchELF = true;
-          CARGO_BUILD_TARGET = target;
-          "CARGO_TARGET_${cargoTarget}_LINKER" = linker;
-          nativeBuildInputs = [ linkerDrv ];
+        {
+          inherit gcc linker;
+          pkg = craneLib.buildPackage {
+            inherit src cargoVendorDir;
+            strictDeps = true;
+            doCheck = false;
+            dontStrip = true;
+            dontPatchELF = true;
+            CARGO_BUILD_TARGET = target;
+            "CARGO_TARGET_${cargoTarget}_LINKER" = linker;
+            nativeBuildInputs = [ gcc ];
+          };
         };
 
-      piZero = crossPackage "arm-unknown-linux-gnueabihf" zeroGcc zeroLinker;
-      pi3 = crossPackage "aarch64-unknown-linux-gnu" pi3Gcc pi3Linker;
+      zero = board {
+        target = "arm-unknown-linux-gnueabihf";
+        triple = "armv6-rpi-linux-gnueabihf";
+        linkerName = "arm-linux-gnueabihf-gcc";
+        hash = "sha256-mzVBPS7tqOU4wRl9+/a8QWMrdOypKX/D4BZI30vWgm0=";
+      };
+      pi3b = board {
+        target = "aarch64-unknown-linux-gnu";
+        triple = "aarch64-rpi3-linux-gnu";
+        linkerName = "aarch64-linux-gnu-gcc";
+        hash = "sha256-OcQq5fDiYSA/FvaSkvwadEk4FQfF8giJOfuOJYyJLOw=";
+      };
 
       tests = craneLib.cargoTest {
         inherit src cargoVendorDir;
@@ -105,21 +105,23 @@
     {
       packages.${system} = {
         default = pkgs.linkFarm "trck" [
-          { name = "bin/trck-pi-zero-w"; path = "${piZero}/bin/trck"; }
-          { name = "bin/trck-pi-3b"; path = "${pi3}/bin/trck"; }
+          { name = "bin/trck-pi-zero-w"; path = "${zero.pkg}/bin/trck"; }
+          { name = "bin/trck-pi-3b"; path = "${pi3b.pkg}/bin/trck"; }
         ];
-        pi-zero-w = piZero;
-        pi-3b = pi3;
+        pi-zero-w = zero.pkg;
+        pi-3b = pi3b.pkg;
       };
 
       checks.${system} = {
-        inherit piZero pi3 tests;
+        piZero = zero.pkg;
+        pi3 = pi3b.pkg;
+        inherit tests;
       };
 
       devShells.${system}.default = craneLib.devShell {
-        packages = [ zeroGcc pi3Gcc ];
-        CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER = zeroLinker;
-        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = pi3Linker;
+        packages = [ zero.gcc pi3b.gcc ];
+        CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER = zero.linker;
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = pi3b.linker;
       };
     };
 }
