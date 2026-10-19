@@ -15,9 +15,9 @@ readsb --net-json-port 30005
 
 `30005` is an example. `trck` has no default port. Pass the same host and port readsb is listening on.
 
-Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. Copy `trck-pi-3b` onto a 64-bit Pi 3B. Those assets are `result/bin/trck-pi-zero-w` and `result/bin/trck-pi-3b` from `nix build`. Ubuntu's `gcc-arm-linux-gnueabihf` links an ARMv7 libc, which the Zero cannot run. The Zero file looks for `/lib/ld-linux-armhf.so.3`, which a 64-bit Pi OS does not have.
+Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. Copy `trck-pi-3b` onto a 64-bit Pi 3B. Those assets are `result/bin/trck-pi-zero-w` and `result/bin/trck-pi-3b` from `nix build`. Both are static musl, so neither asks a dynamic loader to start it. The Zero file is ARMv6 with VFPv2 hard float. The 3B file is AArch64.
 
-Nix is the build. `nix develop` loads stable Rust from `rust-toolchain.toml`, the ARMv6 hard-float gcc, and the Pi 3 aarch64 gcc. `cargo test --locked` runs on this machine. `nix build` writes both binaries.
+Nix is the build. `nix develop` loads stable Rust from `rust-toolchain.toml`. `cargo test --locked` runs on this machine. `nix build` writes both binaries.
 
 ```
 nix develop
@@ -25,7 +25,7 @@ cargo test --locked
 nix build
 ```
 
-Inside that shell, `cargo build --release --target arm-unknown-linux-gnueabihf` and `cargo build --release --target aarch64-unknown-linux-gnu` are those same links, and Cargo reuses the incremental cache.
+Inside that shell, `cargo build --release --target arm-unknown-linux-musleabihf` and `cargo build --release --target aarch64-unknown-linux-musl` are those same links, and Cargo reuses the incremental cache.
 
 ## Flags
 
