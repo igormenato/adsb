@@ -25,7 +25,7 @@
           hash = "sha256-mzVBPS7tqOU4wRl9+/a8QWMrdOypKX/D4BZI30vWgm0=";
         };
 
-        nativeBuildInputs = [ pkgs.file pkgs.patchelf ];
+        nativeBuildInputs = [ pkgs.binutils pkgs.patchelf ];
 
         sourceRoot = "x-tools";
         dontConfigure = true;
@@ -39,19 +39,18 @@
           ln -s "$out/armv6-rpi-linux-gnueabihf/bin/armv6-rpi-linux-gnueabihf-gcc" \
             "$out/bin/arm-linux-gnueabihf-gcc"
 
-          # Host tools need Nix's libc. Leave the ARMv6 sysroot alone.
+          prefix="$out/armv6-rpi-linux-gnueabihf"
           interp="${glibc}/lib/ld-linux-x86-64.so.2"
-          find "$out/armv6-rpi-linux-gnueabihf" -path '*/sysroot/*' -prune -o -type f -print0 |
+          rpath="${glibc}/lib"
+          find "$prefix/bin" "$prefix/lib" "$prefix/libexec" \
+              "$prefix/armv6-rpi-linux-gnueabihf/bin" -type f -print0 |
             while IFS= read -r -d $'\0' bin; do
-              kind=$(file -b "$bin")
-              case "$kind" in
-                "ELF 64-bit LSB executable, x86-64,"*"dynamically linked"*)
-                  patchelf --set-interpreter "$interp" --set-rpath "${glibc}/lib" "$bin"
-                  ;;
-                "ELF 64-bit LSB shared object, x86-64,"*)
-                  patchelf --set-rpath "${glibc}/lib" "$bin"
-                  ;;
-              esac
+              readelf -h "$bin" 2>/dev/null | grep -q 'Machine:[[:space:]]*Advanced Micro Devices X86-64' || continue
+              if readelf -l "$bin" 2>/dev/null | grep -q 'Requesting program interpreter'; then
+                patchelf --set-interpreter "$interp" --set-rpath "$rpath" "$bin"
+              else
+                patchelf --set-rpath "$rpath" "$bin"
+              fi
             done
           runHook postInstall
         '';
