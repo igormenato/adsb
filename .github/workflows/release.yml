@@ -19,14 +19,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: cargo test --locked
-      - name: Install aarch64 linker
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-      - run: cargo build --locked --release --target aarch64-unknown-linux-gnu
+      - name: Install ARMv6 hard-float linker
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf
+      - run: cargo build --locked --release --target arm-unknown-linux-gnueabihf
+      - run: cp target/arm-unknown-linux-gnueabihf/release/trck trck-pi-zero-w
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
           gh release create "${{ inputs.tag }}"
-          target/aarch64-unknown-linux-gnu/release/trck
+          trck-pi-zero-w
           --title "${{ inputs.tag }}"
           --generate-notes
           --target "${{ github.sha }}"

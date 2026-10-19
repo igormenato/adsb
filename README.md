@@ -15,10 +15,10 @@ readsb --net-json-port 30005
 
 `30005` is an example. `trck` has no default port. Pass the same host and port readsb is listening on.
 
-Copy `trck` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi, then build it with `gcc-aarch64-linux-gnu`:
+Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W, or build it with `gcc-arm-linux-gnueabihf`:
 
 ```
-cargo build --release --target aarch64-unknown-linux-gnu
+cargo build --release --target arm-unknown-linux-gnueabihf
 ```
 
 ## Flags
