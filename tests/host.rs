@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use trck::{
-    crc16_ccitt_false, fix_from_json_line, pack_frame, snapshot_from_aircraft_json, unpack_frame,
-    EmergencyKind, SnapshotError, ALT_UNKNOWN, FRAME_LEN, SPEED_UNKNOWN, TRACK_MAGIC,
-    TRACK_MAX_AIRCRAFT, TRACK_UNKNOWN,
+    ALT_UNKNOWN, EmergencyKind, FRAME_LEN, SPEED_UNKNOWN, SnapshotError, TRACK_MAGIC,
+    TRACK_MAX_AIRCRAFT, TRACK_UNKNOWN, crc16_ccitt_false, fix_from_json_line, pack_frame,
+    snapshot_from_aircraft_json, unpack_frame,
 };
 
 const PUBLISHED_LINE: &str = r#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4}"#;
@@ -432,10 +432,10 @@ fn an_emergency_without_a_position_is_left_out_of_the_file() {
     assert_eq!(snapshot.aircraft.len(), 1);
     assert_eq!(snapshot.aircraft[0].icao, 0x400ABC);
     assert_eq!(snapshot.aircraft[0].emergency, None);
-    assert!(fix_from_json_line(
-        br#"{"now":30,"hex":"40621d","squawk":"7700","emergency":"general"}"#
-    )
-    .is_none());
+    assert!(
+        fix_from_json_line(br#"{"now":30,"hex":"40621d","squawk":"7700","emergency":"general"}"#)
+            .is_none()
+    );
 }
 
 #[test]

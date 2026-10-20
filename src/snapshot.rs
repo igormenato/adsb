@@ -3,8 +3,8 @@
 use serde_json::Value;
 
 use crate::frame::{
-    deg_e7, Aircraft, EmergencyKind, Fix, Snapshot, ALT_UNKNOWN, SPEED_UNKNOWN, TRACK_MAX_AIRCRAFT,
-    TRACK_UNKNOWN,
+    ALT_UNKNOWN, Aircraft, EmergencyKind, Fix, SPEED_UNKNOWN, Snapshot, TRACK_MAX_AIRCRAFT,
+    TRACK_UNKNOWN, deg_e7,
 };
 
 /// File parser only. A JSON-port line is one accepted position and is not aged.
@@ -139,43 +139,38 @@ fn aircraft_from_position(entry: &Value) -> Option<Aircraft> {
 /// name is absent, empty, `none`, or not one of the eight names. `reserved` is 7,
 /// and those three squawks still replace it so a 7700 is not dropped.
 fn emergency_kind(entry: &Value) -> Option<EmergencyKind> {
-    match entry.get("emergency").and_then(Value::as_str) {
-        Some(text) => {
-            let text = text.trim();
-            if text.is_empty() || text.eq_ignore_ascii_case("none") {
-                kind_from_squawk(entry)
-            } else {
-                match kind_from_name(text) {
-                    Some(EmergencyKind::Reserved) => {
-                        kind_from_squawk(entry).or(Some(EmergencyKind::Reserved))
-                    }
-                    Some(kind) => Some(kind),
-                    None => kind_from_squawk(entry),
-                }
-            }
+    if let Some(text) = entry
+        .get("emergency")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        && !text.is_empty()
+        && !text.eq_ignore_ascii_case("none")
+        && let Some(kind) = kind_from_name(text)
+    {
+        if kind == EmergencyKind::Reserved {
+            kind_from_squawk(entry).or(Some(kind))
+        } else {
+            Some(kind)
         }
-        _ => kind_from_squawk(entry),
+    } else {
+        kind_from_squawk(entry)
     }
 }
 
 fn kind_from_name(text: &str) -> Option<EmergencyKind> {
-    Some(if text.eq_ignore_ascii_case("general") {
-        EmergencyKind::General
-    } else if text.eq_ignore_ascii_case("lifeguard") {
-        EmergencyKind::Lifeguard
-    } else if text.eq_ignore_ascii_case("minfuel") {
-        EmergencyKind::MinFuel
-    } else if text.eq_ignore_ascii_case("nordo") {
-        EmergencyKind::Nordo
-    } else if text.eq_ignore_ascii_case("unlawful") {
-        EmergencyKind::Unlawful
-    } else if text.eq_ignore_ascii_case("downed") {
-        EmergencyKind::Downed
-    } else if text.eq_ignore_ascii_case("reserved") {
-        EmergencyKind::Reserved
-    } else {
-        return None;
-    })
+    const NAMES: &[(&str, EmergencyKind)] = &[
+        ("general", EmergencyKind::General),
+        ("lifeguard", EmergencyKind::Lifeguard),
+        ("minfuel", EmergencyKind::MinFuel),
+        ("nordo", EmergencyKind::Nordo),
+        ("unlawful", EmergencyKind::Unlawful),
+        ("downed", EmergencyKind::Downed),
+        ("reserved", EmergencyKind::Reserved),
+    ];
+    NAMES
+        .iter()
+        .find(|(name, _)| text.eq_ignore_ascii_case(name))
+        .map(|(_, kind)| *kind)
 }
 
 fn kind_from_squawk(entry: &Value) -> Option<EmergencyKind> {
@@ -259,9 +254,5 @@ fn track(entry: &Value) -> u16 {
         return TRACK_UNKNOWN;
     }
     let degrees = rounded as u16;
-    if degrees == 360 {
-        0
-    } else {
-        degrees
-    }
+    if degrees == 360 { 0 } else { degrees }
 }

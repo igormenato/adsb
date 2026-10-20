@@ -1,6 +1,6 @@
 //! One UART frame for one aircraft. Little-endian.
 
-use crc::{Crc, CRC_16_IBM_3740};
+use crc::{CRC_16_IBM_3740, Crc};
 
 /// CRC-16/CCITT-FALSE: poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`.
 /// The `crc` catalog names this `CRC_16_IBM_3740`. Check value is `0x29B1`.
@@ -82,11 +82,7 @@ pub struct Snapshot {
 /// `floor(|degrees| * 1e7 + 0.5)` with the original sign.
 pub fn deg_e7(degrees: f64) -> i32 {
     let scaled = (degrees.abs() * 10_000_000.0 + 0.5).floor() as i32;
-    if degrees < 0.0 {
-        -scaled
-    } else {
-        scaled
-    }
+    if degrees < 0.0 { -scaled } else { scaled }
 }
 
 /// Magic, unix seconds, one aircraft, then CRC-16/CCITT-FALSE over the first 28 bytes.
