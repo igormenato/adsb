@@ -3,8 +3,8 @@
 use serde_json::Value;
 
 use crate::frame::{
-    deg_e7, Aircraft, EmergencyKind, Fix, Snapshot, ALT_UNKNOWN, SPEED_UNKNOWN, TRACK_MAX_AIRCRAFT,
-    TRACK_UNKNOWN,
+    ALT_UNKNOWN, Aircraft, EmergencyKind, Fix, SPEED_UNKNOWN, Snapshot, TRACK_MAX_AIRCRAFT,
+    TRACK_UNKNOWN, deg_e7,
 };
 
 /// File parser only. A JSON-port line is one accepted position and is not aged.
@@ -259,9 +259,5 @@ fn track(entry: &Value) -> u16 {
         return TRACK_UNKNOWN;
     }
     let degrees = rounded as u16;
-    if degrees == 360 {
-        0
-    } else {
-        degrees
-    }
+    if degrees == 360 { 0 } else { degrees }
 }
