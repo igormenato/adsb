@@ -1,13 +1,26 @@
-//! Turn one readsb `aircraft.json` document into a [`Snapshot`].
+//! Turn readsb JSON into a [`Fix`] or a file [`Snapshot`].
 
 use serde_json::Value;
 
 use crate::frame::{
-    deg_e7, Aircraft, Snapshot, ALT_UNKNOWN, HEADING_UNKNOWN, SPEED_UNKNOWN, TRACK_MAX_AIRCRAFT,
+    ALT_UNKNOWN, Aircraft, EmergencyKind, Fix, SPEED_UNKNOWN, TRACK_UNKNOWN, deg_e7,
 };
 
-/// A position older than this is left out. The snapshot time would otherwise label a stale fix as current.
+/// File parser only. A JSON-port line is one accepted position and is not aged.
 pub const POSITION_MAX_AGE_S: f64 = 2.0;
+
+/// File parser only. An emergency that still has a latitude and longitude is kept until this age.
+pub const EMERGENCY_POSITION_MAX_AGE_S: f64 = 30.0;
+
+/// File parser only. The live port forwards every accepted line.
+pub const TRACK_MAX_AIRCRAFT: usize = 64;
+
+/// The qualifying tracks from one `aircraft.json`, capped at [`TRACK_MAX_AIRCRAFT`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub unix_s: u32,
+    pub aircraft: Vec<Aircraft>,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -29,16 +42,10 @@ impl std::fmt::Display for SnapshotError {
     }
 }
 
-/// Aircraft with a latitude and longitude no older than [`POSITION_MAX_AGE_S`], freshest `seen_pos` first, at most 64.
+/// Qualifying aircraft from one `aircraft.json`, emergencies first, then the freshest `seen_pos`, at most 64.
 pub fn snapshot_from_aircraft_json(bytes: &[u8]) -> Result<Snapshot, SnapshotError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| SnapshotError::Json)?;
-    let now = value
-        .get("now")
-        .and_then(Value::as_f64)
-        .ok_or(SnapshotError::MissingNow)?;
-    if !now.is_finite() || now < 0.0 || now > f64::from(u32::MAX) {
-        return Err(SnapshotError::BadNow);
-    }
+    let unix_s = parse_now(&value)?;
     let list = value
         .get("aircraft")
         .and_then(Value::as_array)
@@ -46,23 +53,66 @@ pub fn snapshot_from_aircraft_json(bytes: &[u8]) -> Result<Snapshot, SnapshotErr
 
     let mut ranked = Vec::new();
     for (index, entry) in list.iter().enumerate() {
-        if let Some((aircraft, seen_pos)) = aircraft_from_entry(entry) {
-            ranked.push((seen_pos, index, aircraft));
+        if let Some((aircraft, seen_pos)) = aircraft_from_file_entry(entry) {
+            ranked.push((aircraft.emergency.is_some(), seen_pos, index, aircraft));
         }
     }
-    ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then(left.1.total_cmp(&right.1))
+            .then(left.2.cmp(&right.2))
+    });
     ranked.truncate(TRACK_MAX_AIRCRAFT);
-
     Ok(Snapshot {
-        unix_s: now.trunc() as u32,
+        unix_s,
         aircraft: ranked
             .into_iter()
-            .map(|(_, _, aircraft)| aircraft)
+            .map(|(_, _, _, aircraft)| aircraft)
             .collect(),
     })
 }
 
-fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64)> {
+/// One `--net-json-port` line. `None` means skip the line.
+///
+/// `now` has to be a Unix second that fits in a `u32`. Latitude and longitude have to be present.
+/// `seen_pos` is ignored. On this port it is 0, and the line's `now` is the fix time.
+pub fn fix_from_json_line(bytes: &[u8]) -> Option<Fix> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    let unix_s = parse_now(&value).ok()?;
+    Some(Fix {
+        unix_s,
+        aircraft: aircraft_from_position(&value)?,
+    })
+}
+
+fn parse_now(value: &Value) -> Result<u32, SnapshotError> {
+    let now = value
+        .get("now")
+        .and_then(Value::as_f64)
+        .ok_or(SnapshotError::MissingNow)?;
+    if !now.is_finite() || now < 0.0 || now > f64::from(u32::MAX) {
+        return Err(SnapshotError::BadNow);
+    }
+    Ok(now.trunc() as u32)
+}
+
+fn aircraft_from_file_entry(entry: &Value) -> Option<(Aircraft, f64)> {
+    let aircraft = aircraft_from_position(entry)?;
+    let seen_pos = finite_number(entry.get("seen_pos")?)?;
+    let max_age = if aircraft.emergency.is_some() {
+        EMERGENCY_POSITION_MAX_AGE_S
+    } else {
+        POSITION_MAX_AGE_S
+    };
+    if seen_pos > max_age {
+        return None;
+    }
+    Some((aircraft, seen_pos))
+}
+
+fn aircraft_from_position(entry: &Value) -> Option<Aircraft> {
     let hex = entry.get("hex")?.as_str()?;
     let icao = parse_icao(hex)?;
     let latitude = finite_number(entry.get("lat")?)?;
@@ -70,21 +120,65 @@ fn aircraft_from_entry(entry: &Value) -> Option<(Aircraft, f64)> {
     if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
         return None;
     }
-    let seen_pos = finite_number(entry.get("seen_pos")?)?;
-    if seen_pos > POSITION_MAX_AGE_S {
-        return None;
+    Some(Aircraft {
+        icao,
+        latitude_e7: deg_e7(latitude),
+        longitude_e7: deg_e7(longitude),
+        altitude_ft: altitude(entry),
+        ground_speed_kt: ground_speed(entry),
+        track_deg: track(entry),
+        emergency: emergency_kind(entry),
+    })
+}
+
+/// A known name wins. `reserved` still yields to squawk 7700, 7600, or 7500.
+/// Those squawks apply when the name is missing, empty, `none`, or unknown.
+fn emergency_kind(entry: &Value) -> Option<EmergencyKind> {
+    let named = entry
+        .get("emergency")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && !text.eq_ignore_ascii_case("none"))
+        .and_then(kind_from_name);
+    let squawk = kind_from_squawk(entry);
+    match named {
+        Some(kind) if kind != EmergencyKind::Reserved => Some(kind),
+        named => squawk.or(named),
     }
-    Some((
-        Aircraft {
-            icao,
-            latitude_e7: deg_e7(latitude),
-            longitude_e7: deg_e7(longitude),
-            altitude_ft: altitude(entry),
-            ground_speed_kt: ground_speed(entry),
-            heading_deg: heading(entry),
-        },
-        seen_pos,
-    ))
+}
+
+fn kind_from_name(text: &str) -> Option<EmergencyKind> {
+    const NAMES: &[(&str, EmergencyKind)] = &[
+        ("general", EmergencyKind::General),
+        ("lifeguard", EmergencyKind::Lifeguard),
+        ("minfuel", EmergencyKind::MinFuel),
+        ("nordo", EmergencyKind::Nordo),
+        ("unlawful", EmergencyKind::Unlawful),
+        ("downed", EmergencyKind::Downed),
+        ("reserved", EmergencyKind::Reserved),
+    ];
+    NAMES
+        .iter()
+        .find(|(name, _)| text.eq_ignore_ascii_case(name))
+        .map(|(_, kind)| *kind)
+}
+
+fn kind_from_squawk(entry: &Value) -> Option<EmergencyKind> {
+    match entry.get("squawk")? {
+        Value::String(text) => squawk_code(text.trim()),
+        Value::Number(number) => squawk_code(&number.as_u64()?.to_string()),
+        _ => None,
+    }
+}
+
+/// readsb prints four digits. `07700` is not `7700`.
+fn squawk_code(text: &str) -> Option<EmergencyKind> {
+    match text {
+        "7700" => Some(EmergencyKind::General),
+        "7600" => Some(EmergencyKind::Nordo),
+        "7500" => Some(EmergencyKind::Unlawful),
+        _ => None,
+    }
 }
 
 /// readsb writes six hex digits, optionally with one leading `~`.
@@ -139,18 +233,14 @@ fn ground_speed(entry: &Value) -> u16 {
     }
 }
 
-fn heading(entry: &Value) -> u16 {
+fn track(entry: &Value) -> u16 {
     let Some(degrees) = entry.get("track").and_then(finite_number) else {
-        return HEADING_UNKNOWN;
+        return TRACK_UNKNOWN;
     };
     let rounded = degrees.round();
     if !(0.0..=360.0).contains(&rounded) {
-        return HEADING_UNKNOWN;
+        return TRACK_UNKNOWN;
     }
     let degrees = rounded as u16;
-    if degrees == 360 {
-        0
-    } else {
-        degrees
-    }
+    if degrees == 360 { 0 } else { degrees }
 }

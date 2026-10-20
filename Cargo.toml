@@ -1,8 +1,8 @@
 [package]
 name = "trck"
 version = "0.1.0"
-edition = "2021"
-description = "Send readsb aircraft tracks to a UART once a second."
+edition = "2024"
+description = "Send each readsb position to a UART as it arrives."
 
 [[bin]]
 name = "trck"
