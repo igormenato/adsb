@@ -164,15 +164,19 @@ fn kind_from_name(text: &str) -> Option<EmergencyKind> {
 }
 
 fn kind_from_squawk(entry: &Value) -> Option<EmergencyKind> {
-    let code = match entry.get("squawk")? {
-        Value::String(text) => text.trim().parse::<u64>().ok()?,
-        Value::Number(number) => number.as_u64()?,
-        _ => return None,
-    };
-    match code {
-        7700 => Some(EmergencyKind::General),
-        7600 => Some(EmergencyKind::Nordo),
-        7500 => Some(EmergencyKind::Unlawful),
+    match entry.get("squawk")? {
+        Value::String(text) => squawk_code(text.trim()),
+        Value::Number(number) => squawk_code(&number.as_u64()?.to_string()),
+        _ => None,
+    }
+}
+
+/// readsb prints four digits. `07700` is not `7700`.
+fn squawk_code(text: &str) -> Option<EmergencyKind> {
+    match text {
+        "7700" => Some(EmergencyKind::General),
+        "7600" => Some(EmergencyKind::Nordo),
+        "7500" => Some(EmergencyKind::Unlawful),
         _ => None,
     }
 }
