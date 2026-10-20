@@ -2,7 +2,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{Fix, fix_from_json_line, pack_frame, snapshot_from_aircraft_json};
+use trck::{Aircraft, fix_from_json_line, pack_frame, snapshot_from_aircraft_json};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
@@ -81,10 +81,25 @@ struct UartOut {
 }
 
 impl UartOut {
-    /// `write` then wait until the kernel output queue is empty. Neither step blocks in the kernel:
-    /// the fd is non-blocking, and the drain polls `TIOCOUTQ` so Ctrl-C is noticed.
-    fn write_within(&mut self, mut data: &[u8], budget: Duration) -> Result<(), ChunkError> {
+    /// Queue `data` in the kernel and return. The JSON reader shares this thread, so a frame
+    /// whose bytes are already accepted must not wait out `TIOCOUTQ`.
+    fn write_within(&mut self, data: &[u8], budget: Duration) -> Result<(), ChunkError> {
+        self.write_and_wait(data, budget, bytes_queued, thread::sleep)
+    }
+
+    fn write_and_wait<Q, S>(
+        &mut self,
+        mut data: &[u8],
+        budget: Duration,
+        mut queued: Q,
+        mut sleep: S,
+    ) -> Result<(), ChunkError>
+    where
+        Q: FnMut(i32) -> io::Result<i32>,
+        S: FnMut(Duration),
+    {
         let deadline = Instant::now() + budget;
+        let fd = self.port.as_raw_fd();
         while !data.is_empty() {
             self.tick(deadline)?;
             match self.port.write(data) {
@@ -95,19 +110,20 @@ impl UartOut {
                     )));
                 }
                 Ok(n) => data = &data[n..],
-                Err(err) if retry(&err) => {}
+                Err(err) if retry(&err) => {
+                    let n = queued(fd).map_err(ChunkError::Failed)?;
+                    let pause = uart_wait(n);
+                    // An empty ioctl count can still be `WouldBlock`. Yield, but not for a slice.
+                    sleep(if pause.is_zero() {
+                        Duration::from_millis(1)
+                    } else {
+                        pause
+                    });
+                }
                 Err(err) => return Err(ChunkError::Failed(err)),
             }
         }
-        let fd = self.port.as_raw_fd();
-        loop {
-            self.tick(deadline)?;
-            match bytes_queued(fd) {
-                Ok(0) => return Ok(()),
-                Ok(_) => thread::sleep(WRITE_SLICE),
-                Err(err) => return Err(ChunkError::Failed(err)),
-            }
-        }
+        Ok(())
     }
 
     fn tick(&self, deadline: Instant) -> Result<(), ChunkError> {
@@ -130,17 +146,40 @@ impl Output for UartOut {
     }
 }
 
+/// How long the reader may pause while `queued` bytes still sit in the UART.
+/// A full [`WRITE_SLICE`] is long enough for readsb to drop a 7700.
+fn uart_wait(queued: i32) -> Duration {
+    if queued <= 0 {
+        return Duration::ZERO;
+    }
+    // 8N1 bit time at the default baud, capped well under the old drain nap.
+    let nanos = u64::from(queued as u32).saturating_mul(10_000_000_000) / u64::from(DEFAULT_BAUD);
+    Duration::from_nanos(nanos).min(Duration::from_millis(2))
+}
+
+enum Pending {
+    Collecting,
+    DiscardUntilNewline,
+}
+
 struct JsonLines {
     reader: TcpStream,
     pending: Vec<u8>,
-    skipping: bool,
+    state: Pending,
+}
+
+enum Incoming {
+    Line(Vec<u8>),
+    Eof,
+    Stopped,
+    Failed(io::Error),
 }
 
 impl JsonLines {
-    fn next_line(&mut self, stop: &AtomicBool) -> Result<Option<Vec<u8>>, Pump> {
+    fn next_line(&mut self, stop: &AtomicBool) -> Incoming {
         loop {
             if stop.load(Ordering::Relaxed) {
-                return Err(Pump::Stopped);
+                return Incoming::Stopped;
             }
             if let Some(split) = self.pending.iter().position(|byte| *byte == b'\n') {
                 let mut line: Vec<u8> = self.pending.drain(..=split).collect();
@@ -148,25 +187,24 @@ impl JsonLines {
                 if line.last() == Some(&b'\r') {
                     line.pop();
                 }
-                if self.skipping {
-                    self.skipping = false;
-                    continue;
+                match self.state {
+                    Pending::DiscardUntilNewline => {
+                        self.state = Pending::Collecting;
+                        continue;
+                    }
+                    Pending::Collecting => return Incoming::Line(line),
                 }
-                return Ok(Some(line));
             }
             if self.pending.len() > MAX_LINE {
                 self.pending.clear();
-                self.skipping = true;
+                self.state = Pending::DiscardUntilNewline;
             }
             let mut tmp = [0u8; 4096];
             match self.reader.read(&mut tmp) {
-                Ok(0) => return Ok(None),
+                Ok(0) => return Incoming::Eof,
                 Ok(n) => self.pending.extend_from_slice(&tmp[..n]),
                 Err(err) if retry(&err) => {}
-                Err(err) => {
-                    eprintln!("net-json read: {err}");
-                    return Err(Pump::Disconnected);
-                }
+                Err(err) => return Incoming::Failed(err),
             }
         }
     }
@@ -185,6 +223,18 @@ fn set_nonblocking(fd: i32) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn clear_nonblocking(fd: i32) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -227,8 +277,9 @@ fn open_output(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Box<dyn O
     Ok(Box::new(open_uart(path, baud, stop)?))
 }
 
-fn resolve_net_json(text: &str) -> Option<SocketAddr> {
-    text.to_socket_addrs().ok()?.next()
+fn resolve_net_json(text: &str) -> Option<Vec<SocketAddr>> {
+    let addrs: Vec<_> = text.to_socket_addrs().ok()?.collect();
+    if addrs.is_empty() { None } else { Some(addrs) }
 }
 
 fn grow(delay: Duration) -> Duration {
@@ -260,12 +311,12 @@ fn main() -> ExitCode {
         eprintln!("pass --net-json HOST:PORT, or --sample");
         return ExitCode::from(1);
     };
-    let Some(addr) = resolve_net_json(text) else {
+    let Some(addrs) = resolve_net_json(text) else {
         eprintln!("net-json {text}: expected host:port");
         return ExitCode::from(1);
     };
     eprintln!("net-json={text} uart={} baud={}", args.uart, args.baud);
-    run_port(addr, text, &mut *output, &stop)
+    run_port(&addrs, text, &mut *output, &stop)
 }
 
 fn run_sample(interval: Duration, output: &mut dyn Output, stop: &AtomicBool) -> ExitCode {
@@ -278,12 +329,8 @@ fn run_sample(interval: Duration, output: &mut dyn Output, stop: &AtomicBool) ->
     };
     while !stop.load(Ordering::Relaxed) {
         for aircraft in &snapshot.aircraft {
-            let frame = pack_frame(&Fix {
-                unix_s: snapshot.unix_s,
-                aircraft: aircraft.clone(),
-            });
-            if let Err(err) = output.write_chunk(&frame) {
-                return write_failed(err);
+            if let Err(err) = write_frame(output, snapshot.unix_s, aircraft) {
+                return write_exit(err);
             }
             eprintln!("fix t={} icao={:06x}", snapshot.unix_s, aircraft.icao);
         }
@@ -293,28 +340,25 @@ fn run_sample(interval: Duration, output: &mut dyn Output, stop: &AtomicBool) ->
     ExitCode::SUCCESS
 }
 
-fn run_port(addr: SocketAddr, text: &str, output: &mut dyn Output, stop: &AtomicBool) -> ExitCode {
+fn run_port(
+    addrs: &[SocketAddr],
+    text: &str,
+    output: &mut dyn Output,
+    stop: &AtomicBool,
+) -> ExitCode {
     let mut delay = RETRY_MIN;
     while !stop.load(Ordering::Relaxed) {
-        match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+        match dial_first(addrs, stop, text) {
             Ok(stream) => {
                 eprintln!("net-json {text} connected");
-                match pump(stream, output, stop) {
-                    Pump::Stopped => {
-                        eprintln!("stopped");
-                        return ExitCode::SUCCESS;
-                    }
-                    Pump::Uart(err) => {
-                        eprintln!("uart write failed: {err}");
-                        return ExitCode::from(1);
-                    }
-                    Pump::Disconnected => {
-                        eprintln!("net-json {text} disconnected");
-                        delay = RETRY_MIN;
-                    }
+                match pump(stream, output, stop, text) {
+                    Pump::Stopped => return write_exit(ChunkError::Stopped),
+                    Pump::Uart(err) => return write_exit(ChunkError::Failed(err)),
+                    Pump::Disconnected => delay = RETRY_MIN,
                 }
             }
-            Err(err) => eprintln!("net-json {text}: {err}"),
+            Err(DialError::Stopped) => break,
+            Err(DialError::Failed(_)) => {}
         }
         if stop.load(Ordering::Relaxed) {
             break;
@@ -324,6 +368,201 @@ fn run_port(addr: SocketAddr, text: &str, output: &mut dyn Output, stop: &Atomic
     }
     eprintln!("stopped");
     ExitCode::SUCCESS
+}
+
+#[derive(Debug)]
+enum DialError {
+    Stopped,
+    Failed(io::Error),
+}
+
+/// Try each resolved address. A refused `::1` must not hide a later `127.0.0.1`.
+fn dial_first(addrs: &[SocketAddr], stop: &AtomicBool, text: &str) -> Result<TcpStream, DialError> {
+    if addrs.is_empty() {
+        eprintln!("net-json {text}: expected host:port");
+        return Err(DialError::Failed(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected host:port",
+        )));
+    }
+    let mut last = None;
+    for addr in addrs {
+        if stop.load(Ordering::Relaxed) {
+            return Err(DialError::Stopped);
+        }
+        match dial(addr, stop, CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(DialError::Stopped) => return Err(DialError::Stopped),
+            Err(DialError::Failed(err)) => {
+                eprintln!("net-json {text}: {err}");
+                last = Some(err);
+            }
+        }
+    }
+    Err(DialError::Failed(last.unwrap_or_else(|| {
+        io::Error::new(io::ErrorKind::NotConnected, "connection failed")
+    })))
+}
+
+struct SocketFd(i32);
+
+impl Drop for SocketFd {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.0) };
+    }
+}
+
+impl SocketFd {
+    fn new(domain: libc::c_int) -> io::Result<Self> {
+        let fd = unsafe {
+            libc::socket(
+                domain,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(fd))
+    }
+
+    fn into_stream(self) -> TcpStream {
+        let fd = self.0;
+        std::mem::forget(self);
+        unsafe { TcpStream::from_raw_fd(fd) }
+    }
+}
+
+fn dial(addr: &SocketAddr, stop: &AtomicBool, timeout: Duration) -> Result<TcpStream, DialError> {
+    if stop.load(Ordering::Relaxed) {
+        return Err(DialError::Stopped);
+    }
+    let domain = if addr.is_ipv4() {
+        libc::AF_INET
+    } else {
+        libc::AF_INET6
+    };
+    let sock = SocketFd::new(domain).map_err(DialError::Failed)?;
+    match connect_fd(sock.0, addr) {
+        Ok(()) => {}
+        Err(err) if pending_connect(&err) => wait_connected(sock.0, stop, timeout)?,
+        Err(err) => return Err(DialError::Failed(err)),
+    }
+    clear_nonblocking(sock.0).map_err(DialError::Failed)?;
+    Ok(sock.into_stream())
+}
+
+fn pending_connect(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(code)
+            if code == libc::EINPROGRESS
+                || code == libc::EAGAIN
+                || code == libc::EWOULDBLOCK
+                || code == libc::EINTR
+    )
+}
+
+fn connect_fd(fd: i32, addr: &SocketAddr) -> io::Result<()> {
+    let rc = match *addr {
+        SocketAddr::V4(addr) => {
+            let raw = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: addr.port().to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from(*addr.ip()).to_be(),
+                },
+                sin_zero: [0; 8],
+            };
+            unsafe {
+                libc::connect(
+                    fd,
+                    &raw as *const libc::sockaddr_in as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            }
+        }
+        SocketAddr::V6(addr) => {
+            let raw = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: addr.port().to_be(),
+                sin6_flowinfo: addr.flowinfo(),
+                sin6_addr: libc::in6_addr {
+                    s6_addr: addr.ip().octets(),
+                },
+                sin6_scope_id: addr.scope_id(),
+            };
+            unsafe {
+                libc::connect(
+                    fd,
+                    &raw as *const libc::sockaddr_in6 as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+                )
+            }
+        }
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// `connect` on a black-holed route used to block for [`CONNECT_TIMEOUT`]. Poll in
+/// short slices so Ctrl-C is noticed the way the retry sleep already is.
+fn wait_connected(fd: i32, stop: &AtomicBool, timeout: Duration) -> Result<(), DialError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(DialError::Stopped);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(DialError::Failed(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "connection timed out",
+            )));
+        }
+        let slice = deadline.saturating_duration_since(now).min(WRITE_SLICE);
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut poll_fd, 1, slice.as_millis() as libc::c_int) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(DialError::Failed(err));
+        }
+        if rc == 0 {
+            continue;
+        }
+        if poll_fd.revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) == 0 {
+            continue;
+        }
+        let mut so_error: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let grc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                &mut so_error as *mut libc::c_int as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if grc < 0 {
+            return Err(DialError::Failed(io::Error::last_os_error()));
+        }
+        if so_error != 0 {
+            return Err(DialError::Failed(io::Error::from_raw_os_error(so_error)));
+        }
+        return Ok(());
+    }
 }
 
 fn set_socket_int(fd: i32, level: libc::c_int, name: libc::c_int, value: u32) -> io::Result<()> {
@@ -359,31 +598,37 @@ fn enable_keepalive(stream: &TcpStream) -> io::Result<()> {
     set_socket_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, KEEPALIVE_PROBES)
 }
 
-fn pump(stream: TcpStream, output: &mut dyn Output, stop: &AtomicBool) -> Pump {
+fn pump(stream: TcpStream, output: &mut dyn Output, stop: &AtomicBool, text: &str) -> Pump {
     if let Err(err) = stream.set_read_timeout(Some(READ_SLICE)) {
-        eprintln!("net-json read timeout: {err}");
+        eprintln!("net-json {text} read timeout: {err}");
         return Pump::Disconnected;
     }
     if let Err(err) = enable_keepalive(&stream) {
-        eprintln!("net-json keepalive: {err}");
+        eprintln!("net-json {text} keepalive: {err}");
         return Pump::Disconnected;
     }
     let mut lines = JsonLines {
         reader: stream,
         pending: Vec::new(),
-        skipping: false,
+        state: Pending::Collecting,
     };
     loop {
         let line = match lines.next_line(stop) {
-            Ok(Some(line)) => line,
-            Ok(None) => return Pump::Disconnected,
-            Err(pump) => return pump,
+            Incoming::Line(line) => line,
+            Incoming::Eof => {
+                eprintln!("net-json {text} disconnected");
+                return Pump::Disconnected;
+            }
+            Incoming::Stopped => return Pump::Stopped,
+            Incoming::Failed(err) => {
+                eprintln!("net-json {text}: {err}");
+                return Pump::Disconnected;
+            }
         };
         let Some(fix) = fix_from_json_line(&line) else {
             continue;
         };
-        let frame = pack_frame(&fix);
-        if let Err(err) = output.write_chunk(&frame) {
+        if let Err(err) = write_frame(output, fix.unix_s, &fix.aircraft) {
             return match err {
                 ChunkError::Stopped => Pump::Stopped,
                 ChunkError::Failed(err) => Pump::Uart(err),
@@ -393,7 +638,15 @@ fn pump(stream: TcpStream, output: &mut dyn Output, stop: &AtomicBool) -> Pump {
     }
 }
 
-fn write_failed(err: ChunkError) -> ExitCode {
+fn write_frame(
+    output: &mut dyn Output,
+    unix_s: u32,
+    aircraft: &Aircraft,
+) -> Result<(), ChunkError> {
+    output.write_chunk(&pack_frame(unix_s, aircraft))
+}
+
+fn write_exit(err: ChunkError) -> ExitCode {
     match err {
         ChunkError::Stopped => {
             eprintln!("stopped");
@@ -421,6 +674,7 @@ fn sleep_until_stop(stop: &AtomicBool, mut left: Duration) {
 #[cfg(test)]
 mod tests {
     use std::io::Read;
+    use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
     use std::os::fd::AsRawFd;
 
     use super::*;
@@ -529,5 +783,72 @@ mod tests {
         let mut buf = [0u8; 64];
         let n = pty.master.read(&mut buf).expect("read");
         assert_eq!(&buf[..n], &packet);
+    }
+
+    #[test]
+    fn a_nonempty_queue_does_not_stall_the_reader_for_a_full_slice() {
+        assert_eq!(uart_wait(0), Duration::ZERO);
+        assert!(uart_wait(30) > Duration::ZERO);
+        assert!(uart_wait(30) < WRITE_SLICE);
+        assert!(uart_wait(4096) < WRITE_SLICE);
+
+        let pty = Pty::open();
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut uart = open_uart(&pty.path, DEFAULT_BAUD, stop).expect("pty");
+        let mut stalled = Duration::ZERO;
+        let started = Instant::now();
+        let result = uart.write_and_wait(
+            &[0xA5; 30],
+            Duration::from_millis(200),
+            |_| Ok(30),
+            |pause| stalled += pause,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            stalled < WRITE_SLICE,
+            "non-empty queue stalled the reader for {stalled:?}"
+        );
+        assert!(started.elapsed() < WRITE_SLICE);
+    }
+
+    #[test]
+    fn localhost_resolves_every_address() {
+        let addrs = resolve_net_json("localhost:9").expect("localhost");
+        assert!(addrs.iter().any(SocketAddr::is_ipv4), "{addrs:?}");
+        assert!(addrs.iter().any(SocketAddr::is_ipv6), "{addrs:?}");
+    }
+
+    #[test]
+    fn dials_the_later_address_when_the_first_refuses() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        let addrs = [
+            SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        ];
+        let stop = AtomicBool::new(false);
+        let stream = dial_first(&addrs, &stop, "localhost").expect("dial");
+        assert_eq!(
+            stream.peer_addr().expect("peer").ip(),
+            std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+    }
+
+    #[test]
+    fn ctrl_c_interrupts_a_connect() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let addr = "192.0.2.1:81".parse().expect("addr");
+        let started = Instant::now();
+        let err = dial(&addr, &stop, CONNECT_TIMEOUT).expect_err("blackhole");
+        assert!(matches!(err, DialError::Stopped), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

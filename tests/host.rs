@@ -88,10 +88,7 @@ fn published_track_and_crc() {
     assert_eq!(aircraft.track_deg, 271);
     assert_eq!(aircraft.emergency, None);
 
-    let frame = pack_frame(&trck::Fix {
-        unix_s: snapshot.unix_s,
-        aircraft: aircraft.clone(),
-    });
+    let frame = pack_frame(snapshot.unix_s, aircraft);
     assert_eq!(frame, PUBLISHED);
     assert_eq!(&frame[0..4], b"TRCK");
     assert_eq!(frame[27], 0);
@@ -109,7 +106,7 @@ fn published_track_and_crc() {
 #[test]
 fn a_json_line_is_one_frame_and_a_document_is_not() {
     let fix = fix_from_json_line(PUBLISHED_LINE.as_bytes()).expect("line");
-    assert_eq!(pack_frame(&fix), PUBLISHED);
+    assert_eq!(pack_frame(fix.unix_s, &fix.aircraft), PUBLISHED);
     assert_eq!(
         snapshot_from_aircraft_json(PUBLISHED_LINE.as_bytes()).unwrap_err(),
         SnapshotError::Json
@@ -128,8 +125,8 @@ fn a_line_uses_now_and_ignores_seen_pos() {
     .expect("fresh");
     assert_eq!(fresh.unix_s, 1_700_000_000);
     assert_eq!(fresh.aircraft.icao, 0x40621D);
-    assert_eq!(pack_frame(&fresh)[27], 0);
-    assert_eq!(pack_frame(&fresh).len(), FRAME_LEN);
+    assert_eq!(pack_frame(fresh.unix_s, &fresh.aircraft)[27], 0);
+    assert_eq!(pack_frame(fresh.unix_s, &fresh.aircraft).len(), FRAME_LEN);
 
     let old = fix_from_json_line(
         br#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"seen_pos":100}"#,
@@ -158,7 +155,7 @@ fn line_sentinels_and_track_wrap() {
     assert_eq!(unknown.aircraft.altitude_ft, ALT_UNKNOWN);
     assert_eq!(unknown.aircraft.ground_speed_kt, SPEED_UNKNOWN);
     assert_eq!(unknown.aircraft.track_deg, TRACK_UNKNOWN);
-    assert_eq!(pack_frame(&unknown), UNKNOWN);
+    assert_eq!(pack_frame(unknown.unix_s, &unknown.aircraft), UNKNOWN);
 
     let saturated = fix_from_json_line(
         br#"{"now":10,"hex":"abc124","lat":0,"lon":1,"alt_baro":"ground","gs":65534.6,"track":360}"#,
@@ -167,7 +164,7 @@ fn line_sentinels_and_track_wrap() {
     assert_eq!(saturated.aircraft.altitude_ft, 0);
     assert_eq!(saturated.aircraft.ground_speed_kt, 65534);
     assert_eq!(saturated.aircraft.track_deg, 0);
-    assert_eq!(pack_frame(&saturated), SATURATED);
+    assert_eq!(pack_frame(saturated.unix_s, &saturated.aircraft), SATURATED);
 }
 
 #[test]
@@ -275,18 +272,9 @@ fn emergency_is_on_the_aircraft() {
     assert_eq!(emergency.emergency, Some(EmergencyKind::General));
     assert_eq!(emergency.latitude_e7, 522_572_021);
     assert_eq!(find(&snapshot, 0x400ABC).emergency, None);
+    assert_eq!(pack_frame(snapshot.unix_s, emergency), EMERGENCY);
     assert_eq!(
-        pack_frame(&trck::Fix {
-            unix_s: snapshot.unix_s,
-            aircraft: emergency.clone(),
-        }),
-        EMERGENCY
-    );
-    assert_eq!(
-        pack_frame(&trck::Fix {
-            unix_s: snapshot.unix_s,
-            aircraft: find(&snapshot, 0x400ABC).clone(),
-        }),
+        pack_frame(snapshot.unix_s, find(&snapshot, 0x400ABC)),
         SECOND
     );
     assert_eq!(EMERGENCY[27], EmergencyKind::General.code());
@@ -297,13 +285,7 @@ fn emergency_is_on_the_aircraft() {
     );
     let second = snapshot_from_aircraft_json(&doc(1_700_000_001, &calm)).unwrap();
     assert_eq!(find(&second, 0x40621D).emergency, None);
-    assert_eq!(
-        pack_frame(&trck::Fix {
-            unix_s: second.unix_s,
-            aircraft: find(&second, 0x40621D).clone(),
-        })[27],
-        0
-    );
+    assert_eq!(pack_frame(second.unix_s, find(&second, 0x40621D))[27], 0);
 }
 
 #[test]
@@ -380,7 +362,7 @@ fn emergency_names_and_squawks_on_a_line() {
         let fix = fix_from_json_line(line.as_bytes()).expect(extra);
         assert_eq!(fix.aircraft.icao, 0x40621D, "{extra}");
         assert_eq!(fix.aircraft.emergency, kind, "{extra}");
-        let frame = pack_frame(&fix);
+        let frame = pack_frame(fix.unix_s, &fix.aircraft);
         assert_eq!(frame.len(), FRAME_LEN, "{extra}");
         match kind {
             Some(kind) => assert_eq!(frame[27], kind.code(), "{extra}"),
@@ -397,13 +379,13 @@ fn emergency_names_and_squawks_on_a_line() {
         br#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"emergency":"general"}"#,
     )
     .expect("named");
-    assert_eq!(pack_frame(&named), EMERGENCY);
+    assert_eq!(pack_frame(named.unix_s, &named.aircraft), EMERGENCY);
 
     let squawk = fix_from_json_line(
         br#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"squawk":"7700"}"#,
     )
     .expect("squawk");
-    assert_eq!(pack_frame(&squawk), EMERGENCY);
+    assert_eq!(pack_frame(squawk.unix_s, &squawk.aircraft), EMERGENCY);
 
     let mut unknown = EMERGENCY;
     unknown[27] = 8;
@@ -446,13 +428,7 @@ fn an_emergency_position_is_kept_for_thirty_seconds_in_the_file() {
     assert_eq!(kept.aircraft.len(), 1);
     assert_eq!(kept.aircraft[0].icao, 0x40621D);
     assert_eq!(kept.aircraft[0].emergency, Some(EmergencyKind::General));
-    assert_eq!(
-        pack_frame(&trck::Fix {
-            unix_s: kept.unix_s,
-            aircraft: kept.aircraft[0].clone(),
-        }),
-        EMERGENCY
-    );
+    assert_eq!(pack_frame(kept.unix_s, &kept.aircraft[0]), EMERGENCY);
 
     let dropped = one(
         r#"{"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"seen_pos":30.01,"emergency":"general"}"#,
@@ -480,10 +456,7 @@ fn keeps_an_older_emergency_when_sixty_four_normals_are_fresh() {
     assert!(snapshot.aircraft.iter().any(|aircraft| aircraft.icao == 0));
     assert!(snapshot.aircraft.iter().all(|aircraft| aircraft.icao != 63));
     assert_eq!(
-        pack_frame(&trck::Fix {
-            unix_s: snapshot.unix_s,
-            aircraft: snapshot.aircraft[0].clone(),
-        })[27],
+        pack_frame(snapshot.unix_s, &snapshot.aircraft[0])[27],
         EmergencyKind::General.code()
     );
 }
@@ -551,17 +524,39 @@ fn listen() -> (TcpListener, u16) {
     (listener, port)
 }
 
+enum Session {
+    /// Drop this socket and accept the next one.
+    Next,
+    /// Keep this socket open so the sender can finish reading.
+    Hold,
+}
+
+/// Accept connections and let `script` write the lines for each one.
+fn serve(
+    listener: TcpListener,
+    mut script: impl FnMut(&mut std::net::TcpStream) -> Session + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        loop {
+            let (mut sock, _) = listener.accept().expect("accept");
+            if matches!(script(&mut sock), Session::Hold) {
+                std::thread::sleep(Duration::from_secs(2));
+                break;
+            }
+        }
+    });
+}
+
 #[test]
 fn nothing_is_written_until_a_line_arrives() {
     let (listener, port) = listen();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept");
+    serve(listener, move |sock| {
         ready_tx.send(()).expect("ready");
         go_rx.recv().expect("go");
         writeln!(sock, "{PUBLISHED_LINE}").expect("line");
-        std::thread::sleep(Duration::from_secs(2));
+        Session::Hold
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
@@ -583,14 +578,13 @@ fn nothing_is_written_until_a_line_arrives() {
 #[test]
 fn one_frame_per_valid_line_and_none_for_a_bad_line() {
     let (listener, port) = listen();
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept");
+    serve(listener, |sock| {
         write!(
             sock,
             "not json\n{{\"now\":1}}\n{{\"now\":-1,\"hex\":\"abc123\",\"lat\":1,\"lon\":2}}\n{{\"hex\":\"abc123\",\"lat\":1,\"lon\":2}}\n{{\"now\":1.5,\"hex\":\"abc123\",\"lon\":2}}\n{{\"now\":\"1700000000\",\"hex\":\"abc123\",\"lat\":1,\"lon\":2}}\n{PUBLISHED_LINE}\n{{\"now\":1700000000,\"aircraft\":[]}}\n{SECOND_LINE}\n"
         )
         .expect("lines");
-        std::thread::sleep(Duration::from_secs(2));
+        Session::Hold
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
@@ -606,11 +600,10 @@ fn one_frame_per_valid_line_and_none_for_a_bad_line() {
 #[test]
 fn the_same_icao_is_sent_twice() {
     let (listener, port) = listen();
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept");
+    serve(listener, |sock| {
         writeln!(sock, "{PUBLISHED_LINE}").expect("first");
         writeln!(sock, "{PUBLISHED_LINE}").expect("second");
-        std::thread::sleep(Duration::from_secs(2));
+        Session::Hold
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
@@ -628,13 +621,12 @@ fn a_split_line_is_one_frame() {
     let head = head.to_vec();
     let mut tail = tail.to_vec();
     tail.push(b'\n');
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept");
+    serve(listener, move |sock| {
         sock.write_all(&head).expect("head");
         ready_tx.send(()).expect("ready");
         go_rx.recv().expect("go");
         sock.write_all(&tail).expect("tail");
-        std::thread::sleep(Duration::from_secs(2));
+        Session::Hold
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
@@ -655,15 +647,14 @@ fn a_split_line_is_one_frame() {
 fn emergency_and_squawk_are_on_the_wire() {
     let (listener, port) = listen();
     let unlawful = r#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"emergency":"unlawful","squawk":"7700"}"#;
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept");
+    serve(listener, move |sock| {
         writeln!(
             sock,
             r#"{{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"squawk":"7700"}}"#
         )
         .expect("squawk");
         writeln!(sock, "{unlawful}").expect("name");
-        std::thread::sleep(Duration::from_secs(2));
+        Session::Hold
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
@@ -678,12 +669,14 @@ fn emergency_and_squawk_are_on_the_wire() {
 #[test]
 fn a_dead_socket_writes_nothing_until_the_next_line() {
     let (listener, port) = listen();
-    std::thread::spawn(move || {
-        let (sock, _) = listener.accept().expect("first");
-        drop(sock);
-        let (mut sock, _) = listener.accept().expect("second");
+    let mut first = true;
+    serve(listener, move |sock| {
+        if first {
+            first = false;
+            return Session::Next;
+        }
         writeln!(sock, "{PUBLISHED_LINE}").expect("line");
-        std::thread::sleep(Duration::from_secs(2));
+        Session::Hold
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
@@ -716,14 +709,8 @@ fn sample_sends_one_frame_per_aircraft() {
     assert_eq!(expect.aircraft.len(), 2);
     assert_eq!(expect.unix_s, 1_700_000_000);
     let frames = [
-        pack_frame(&trck::Fix {
-            unix_s: expect.unix_s,
-            aircraft: expect.aircraft[0].clone(),
-        }),
-        pack_frame(&trck::Fix {
-            unix_s: expect.unix_s,
-            aircraft: expect.aircraft[1].clone(),
-        }),
+        pack_frame(expect.unix_s, &expect.aircraft[0]),
+        pack_frame(expect.unix_s, &expect.aircraft[1]),
     ];
     assert_eq!(frames[0], SECOND);
     assert_eq!(frames[1], PUBLISHED);

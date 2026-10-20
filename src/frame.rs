@@ -8,7 +8,6 @@ const CCITT_FALSE: Crc<u16> = Crc::<u16>::new(&CRC_16_IBM_3740);
 
 pub const TRACK_MAGIC: &[u8; 4] = b"TRCK";
 pub const FRAME_LEN: usize = 30;
-pub const TRACK_MAX_AIRCRAFT: usize = 64;
 pub const SPEED_UNKNOWN: u16 = 0xFFFF;
 pub const TRACK_UNKNOWN: u16 = 0xFFFF;
 pub const ALT_UNKNOWN: i32 = i32::MIN;
@@ -72,13 +71,6 @@ pub struct Fix {
     pub aircraft: Aircraft,
 }
 
-/// The qualifying tracks from one `aircraft.json`, capped at [`TRACK_MAX_AIRCRAFT`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Snapshot {
-    pub unix_s: u32,
-    pub aircraft: Vec<Aircraft>,
-}
-
 /// `floor(|degrees| * 1e7 + 0.5)` with the original sign.
 pub fn deg_e7(degrees: f64) -> i32 {
     let scaled = (degrees.abs() * 10_000_000.0 + 0.5).floor() as i32;
@@ -86,18 +78,18 @@ pub fn deg_e7(degrees: f64) -> i32 {
 }
 
 /// Magic, unix seconds, one aircraft, then CRC-16/CCITT-FALSE over the first 28 bytes.
-pub fn pack_frame(fix: &Fix) -> [u8; FRAME_LEN] {
+pub fn pack_frame(unix_s: u32, aircraft: &Aircraft) -> [u8; FRAME_LEN] {
     let mut raw = [0u8; FRAME_LEN];
     raw[0..4].copy_from_slice(TRACK_MAGIC);
-    raw[4..8].copy_from_slice(&fix.unix_s.to_le_bytes());
-    let icao = (fix.aircraft.icao & 0x00ff_ffff).to_le_bytes();
+    raw[4..8].copy_from_slice(&unix_s.to_le_bytes());
+    let icao = (aircraft.icao & 0x00ff_ffff).to_le_bytes();
     raw[8..11].copy_from_slice(&icao[..3]);
-    raw[11..15].copy_from_slice(&fix.aircraft.latitude_e7.to_le_bytes());
-    raw[15..19].copy_from_slice(&fix.aircraft.longitude_e7.to_le_bytes());
-    raw[19..23].copy_from_slice(&fix.aircraft.altitude_ft.to_le_bytes());
-    raw[23..25].copy_from_slice(&fix.aircraft.ground_speed_kt.to_le_bytes());
-    raw[25..27].copy_from_slice(&fix.aircraft.track_deg.to_le_bytes());
-    raw[27] = fix.aircraft.emergency.map(EmergencyKind::code).unwrap_or(0);
+    raw[11..15].copy_from_slice(&aircraft.latitude_e7.to_le_bytes());
+    raw[15..19].copy_from_slice(&aircraft.longitude_e7.to_le_bytes());
+    raw[19..23].copy_from_slice(&aircraft.altitude_ft.to_le_bytes());
+    raw[23..25].copy_from_slice(&aircraft.ground_speed_kt.to_le_bytes());
+    raw[25..27].copy_from_slice(&aircraft.track_deg.to_le_bytes());
+    raw[27] = aircraft.emergency.map(EmergencyKind::code).unwrap_or(0);
     let crc = crc16_ccitt_false(&raw[..28]);
     raw[28..30].copy_from_slice(&crc.to_le_bytes());
     raw
