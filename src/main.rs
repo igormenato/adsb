@@ -678,15 +678,15 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
             },
         ];
         let mut nfds = 1usize;
-        if writer.has_pending() {
-            if let Some(fd) = writer.uart_fd() {
-                fds[1] = libc::pollfd {
-                    fd,
-                    events: libc::POLLOUT,
-                    revents: 0,
-                };
-                nfds = 2;
-            }
+        if writer.has_pending()
+            && let Some(fd) = writer.uart_fd()
+        {
+            fds[1] = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            nfds = 2;
         }
         if let Err(err) = poll_wait(&mut fds[..nfds], POLL_SLICE) {
             eprintln!("net-json {text}: {err}");
@@ -721,13 +721,14 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
         }
         let uart_ready =
             nfds == 2 && fds[1].revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) != 0;
-        if writer.has_pending() && (fresh || uart_ready || writer.uart_fd().is_none()) {
-            if let Err(err) = writer.write_some() {
-                return match err {
-                    ChunkError::Stopped => Pump::Stopped,
-                    ChunkError::Failed(err) => Pump::Uart(err),
-                };
-            }
+        if writer.has_pending()
+            && (fresh || uart_ready || writer.uart_fd().is_none())
+            && let Err(err) = writer.write_some()
+        {
+            return match err {
+                ChunkError::Stopped => Pump::Stopped,
+                ChunkError::Failed(err) => Pump::Uart(err),
+            };
         }
     }
 }
