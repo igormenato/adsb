@@ -96,7 +96,7 @@ pub fn pack_frame(unix_s: u32, aircraft: &Aircraft) -> [u8; FRAME_LEN] {
 }
 
 /// Positions `--check` repeats. Each one is passed to [`pack_frame`].
-pub fn sample_frames() -> [[u8; FRAME_LEN]; 3] {
+pub fn check_frames() -> [[u8; FRAME_LEN]; 3] {
     const UNIX_S: u32 = 1_700_000_000;
     let positions = [
         Aircraft {

@@ -1,4 +1,4 @@
-//! Host tests: JSON lines for the live port, and `--check` against `sample_frames`.
+//! Host tests: JSON lines for the live port, and `--check` against `check_frames`.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -293,13 +293,13 @@ fn spawn_net(port: u16) -> StopSender {
     StopSender(child)
 }
 
-fn spawn_sample() -> StopSender {
+fn spawn_check() -> StopSender {
     let child = Command::new(env!("CARGO_BIN_EXE_trck"))
         .args(["--check", "--uart", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn sample");
+        .expect("spawn check");
     StopSender(child)
 }
 
@@ -514,18 +514,53 @@ fn a_refused_port_writes_nothing() {
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 
+fn frame_icao(frame: &[u8]) -> u32 {
+    u32::from_le_bytes([frame[8], frame[9], frame[10], 0])
+}
+
 #[test]
-fn sample_matches_sample_frames() {
-    let frames = trck::sample_frames();
-    assert!(frames.iter().any(|frame| frame[27] == 0));
-    assert!(
-        frames
-            .iter()
-            .any(|frame| frame[27] == EmergencyKind::General.code())
-    );
+fn check_and_net_json_together_are_an_error() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .args(["--check", "--net-json", "127.0.0.1:9", "--uart", "-"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let buf = collect_stdout(child.stdout.take().unwrap());
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait") {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(2) {
+            let _ = child.kill();
+            panic!("--check with --net-json kept running");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success(), "{status}");
+    assert!(buf.lock().expect("lock").is_empty());
+}
+
+#[test]
+fn check_matches_check_frames() {
+    let frames = trck::check_frames();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frame_icao(&frames[0]), 0x400ABC);
+    assert_eq!(frames[0][27], 0);
+    assert_eq!(frame_icao(&frames[1]), 0x40621D);
+    assert_eq!(frames[1][27], 0);
+    assert_eq!(frame_icao(&frames[2]), 0x4CA123);
+    assert_eq!(frames[2][27], EmergencyKind::General.code());
+    for frame in &frames {
+        assert_eq!(
+            u32::from_le_bytes(frame[4..8].try_into().unwrap()),
+            1_700_000_000
+        );
+    }
     let expect: Vec<u8> = frames.into_iter().flatten().collect();
 
-    let mut sender = spawn_sample();
+    let mut sender = spawn_check();
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     let got = wait_len(&buf, expect.len(), Duration::from_secs(2));
     assert!(got.len() >= expect.len(), "short output: {}", got.len());

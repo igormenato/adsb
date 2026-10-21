@@ -31,7 +31,7 @@ Inside that shell, `cargo build --release --target arm-unknown-linux-musleabihf`
 
 `--net-json HOST:PORT` is the live input. Each accepted position is one JSON object and a newline. `trck` writes one UART frame for that line and does not wait.
 
-`--check` sends the known frames instead of reading readsb, to check the UART. It repeats a few built-in positions through `pack_frame`, the same encoder as the live port. One is a normal position and one is squawk 7700.
+`--check` sends the known frames instead of reading readsb, to check the UART. It repeats three positions through `pack_frame`, the same encoder as the live port. Two are ordinary, ICAO `400ABC` and `40621D`. The third is a general emergency, ICAO `4CA123`, byte 27 set to 1. All three use unix time `1700000000`. `--check` and `--net-json` together are an error.
 
 `--uart` defaults to `/dev/serial0`. `--uart -` writes the frames to stdout. `--baud` defaults to 115200.
 

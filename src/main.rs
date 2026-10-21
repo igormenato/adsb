@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{fix_from_json_line, pack_frame, sample_frames};
+use trck::{check_frames, fix_from_json_line, pack_frame};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
@@ -35,7 +35,12 @@ const MAX_LINE: usize = 8192;
 #[command(about = "Send each readsb position to a UART as it arrives.")]
 struct Args {
     /// Host and port of readsb `--net-json-port`. Required unless `--check`.
-    #[arg(long, required_unless_present = "check", value_name = "HOST:PORT")]
+    #[arg(
+        long,
+        required_unless_present = "check",
+        conflicts_with = "check",
+        value_name = "HOST:PORT"
+    )]
     net_json: Option<String>,
     /// UART device, or - for stdout.
     #[arg(long, default_value = DEFAULT_UART)]
@@ -46,7 +51,7 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_INTERVAL_S)]
     interval: f64,
     /// Send the known frames instead of reading readsb, to check the UART.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "net_json")]
     check: bool,
 }
 
@@ -320,7 +325,7 @@ fn main() -> ExitCode {
         eprintln!("check uart={} baud={}", args.uart, args.baud);
         let interval =
             Duration::try_from_secs_f64(args.interval.max(0.2)).unwrap_or(Duration::from_secs(1));
-        return run_sample(interval, &mut writer, &stop);
+        return run_check(interval, &mut writer, &stop);
     }
 
     let Some(text) = args.net_json.as_deref() else {
@@ -335,9 +340,9 @@ fn main() -> ExitCode {
     run_port(&addrs, text, &mut writer, &stop)
 }
 
-fn run_sample(interval: Duration, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
+fn run_check(interval: Duration, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     while !stop.load(Ordering::Relaxed) {
-        for frame in sample_frames() {
+        for frame in check_frames() {
             let unix_s = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
             let icao = u32::from_le_bytes([frame[8], frame[9], frame[10], 0]);
             writer.enqueue(frame);
