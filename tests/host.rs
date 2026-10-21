@@ -1,4 +1,4 @@
-//! Host tests: JSON lines for the live port, and `--sample` against `sample_frames`.
+//! Host tests: JSON lines for the live port, and `--check` against `sample_frames`.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -295,7 +295,7 @@ fn spawn_net(port: u16) -> StopSender {
 
 fn spawn_sample() -> StopSender {
     let child = Command::new(env!("CARGO_BIN_EXE_trck"))
-        .args(["--sample", "--uart", "-"])
+        .args(["--check", "--uart", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()

@@ -2,7 +2,7 @@
 
 The Raspberry Pi writes one 30-byte UART frame for each position readsb accepts on `--net-json-port`. The frame is one aircraft. It is not a list. An emergency is one byte in that frame. The ESP32 reads the frame and copies the aircraft fields into the satellite telemetry that goes to the ground. It does not cast the frame to a struct. It does not forward the raw frame as the radio payload. It does not decode 1090 MHz ADS-B.
 
-`trck --sample` writes those same frames on the UART. The ESP32 can check reception against that. Those frames are the live layout.
+`trck --check` writes those same frames on the UART. The ESP32 can check reception against that. Those frames are the live layout.
 
 ## What you do
 

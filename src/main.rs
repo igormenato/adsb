@@ -34,20 +34,20 @@ const MAX_LINE: usize = 8192;
 #[derive(Parser, Debug)]
 #[command(about = "Send each readsb position to a UART as it arrives.")]
 struct Args {
-    /// Host and port of readsb `--net-json-port`. Required unless `--sample`.
-    #[arg(long, required_unless_present = "sample", value_name = "HOST:PORT")]
+    /// Host and port of readsb `--net-json-port`. Required unless `--check`.
+    #[arg(long, required_unless_present = "check", value_name = "HOST:PORT")]
     net_json: Option<String>,
     /// UART device, or - for stdout.
     #[arg(long, default_value = DEFAULT_UART)]
     uart: String,
     #[arg(long, default_value_t = DEFAULT_BAUD)]
     baud: u32,
-    /// Seconds between passes of `--sample`. The JSON port does not wait.
+    /// Seconds between passes of `--check`. The JSON port does not wait.
     #[arg(long, default_value_t = DEFAULT_INTERVAL_S)]
     interval: f64,
-    /// Repeat a few built-in positions through the live packer.
+    /// Send the known frames instead of reading readsb, to check the UART.
     #[arg(long)]
-    sample: bool,
+    check: bool,
 }
 
 #[derive(Debug)]
@@ -316,15 +316,15 @@ fn main() -> ExitCode {
         }
     }
 
-    if args.sample {
-        eprintln!("sample uart={} baud={}", args.uart, args.baud);
+    if args.check {
+        eprintln!("check uart={} baud={}", args.uart, args.baud);
         let interval =
             Duration::try_from_secs_f64(args.interval.max(0.2)).unwrap_or(Duration::from_secs(1));
         return run_sample(interval, &mut writer, &stop);
     }
 
     let Some(text) = args.net_json.as_deref() else {
-        eprintln!("pass --net-json HOST:PORT, or --sample");
+        eprintln!("pass --net-json HOST:PORT, or --check");
         return ExitCode::from(1);
     };
     let Some(addrs) = resolve_net_json(text) else {

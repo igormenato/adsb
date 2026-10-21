@@ -31,11 +31,11 @@ Inside that shell, `cargo build --release --target arm-unknown-linux-musleabihf`
 
 `--net-json HOST:PORT` is the live input. Each accepted position is one JSON object and a newline. `trck` writes one UART frame for that line and does not wait.
 
-`--sample` repeats a few built-in positions through `pack_frame`, the same encoder as the live port. One is a normal position and one is squawk 7700.
+`--check` sends the known frames instead of reading readsb, to check the UART. It repeats a few built-in positions through `pack_frame`, the same encoder as the live port. One is a normal position and one is squawk 7700.
 
 `--uart` defaults to `/dev/serial0`. `--uart -` writes the frames to stdout. `--baud` defaults to 115200.
 
-`--interval` is the pause between `--sample` passes. A value below 0.2 seconds is treated as 0.2. The JSON port ignores it.
+`--interval` is the pause between `--check` passes. A value below 0.2 seconds is treated as 0.2. The JSON port ignores it.
 
 If the socket dies, `trck` writes frames already queued without waiting on the UART, then connects again after one second, then two, then four, and so on, up to 30 seconds. If the peer dies without closing, `trck` probes after 30 seconds of silence, then every 10 seconds, three times. Failed probes count as a dead socket. A quiet sky stays connected. A line with a missing or bad `now`, or with no latitude or longitude, is skipped. The process stays up.
 
