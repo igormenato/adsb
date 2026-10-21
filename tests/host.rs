@@ -1,4 +1,4 @@
-//! Host tests: aircraft.json for the file parser, JSON lines for the live port.
+//! Host tests: JSON lines for the live port, and `--check` against `check_frames`.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -7,9 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use trck::{
-    ALT_UNKNOWN, EmergencyKind, FRAME_LEN, SPEED_UNKNOWN, SnapshotError, TRACK_MAGIC,
-    TRACK_MAX_AIRCRAFT, TRACK_UNKNOWN, crc16_ccitt_false, fix_from_json_line, pack_frame,
-    snapshot_from_aircraft_json, unpack_frame,
+    ALT_UNKNOWN, EmergencyKind, FRAME_LEN, SPEED_UNKNOWN, TRACK_MAGIC, TRACK_UNKNOWN,
+    crc16_ccitt_false, fix_from_json_line, pack_frame, unpack_frame,
 };
 
 const PUBLISHED_LINE: &str = r#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4}"#;
@@ -41,45 +40,14 @@ const SATURATED: [u8; FRAME_LEN] = [
     0x96, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe, 0xff, 0x00, 0x00, 0x00, 0xa8, 0x0d,
 ];
 
-fn json(body: &str) -> Vec<u8> {
-    format!(r#"{{"now": 1700000000.9, "aircraft": [{body}]}}"#).into_bytes()
-}
-
-fn one(body: &str) -> trck::Snapshot {
-    snapshot_from_aircraft_json(&json(body)).expect("fixture")
-}
-
-fn doc(now: u32, body: &str) -> Vec<u8> {
-    format!(r#"{{"now": {now}.0, "aircraft": [{body}]}}"#).into_bytes()
-}
-
-const NORMAL: &str = r#"{"hex":"400abc","lat":10.5,"lon":-20.25,"alt_baro":12000,"gs":280,"track":90,"seen_pos":0.4}"#;
-
-fn emergency_body(extra: &str) -> String {
-    format!(
-        r#"{{"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"seen_pos":1.2,{extra}}}"#
-    )
-}
-
-fn find(snapshot: &trck::Snapshot, icao: u32) -> &trck::Aircraft {
-    snapshot
-        .aircraft
-        .iter()
-        .find(|aircraft| aircraft.icao == icao)
-        .expect("icao")
-}
-
 #[test]
 fn published_track_and_crc() {
     assert_eq!(crc16_ccitt_false(b"123456789"), 0x29B1);
     assert_eq!(TRACK_MAGIC, b"TRCK");
 
-    let snapshot = one(
-        r#"{"hex":"40621d","flight":"ryr123","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"seen_pos":1.2}"#,
-    );
-    assert_eq!(snapshot.unix_s, 1_700_000_000);
-    assert_eq!(snapshot.aircraft.len(), 1);
-    let aircraft = &snapshot.aircraft[0];
+    let fix = fix_from_json_line(PUBLISHED_LINE.as_bytes()).expect("line");
+    assert_eq!(fix.unix_s, 1_700_000_000);
+    let aircraft = &fix.aircraft;
     assert_eq!(aircraft.icao, 0x40621D);
     assert_eq!(aircraft.latitude_e7, 522_572_021);
     assert_eq!(aircraft.longitude_e7, 39_193_726);
@@ -88,7 +56,7 @@ fn published_track_and_crc() {
     assert_eq!(aircraft.track_deg, 271);
     assert_eq!(aircraft.emergency, None);
 
-    let frame = pack_frame(snapshot.unix_s, aircraft);
+    let frame = pack_frame(fix.unix_s, aircraft);
     assert_eq!(frame, PUBLISHED);
     assert_eq!(&frame[0..4], b"TRCK");
     assert_eq!(frame[27], 0);
@@ -107,14 +75,12 @@ fn published_track_and_crc() {
 fn a_json_line_is_one_frame_and_a_document_is_not() {
     let fix = fix_from_json_line(PUBLISHED_LINE.as_bytes()).expect("line");
     assert_eq!(pack_frame(fix.unix_s, &fix.aircraft), PUBLISHED);
-    assert_eq!(
-        snapshot_from_aircraft_json(PUBLISHED_LINE.as_bytes()).unwrap_err(),
-        SnapshotError::Json
+    assert!(
+        fix_from_json_line(
+            br#"{"now":1700000000.9,"aircraft":[{"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375}]}"#
+        )
+        .is_none()
     );
-    let document = json(
-        r#"{"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"seen_pos":1.2}"#,
-    );
-    assert!(fix_from_json_line(&document).is_none());
 }
 
 #[test]
@@ -145,6 +111,10 @@ fn a_line_uses_now_and_ignores_seen_pos() {
     assert!(fix_from_json_line(br#"{"now":1e20,"hex":"40621d","lat":1,"lon":2}"#).is_none());
     assert!(fix_from_json_line(b"not json").is_none());
     assert!(fix_from_json_line(br#"{"now":1,"aircraft":[]}"#).is_none());
+    assert!(
+        fix_from_json_line(br#"{"now":30,"hex":"40621d","squawk":"7700","emergency":"general"}"#)
+            .is_none()
+    );
 }
 
 #[test]
@@ -165,127 +135,24 @@ fn line_sentinels_and_track_wrap() {
     assert_eq!(saturated.aircraft.ground_speed_kt, 65534);
     assert_eq!(saturated.aircraft.track_deg, 0);
     assert_eq!(pack_frame(saturated.unix_s, &saturated.aircraft), SATURATED);
-}
 
-#[test]
-fn skips_aircraft_without_a_position() {
-    let snapshot = one(r#"{"hex":"abc123","flight":"NOFIX"},
-           {"hex":"~40621d","lat":10.5,"lon":-20.25,"alt_baro":"ground","seen_pos":1.5},
-           {"hex":"000001","lat":1,"lon":2,"alt_geom":3280.4,"seen_pos":1}"#);
-    assert_eq!(snapshot.aircraft.len(), 2);
-    assert_eq!(snapshot.aircraft[0].icao, 1);
-    assert_eq!(snapshot.aircraft[0].altitude_ft, 3280);
-    assert_eq!(snapshot.aircraft[0].ground_speed_kt, SPEED_UNKNOWN);
-    assert_eq!(snapshot.aircraft[0].track_deg, TRACK_UNKNOWN);
-    assert_eq!(snapshot.aircraft[1].icao, 0x40621D);
-    assert_eq!(snapshot.aircraft[1].altitude_ft, 0);
-    assert_eq!(snapshot.aircraft[1].latitude_e7, 105_000_000);
-    assert_eq!(snapshot.aircraft[1].longitude_e7, -202_500_000);
-}
-
-#[test]
-fn empty_sky_is_a_valid_snapshot() {
-    let snapshot = snapshot_from_aircraft_json(br#"{"now": 10, "aircraft": []}"#).unwrap();
-    assert_eq!(snapshot.unix_s, 10);
-    assert!(snapshot.aircraft.is_empty());
-}
-
-#[test]
-fn keeps_the_sixty_four_freshest() {
-    let mut entries = Vec::new();
-    for index in 0..70 {
-        entries.push(format!(
-            r#"{{"hex":"{index:06x}","lat":1,"lon":2,"seen_pos":{}}}"#,
-            index as f64 / 100.0
-        ));
-    }
-    let snapshot = one(&entries.join(","));
-    assert_eq!(snapshot.aircraft.len(), TRACK_MAX_AIRCRAFT);
-    assert_eq!(snapshot.aircraft[0].icao, 0);
-    assert_eq!(snapshot.aircraft[63].icao, 63);
-}
-
-#[test]
-fn unknown_speed_track_and_altitude_in_the_file() {
-    let snapshot = one(
-        r#"{"hex":"abc123","lat":0,"lon":0,"gs":-1,"track":-5,"seen_pos":0},
-           {"hex":"abc124","lat":0,"lon":1,"gs":65534.6,"track":360,"seen_pos":0.1},
-           {"hex":"abc125","lat":0,"lon":2,"alt_baro":"ground","seen_pos":0.2}"#,
-    );
-    assert_eq!(snapshot.aircraft[0].ground_speed_kt, SPEED_UNKNOWN);
-    assert_eq!(snapshot.aircraft[0].track_deg, TRACK_UNKNOWN);
-    assert_eq!(snapshot.aircraft[0].altitude_ft, ALT_UNKNOWN);
-    assert_eq!(snapshot.aircraft[1].ground_speed_kt, 65534);
-    assert_eq!(snapshot.aircraft[1].track_deg, 0);
-    assert_eq!(snapshot.aircraft[2].altitude_ft, 0);
+    let geometric =
+        fix_from_json_line(br#"{"now":10,"hex":"000001","lat":1,"lon":2,"alt_geom":3280.4}"#)
+            .expect("geom");
+    assert_eq!(geometric.aircraft.altitude_ft, 3280);
+    assert_eq!(geometric.aircraft.ground_speed_kt, SPEED_UNKNOWN);
+    assert_eq!(geometric.aircraft.track_deg, TRACK_UNKNOWN);
 }
 
 #[test]
 fn drops_a_bad_hex() {
-    let snapshot = one(r#"{"hex":"~40621d","lat":1,"lon":2,"seen_pos":0.1},
-           {"hex":"40G621","lat":1,"lon":2,"seen_pos":0.2},
-           {"hex":"abcdefg","lat":1,"lon":2,"seen_pos":0.3},
-           {"hex":" abc","lat":1,"lon":2,"seen_pos":0.4},
-           {"hex":"~~40621d","lat":1,"lon":2,"seen_pos":0.5}"#);
-    assert_eq!(snapshot.aircraft.len(), 1);
-    assert_eq!(snapshot.aircraft[0].icao, 0x40621D);
+    let tilde = fix_from_json_line(br#"{"now":1,"hex":"~40621d","lat":1,"lon":2}"#).expect("tilde");
+    assert_eq!(tilde.aircraft.icao, 0x40621D);
     assert!(fix_from_json_line(br#"{"now":1,"hex":"40G621","lat":1,"lon":2}"#).is_none());
+    assert!(fix_from_json_line(br#"{"now":1,"hex":"abcdefg","lat":1,"lon":2}"#).is_none());
+    assert!(fix_from_json_line(br#"{"now":1,"hex":" abc","lat":1,"lon":2}"#).is_none());
+    assert!(fix_from_json_line(br#"{"now":1,"hex":"~~40621d","lat":1,"lon":2}"#).is_none());
     assert!(fix_from_json_line(br#"{"now":1,"hex":"40621d","lat":91,"lon":2}"#).is_none());
-}
-
-#[test]
-fn drops_a_stale_position_in_the_file() {
-    let snapshot = one(r#"{"hex":"000001","lat":1,"lon":2,"seen_pos":2},
-           {"hex":"000002","lat":1,"lon":2,"seen_pos":2.01},
-           {"hex":"000003","lat":1,"lon":2},
-           {"hex":"000004","lat":1,"lon":2,"seen_pos":0.4}"#);
-    assert_eq!(snapshot.aircraft.len(), 2);
-    assert_eq!(snapshot.aircraft[0].icao, 4);
-    assert_eq!(snapshot.aircraft[1].icao, 1);
-}
-
-#[test]
-fn rejects_a_bad_document() {
-    assert_eq!(
-        snapshot_from_aircraft_json(b"not json").unwrap_err(),
-        SnapshotError::Json
-    );
-    assert_eq!(
-        snapshot_from_aircraft_json(br#"{"aircraft":[]}"#).unwrap_err(),
-        SnapshotError::MissingNow
-    );
-    assert_eq!(
-        snapshot_from_aircraft_json(br#"{"now": -1, "aircraft":[]}"#).unwrap_err(),
-        SnapshotError::BadNow
-    );
-    assert_eq!(
-        snapshot_from_aircraft_json(br#"{"now": 1}"#).unwrap_err(),
-        SnapshotError::Json
-    );
-}
-
-#[test]
-fn emergency_is_on_the_aircraft() {
-    let both = format!("{},{}", NORMAL, emergency_body(r#""squawk":"7700""#));
-    let snapshot = snapshot_from_aircraft_json(&doc(1_700_000_000, &both)).unwrap();
-    let emergency = find(&snapshot, 0x40621D);
-    assert_eq!(emergency.emergency, Some(EmergencyKind::General));
-    assert_eq!(emergency.latitude_e7, 522_572_021);
-    assert_eq!(find(&snapshot, 0x400ABC).emergency, None);
-    assert_eq!(pack_frame(snapshot.unix_s, emergency), EMERGENCY);
-    assert_eq!(
-        pack_frame(snapshot.unix_s, find(&snapshot, 0x400ABC)),
-        SECOND
-    );
-    assert_eq!(EMERGENCY[27], EmergencyKind::General.code());
-    assert_eq!(SECOND[27], 0);
-
-    let calm = format!(
-        r#"{NORMAL},{{"hex":"40621d","lat":52.27,"lon":3.93,"alt_baro":38200,"gs":450,"track":270,"seen_pos":0.2}}"#
-    );
-    let second = snapshot_from_aircraft_json(&doc(1_700_000_001, &calm)).unwrap();
-    assert_eq!(find(&second, 0x40621D).emergency, None);
-    assert_eq!(pack_frame(second.unix_s, find(&second, 0x40621D))[27], 0);
 }
 
 #[test]
@@ -406,64 +273,6 @@ fn emergency_names_and_squawks_on_a_line() {
     );
 }
 
-#[test]
-fn an_emergency_without_a_position_is_left_out_of_the_file() {
-    let body = r#"{"hex":"40621d","squawk":"7700","emergency":"general"},
-        {"hex":"40621e","lat":53,"lon":4,"seen_pos":30.01,"squawk":"7600"},
-        {"hex":"40621f","lat":53,"lon":4,"squawk":"7500"},
-        {"hex":"000001","lat":1,"lon":2,"seen_pos":2.01},
-        {"hex":"400abc","lat":10.5,"lon":-20.25,"alt_baro":12000,"seen_pos":0.4,"alert":1,"squawk":"1000","emergency":"none"}"#;
-    let snapshot = snapshot_from_aircraft_json(&doc(30, body)).unwrap();
-    assert_eq!(snapshot.aircraft.len(), 1);
-    assert_eq!(snapshot.aircraft[0].icao, 0x400ABC);
-    assert_eq!(snapshot.aircraft[0].emergency, None);
-    assert!(
-        fix_from_json_line(br#"{"now":30,"hex":"40621d","squawk":"7700","emergency":"general"}"#)
-            .is_none()
-    );
-}
-
-#[test]
-fn an_emergency_position_is_kept_for_thirty_seconds_in_the_file() {
-    let kept = one(
-        r#"{"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"seen_pos":30,"emergency":"general"}"#,
-    );
-    assert_eq!(kept.aircraft.len(), 1);
-    assert_eq!(kept.aircraft[0].icao, 0x40621D);
-    assert_eq!(kept.aircraft[0].emergency, Some(EmergencyKind::General));
-    assert_eq!(pack_frame(kept.unix_s, &kept.aircraft[0]), EMERGENCY);
-
-    let dropped = one(
-        r#"{"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"seen_pos":30.01,"emergency":"general"}"#,
-    );
-    assert!(dropped.aircraft.is_empty());
-
-    let boundary = one(r#"{"hex":"000002","lat":1,"lon":2,"seen_pos":2,"squawk":"7700"}"#);
-    assert_eq!(boundary.aircraft[0].emergency, Some(EmergencyKind::General));
-}
-
-#[test]
-fn keeps_an_older_emergency_when_sixty_four_normals_are_fresh() {
-    let mut entries = Vec::new();
-    for index in 0..64 {
-        entries.push(format!(
-            r#"{{"hex":"{index:06x}","lat":1,"lon":2,"seen_pos":{}}}"#,
-            index as f64 / 100.0
-        ));
-    }
-    entries.push(r#"{"hex":"000100","lat":3,"lon":4,"seen_pos":10,"squawk":"7700"}"#.to_string());
-    let snapshot = one(&entries.join(","));
-    assert_eq!(snapshot.aircraft.len(), TRACK_MAX_AIRCRAFT);
-    assert_eq!(snapshot.aircraft[0].icao, 0x100);
-    assert_eq!(snapshot.aircraft[0].emergency, Some(EmergencyKind::General));
-    assert!(snapshot.aircraft.iter().any(|aircraft| aircraft.icao == 0));
-    assert!(snapshot.aircraft.iter().all(|aircraft| aircraft.icao != 63));
-    assert_eq!(
-        pack_frame(snapshot.unix_s, &snapshot.aircraft[0])[27],
-        EmergencyKind::General.code()
-    );
-}
-
 struct StopSender(std::process::Child);
 
 impl Drop for StopSender {
@@ -484,13 +293,13 @@ fn spawn_net(port: u16) -> StopSender {
     StopSender(child)
 }
 
-fn spawn_sample() -> StopSender {
+fn spawn_check() -> StopSender {
     let child = Command::new(env!("CARGO_BIN_EXE_trck"))
-        .args(["--sample", "--uart", "-"])
+        .args(["--check", "--uart", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn sample");
+        .expect("spawn check");
     StopSender(child)
 }
 
@@ -705,23 +514,56 @@ fn a_refused_port_writes_nothing() {
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 
-#[test]
-fn sample_sends_one_frame_per_aircraft() {
-    let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sample/aircraft.json");
-    let expect = snapshot_from_aircraft_json(&std::fs::read(&sample_path).unwrap()).unwrap();
-    assert_eq!(expect.aircraft.len(), 2);
-    assert_eq!(expect.unix_s, 1_700_000_000);
-    let frames = [
-        pack_frame(expect.unix_s, &expect.aircraft[0]),
-        pack_frame(expect.unix_s, &expect.aircraft[1]),
-    ];
-    assert_eq!(frames[0], SECOND);
-    assert_eq!(frames[1], PUBLISHED);
+fn frame_icao(frame: &[u8]) -> u32 {
+    u32::from_le_bytes([frame[8], frame[9], frame[10], 0])
+}
 
-    let mut sender = spawn_sample();
+#[test]
+fn check_and_net_json_together_are_an_error() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .args(["--check", "--net-json", "127.0.0.1:9", "--uart", "-"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let buf = collect_stdout(child.stdout.take().unwrap());
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait") {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(2) {
+            let _ = child.kill();
+            panic!("--check with --net-json kept running");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success(), "{status}");
+    assert!(buf.lock().expect("lock").is_empty());
+}
+
+#[test]
+fn check_matches_check_frames() {
+    let frames = trck::check_frames();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frame_icao(&frames[0]), 0x400ABC);
+    assert_eq!(frames[0][27], 0);
+    assert_eq!(frame_icao(&frames[1]), 0x40621D);
+    assert_eq!(frames[1][27], 0);
+    assert_eq!(frame_icao(&frames[2]), 0x4CA123);
+    assert_eq!(frames[2][27], EmergencyKind::General.code());
+    for frame in &frames {
+        assert_eq!(
+            u32::from_le_bytes(frame[4..8].try_into().unwrap()),
+            1_700_000_000
+        );
+    }
+    let expect: Vec<u8> = frames.into_iter().flatten().collect();
+
+    let mut sender = spawn_check();
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
-    let got = wait_len(&buf, FRAME_LEN * 2, Duration::from_secs(2));
-    assert!(got.len() >= FRAME_LEN * 2, "short output: {}", got.len());
-    assert_eq!(&got[..FRAME_LEN * 2], &[frames[0], frames[1]].concat()[..]);
+    let got = wait_len(&buf, expect.len(), Duration::from_secs(2));
+    assert!(got.len() >= expect.len(), "short output: {}", got.len());
+    assert_eq!(&got[..expect.len()], expect.as_slice());
     assert!(sender.0.try_wait().unwrap().is_none());
 }

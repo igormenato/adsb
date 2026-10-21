@@ -13,12 +13,11 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{fix_from_json_line, pack_frame, snapshot_from_aircraft_json};
+use trck::{check_positions, fix_from_json_line, pack_frame};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
 const DEFAULT_INTERVAL_S: f64 = 1.0;
-const SAMPLE_AIRCRAFT_JSON: &str = include_str!("../sample/aircraft.json");
 const POLL_SLICE: Duration = Duration::from_millis(200);
 const CONNECT_SLICE: Duration = Duration::from_millis(50);
 /// Finished frames waiting on the UART. The frame being written sits beside this.
@@ -35,20 +34,25 @@ const MAX_LINE: usize = 8192;
 #[derive(Parser, Debug)]
 #[command(about = "Send each readsb position to a UART as it arrives.")]
 struct Args {
-    /// Host and port of readsb `--net-json-port`. Required unless `--sample`.
-    #[arg(long, required_unless_present = "sample", value_name = "HOST:PORT")]
+    /// Host and port of readsb `--net-json-port`. Required unless `--check`.
+    #[arg(
+        long,
+        required_unless_present = "check",
+        conflicts_with = "check",
+        value_name = "HOST:PORT"
+    )]
     net_json: Option<String>,
     /// UART device, or - for stdout.
     #[arg(long, default_value = DEFAULT_UART)]
     uart: String,
     #[arg(long, default_value_t = DEFAULT_BAUD)]
     baud: u32,
-    /// Seconds between passes of `--sample`. The JSON port does not wait.
+    /// Seconds between passes of `--check`. The JSON port does not wait.
     #[arg(long, default_value_t = DEFAULT_INTERVAL_S)]
     interval: f64,
-    /// Send the built-in aircraft.json sample instead of the JSON port.
-    #[arg(long)]
-    sample: bool,
+    /// Send the known frames instead of reading readsb, to check the UART.
+    #[arg(long, conflicts_with = "net_json")]
+    check: bool,
 }
 
 #[derive(Debug)]
@@ -317,15 +321,15 @@ fn main() -> ExitCode {
         }
     }
 
-    if args.sample {
-        eprintln!("sample uart={} baud={}", args.uart, args.baud);
+    if args.check {
+        eprintln!("check uart={} baud={}", args.uart, args.baud);
         let interval =
             Duration::try_from_secs_f64(args.interval.max(0.2)).unwrap_or(Duration::from_secs(1));
-        return run_sample(interval, &mut writer, &stop);
+        return run_check(interval, &mut writer, &stop);
     }
 
     let Some(text) = args.net_json.as_deref() else {
-        eprintln!("pass --net-json HOST:PORT, or --sample");
+        eprintln!("pass --net-json HOST:PORT, or --check");
         return ExitCode::from(1);
     };
     let Some(addrs) = resolve_net_json(text) else {
@@ -336,18 +340,14 @@ fn main() -> ExitCode {
     run_port(&addrs, text, &mut writer, &stop)
 }
 
-fn run_sample(interval: Duration, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
-    let snapshot = match snapshot_from_aircraft_json(SAMPLE_AIRCRAFT_JSON.as_bytes()) {
-        Ok(snapshot) => snapshot,
-        Err(err) => {
-            eprintln!("sample: {err}");
-            return ExitCode::from(1);
-        }
-    };
+fn run_check(interval: Duration, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     while !stop.load(Ordering::Relaxed) {
-        for aircraft in &snapshot.aircraft {
-            writer.enqueue(pack_frame(snapshot.unix_s, aircraft));
-            eprintln!("fix t={} icao={:06x}", snapshot.unix_s, aircraft.icao);
+        for position in check_positions() {
+            eprintln!(
+                "fix t={} icao={:06x}",
+                position.unix_s, position.aircraft.icao
+            );
+            writer.enqueue(pack_frame(position.unix_s, &position.aircraft));
         }
         let deadline = Instant::now() + interval;
         loop {
@@ -678,15 +678,15 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
             },
         ];
         let mut nfds = 1usize;
-        if writer.has_pending() {
-            if let Some(fd) = writer.uart_fd() {
-                fds[1] = libc::pollfd {
-                    fd,
-                    events: libc::POLLOUT,
-                    revents: 0,
-                };
-                nfds = 2;
-            }
+        if writer.has_pending()
+            && let Some(fd) = writer.uart_fd()
+        {
+            fds[1] = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            nfds = 2;
         }
         if let Err(err) = poll_wait(&mut fds[..nfds], POLL_SLICE) {
             eprintln!("net-json {text}: {err}");
@@ -721,13 +721,14 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
         }
         let uart_ready =
             nfds == 2 && fds[1].revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) != 0;
-        if writer.has_pending() && (fresh || uart_ready || writer.uart_fd().is_none()) {
-            if let Err(err) = writer.write_some() {
-                return match err {
-                    ChunkError::Stopped => Pump::Stopped,
-                    ChunkError::Failed(err) => Pump::Uart(err),
-                };
-            }
+        if writer.has_pending()
+            && (fresh || uart_ready || writer.uart_fd().is_none())
+            && let Err(err) = writer.write_some()
+        {
+            return match err {
+                ChunkError::Stopped => Pump::Stopped,
+                ChunkError::Failed(err) => Pump::Uart(err),
+            };
         }
     }
 }

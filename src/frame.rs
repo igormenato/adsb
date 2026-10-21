@@ -95,6 +95,52 @@ pub fn pack_frame(unix_s: u32, aircraft: &Aircraft) -> [u8; FRAME_LEN] {
     raw
 }
 
+pub fn check_positions() -> [Fix; 3] {
+    const UNIX_S: u32 = 1_700_000_000;
+    [
+        Fix {
+            unix_s: UNIX_S,
+            aircraft: Aircraft {
+                icao: 0x400ABC,
+                latitude_e7: deg_e7(10.5),
+                longitude_e7: deg_e7(-20.25),
+                altitude_ft: 12_000,
+                ground_speed_kt: 280,
+                track_deg: 90,
+                emergency: None,
+            },
+        },
+        Fix {
+            unix_s: UNIX_S,
+            aircraft: Aircraft {
+                icao: 0x40621D,
+                latitude_e7: deg_e7(52.2572021484375),
+                longitude_e7: deg_e7(3.91937255859375),
+                altitude_ft: 38_000,
+                ground_speed_kt: 450,
+                track_deg: 271,
+                emergency: None,
+            },
+        },
+        Fix {
+            unix_s: UNIX_S,
+            aircraft: Aircraft {
+                icao: 0x4CA123,
+                latitude_e7: deg_e7(51.47),
+                longitude_e7: deg_e7(-0.45),
+                altitude_ft: 8_000,
+                ground_speed_kt: 220,
+                track_deg: 180,
+                emergency: Some(EmergencyKind::General),
+            },
+        },
+    ]
+}
+
+pub fn check_frames() -> [[u8; FRAME_LEN]; 3] {
+    check_positions().map(|position| pack_frame(position.unix_s, &position.aircraft))
+}
+
 pub fn unpack_frame(bytes: &[u8]) -> Option<Fix> {
     if bytes.len() != FRAME_LEN || &bytes[0..4] != TRACK_MAGIC {
         return None;
