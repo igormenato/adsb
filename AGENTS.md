@@ -1,33 +1,45 @@
-# Editing this repo
+# trck
 
-`trck` on a Pi Zero W reads readsb `--net-json-port` and writes one 30-byte frame per accepted line. The ESP32 firmware is not in this repo.
+## Setup commands
 
-The field layout is in `README.md`, `docs/esp32-alert.md`, and `pack_frame`.
+Enter the shell with `nix develop`.
 
-## Encoder
+That shell loads stable Rust from `rust-toolchain.toml`, including the `arm-unknown-linux-musleabihf` target. It points that target's linker at the Nix `rust-lld`. It sets rustflags to `crt-static`, `ld.lld`, and `link-self-contained`. The release does not need a C sysroot.
 
-`FRAME_LEN` is 30. `pack_frame` is the only encoder. Do not add a second encoder, a sample text file, or a checked-in frame blob.
+In that shell, `cargo build --release --target arm-unknown-linux-musleabihf` uses those settings.
 
-Do not bring back `aircraft.json` or the file snapshot parser. `fix_from_json_line` takes one position object. Do not read positions out of an `aircraft` array.
+## Testing instructions
 
-## Live read
+Prove a change with `cargo test --locked`.
 
-The live reader does not block on the UART write. Finished frames wait in a queue of 64. The frame being written is not one of the 64.
-
-When the queue is full and a waiting frame has emergency byte 0, you drop the oldest such frame in the queue, then you enqueue the new frame. When the queue is full and no waiting frame has emergency byte 0, an ordinary new frame is dropped. A new emergency drops the oldest waiting frame.
-
-## Squawk
-
-You trim the squawk text, then match `7700`, `7600`, and `7500` only as those four characters. `07700` is not `7700`. You match a JSON number by its decimal digits.
-
-## Check
-
-`--check` repeats `check_positions` through `pack_frame`. `--check` and `--net-json` conflict. The host test `check_matches_check_frames` runs `trck --check --uart -` and compares the first pass to `check_frames`. The process stays running after that first pass.
+That runs the host tests. It does not build or run the Pi Zero binary.
 
 ## Release
 
-The release file is static `arm-unknown-linux-musleabihf`, named `trck-pi-zero-w`, built by Nix. Do not add a second board target or a QEMU suite.
+`nix build` writes `result/bin/trck-pi-zero-w`. That file is the package binary `trck`. The build does not run tests.
 
-## Tests
+`nix flake check` builds the Pi Zero binary and runs the host tests.
 
-You prove a change with `cargo test --locked`. `nix develop` is the shell. `nix build` and `nix flake check` are the release checks.
+`.github/workflows/release.yml` runs `nix flake check` and `nix build` on workflow dispatch.
+
+## Cargo
+
+The edition is 2024. `Cargo.lock` is checked in. `cargo test --locked` requires that lockfile to match `Cargo.toml`.
+
+`clap` enables the `derive` feature. `serialport` sets `default-features` to false. The package lists no features of its own.
+
+## Frame rules
+
+`FRAME_LEN` is 30. `pack_frame` is the only encoder.
+
+The live read does not block on the UART. Finished frames wait in a queue of 64.
+
+`07700` is not `7700`.
+
+`--check` conflicts with `--net-json`.
+
+Do not bring back `aircraft.json`.
+
+The release is one static musl binary, `trck-pi-zero-w`. Do not add a QEMU suite.
+
+The field layout is in `README.md`, `docs/esp32-alert.md`, and `pack_frame`.
