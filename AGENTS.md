@@ -2,9 +2,9 @@
 
 ## Nix
 
-`nix develop` opens the shell. It uses the default Rust profile, so `rustfmt` and `clippy` are installed. The toolchain file is `rust-toolchain.toml`. The `arm-unknown-linux-musleabihf` target links static musl with the Nix `rust-lld`.
+`nix develop` opens the shell.
 
-`nix flake check` builds the Pi Zero binary and runs the host tests. It does not run fmt or clippy.
+`nix flake check` builds the Pi Zero binary and runs the host tests.
 
 `nix build` writes `result/bin/trck-pi-zero-w`.
 
