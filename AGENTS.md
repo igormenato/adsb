@@ -6,15 +6,15 @@ The field layout is in `README.md`, `docs/esp32-alert.md`, and `pack_frame`.
 
 ## Encoder
 
-`FRAME_LEN` is 30. `pack_frame` is the only encoder. You do not add a second encoder, a sample text file, or a checked-in frame blob.
+`FRAME_LEN` is 30. `pack_frame` is the only encoder. Do not add a second encoder, a sample text file, or a checked-in frame blob.
 
-You do not bring back `aircraft.json` or the file snapshot parser. `fix_from_json_line` takes one position object. You do not read positions out of an `aircraft` array.
+Do not bring back `aircraft.json` or the file snapshot parser. `fix_from_json_line` takes one position object. Do not read positions out of an `aircraft` array.
 
 ## Live read
 
 The live reader does not block on the UART write. Finished frames wait in a queue of 64. The frame being written is not one of the 64.
 
-When the queue is full and a waiting frame has emergency byte 0, you drop the oldest such frame in the queue, then you enqueue the new frame. When the queue is full and no waiting frame has emergency byte 0, you drop a new frame whose emergency byte is 0. When the queue is full and no waiting frame has emergency byte 0, you drop the oldest waiting frame to enqueue a new emergency.
+When the queue is full and a waiting frame has emergency byte 0, you drop the oldest such frame in the queue, then you enqueue the new frame. When the queue is full and no waiting frame has emergency byte 0, an ordinary new frame is dropped. A new emergency drops the oldest waiting frame.
 
 ## Squawk
 
@@ -26,7 +26,7 @@ You trim the squawk text, then match `7700`, `7600`, and `7500` only as those fo
 
 ## Release
 
-The release file is static `arm-unknown-linux-musleabihf`, named `trck-pi-zero-w`, built by Nix. You do not add a second board target or a QEMU suite.
+The release file is static `arm-unknown-linux-musleabihf`, named `trck-pi-zero-w`, built by Nix. Do not add a second board target or a QEMU suite.
 
 ## Tests
 
