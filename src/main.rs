@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{check_frames, check_positions, fix_from_json_line, pack_frame};
+use trck::{check_positions, fix_from_json_line, pack_frame};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
@@ -342,12 +342,12 @@ fn main() -> ExitCode {
 
 fn run_check(interval: Duration, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     while !stop.load(Ordering::Relaxed) {
-        for (position, frame) in check_positions().into_iter().zip(check_frames()) {
+        for position in check_positions() {
             eprintln!(
                 "fix t={} icao={:06x}",
                 position.unix_s, position.aircraft.icao
             );
-            writer.enqueue(frame);
+            writer.enqueue(pack_frame(position.unix_s, &position.aircraft));
         }
         let deadline = Instant::now() + interval;
         loop {
