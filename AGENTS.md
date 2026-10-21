@@ -1,45 +1,19 @@
 # trck
 
-## Setup commands
+## Nix
 
-Enter the shell with `nix develop`.
+`nix develop` opens the shell. It uses the default Rust profile, so `rustfmt` and `clippy` are installed. The toolchain file is `rust-toolchain.toml`. The `arm-unknown-linux-musleabihf` target links static musl with the Nix `rust-lld`.
 
-That shell loads stable Rust from `rust-toolchain.toml`, including the `arm-unknown-linux-musleabihf` target. It points that target's linker at the Nix `rust-lld`. It sets rustflags to `crt-static`, `ld.lld`, and `link-self-contained`. The release does not need a C sysroot.
+`nix flake check` builds the Pi Zero binary and runs the host tests. It does not run fmt or clippy.
 
-In that shell, `cargo build --release --target arm-unknown-linux-musleabihf` uses those settings.
-
-## Testing instructions
-
-Prove a change with `cargo test --locked`.
-
-That runs the host tests. It does not build or run the Pi Zero binary.
-
-## Release
-
-`nix build` writes `result/bin/trck-pi-zero-w`. That file is the package binary `trck`. The build does not run tests.
-
-`nix flake check` builds the Pi Zero binary and runs the host tests.
-
-`.github/workflows/release.yml` runs `nix flake check` and `nix build` on workflow dispatch.
+`nix build` writes `result/bin/trck-pi-zero-w`.
 
 ## Cargo
 
-The edition is 2024. `Cargo.lock` is checked in. `cargo test --locked` requires that lockfile to match `Cargo.toml`.
+In that shell, in this order:
 
-`clap` enables the `derive` feature. `serialport` sets `default-features` to false. The package lists no features of its own.
+1. `cargo fmt --check`
+2. `cargo clippy --locked --all-targets -- -D warnings`
+3. `cargo test --locked`
 
-## Frame rules
-
-`FRAME_LEN` is 30. `pack_frame` is the only encoder.
-
-The live read does not block on the UART. Finished frames wait in a queue of 64.
-
-`07700` is not `7700`.
-
-`--check` conflicts with `--net-json`.
-
-Do not bring back `aircraft.json`.
-
-The release is one static musl binary, `trck-pi-zero-w`. Do not add a QEMU suite.
-
-The field layout is in `README.md`, `docs/esp32-alert.md`, and `pack_frame`.
+These run on the host. They do not build the Pi Zero binary. `cargo fmt` writes the format when the check fails.
