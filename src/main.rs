@@ -13,12 +13,12 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{fix_from_json_line, pack_frame, snapshot_from_aircraft_json};
+use trck::{fix_from_json_line, pack_frame};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
 const DEFAULT_INTERVAL_S: f64 = 1.0;
-const SAMPLE_AIRCRAFT_JSON: &str = include_str!("../sample/aircraft.json");
+const SAMPLE_LINES: &str = include_str!("../sample/net-json.txt");
 const POLL_SLICE: Duration = Duration::from_millis(200);
 const CONNECT_SLICE: Duration = Duration::from_millis(50);
 /// Finished frames waiting on the UART. The frame being written sits beside this.
@@ -46,7 +46,7 @@ struct Args {
     /// Seconds between passes of `--sample`. The JSON port does not wait.
     #[arg(long, default_value_t = DEFAULT_INTERVAL_S)]
     interval: f64,
-    /// Send the built-in aircraft.json sample instead of the JSON port.
+    /// Send the built-in JSON lines through the live packer.
     #[arg(long)]
     sample: bool,
 }
@@ -337,17 +337,13 @@ fn main() -> ExitCode {
 }
 
 fn run_sample(interval: Duration, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
-    let snapshot = match snapshot_from_aircraft_json(SAMPLE_AIRCRAFT_JSON.as_bytes()) {
-        Ok(snapshot) => snapshot,
-        Err(err) => {
-            eprintln!("sample: {err}");
-            return ExitCode::from(1);
-        }
-    };
     while !stop.load(Ordering::Relaxed) {
-        for aircraft in &snapshot.aircraft {
-            writer.enqueue(pack_frame(snapshot.unix_s, aircraft));
-            eprintln!("fix t={} icao={:06x}", snapshot.unix_s, aircraft.icao);
+        for line in SAMPLE_LINES.lines() {
+            let Some(fix) = fix_from_json_line(line.as_bytes()) else {
+                continue;
+            };
+            writer.enqueue(pack_frame(fix.unix_s, &fix.aircraft));
+            eprintln!("fix t={} icao={:06x}", fix.unix_s, fix.aircraft.icao);
         }
         let deadline = Instant::now() + interval;
         loop {

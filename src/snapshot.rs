@@ -1,4 +1,4 @@
-//! Turn readsb JSON into a [`Fix`] or a file [`Snapshot`].
+//! Turn one readsb `--net-json` line into a [`Fix`].
 
 use serde_json::Value;
 
@@ -6,110 +6,25 @@ use crate::frame::{
     ALT_UNKNOWN, Aircraft, EmergencyKind, Fix, SPEED_UNKNOWN, TRACK_UNKNOWN, deg_e7,
 };
 
-/// File parser only. A JSON-port line is one accepted position and is not aged.
-pub const POSITION_MAX_AGE_S: f64 = 2.0;
-
-/// File parser only. An emergency that still has a latitude and longitude is kept until this age.
-pub const EMERGENCY_POSITION_MAX_AGE_S: f64 = 30.0;
-
-/// File parser only. The live port forwards every accepted line.
-pub const TRACK_MAX_AIRCRAFT: usize = 64;
-
-/// The qualifying tracks from one `aircraft.json`, capped at [`TRACK_MAX_AIRCRAFT`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Snapshot {
-    pub unix_s: u32,
-    pub aircraft: Vec<Aircraft>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum SnapshotError {
-    /// The file is not a JSON object with an `aircraft` array.
-    Json,
-    /// `now` is missing.
-    MissingNow,
-    /// `now` is not a Unix second that fits in a u32.
-    BadNow,
-}
-
-impl std::fmt::Display for SnapshotError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            SnapshotError::Json => "not an aircraft.json document",
-            SnapshotError::MissingNow => "missing now",
-            SnapshotError::BadNow => "now is out of range",
-        })
-    }
-}
-
-/// Qualifying aircraft from one `aircraft.json`, emergencies first, then the freshest `seen_pos`, at most 64.
-pub fn snapshot_from_aircraft_json(bytes: &[u8]) -> Result<Snapshot, SnapshotError> {
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| SnapshotError::Json)?;
-    let unix_s = parse_now(&value)?;
-    let list = value
-        .get("aircraft")
-        .and_then(Value::as_array)
-        .ok_or(SnapshotError::Json)?;
-
-    let mut ranked = Vec::new();
-    for (index, entry) in list.iter().enumerate() {
-        if let Some((aircraft, seen_pos)) = aircraft_from_file_entry(entry) {
-            ranked.push((aircraft.emergency.is_some(), seen_pos, index, aircraft));
-        }
-    }
-    ranked.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then(left.1.total_cmp(&right.1))
-            .then(left.2.cmp(&right.2))
-    });
-    ranked.truncate(TRACK_MAX_AIRCRAFT);
-    Ok(Snapshot {
-        unix_s,
-        aircraft: ranked
-            .into_iter()
-            .map(|(_, _, _, aircraft)| aircraft)
-            .collect(),
-    })
-}
-
 /// One `--net-json-port` line. `None` means skip the line.
 ///
 /// `now` has to be a Unix second that fits in a `u32`. Latitude and longitude have to be present.
 /// `seen_pos` is ignored. On this port it is 0, and the line's `now` is the fix time.
 pub fn fix_from_json_line(bytes: &[u8]) -> Option<Fix> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
-    let unix_s = parse_now(&value).ok()?;
+    let unix_s = parse_now(&value)?;
     Some(Fix {
         unix_s,
         aircraft: aircraft_from_position(&value)?,
     })
 }
 
-fn parse_now(value: &Value) -> Result<u32, SnapshotError> {
-    let now = value
-        .get("now")
-        .and_then(Value::as_f64)
-        .ok_or(SnapshotError::MissingNow)?;
+fn parse_now(value: &Value) -> Option<u32> {
+    let now = value.get("now").and_then(Value::as_f64)?;
     if !now.is_finite() || now < 0.0 || now > f64::from(u32::MAX) {
-        return Err(SnapshotError::BadNow);
-    }
-    Ok(now.trunc() as u32)
-}
-
-fn aircraft_from_file_entry(entry: &Value) -> Option<(Aircraft, f64)> {
-    let aircraft = aircraft_from_position(entry)?;
-    let seen_pos = finite_number(entry.get("seen_pos")?)?;
-    let max_age = if aircraft.emergency.is_some() {
-        EMERGENCY_POSITION_MAX_AGE_S
-    } else {
-        POSITION_MAX_AGE_S
-    };
-    if seen_pos > max_age {
         return None;
     }
-    Some((aircraft, seen_pos))
+    Some(now.trunc() as u32)
 }
 
 fn aircraft_from_position(entry: &Value) -> Option<Aircraft> {

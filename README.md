@@ -31,7 +31,7 @@ Inside that shell, `cargo build --release --target arm-unknown-linux-musleabihf`
 
 `--net-json HOST:PORT` is the live input. Each accepted position is one JSON object and a newline. `trck` writes one UART frame for that line and does not wait.
 
-`--sample` sends the built-in `aircraft.json` instead. That file is not the live input.
+`--sample` sends the built-in lines in `sample/net-json.txt` through the live packer. Each line is one `--net-json` object, including a normal position and squawk 7700. `fix_from_json_line` and `pack_frame` are the same calls as the live port.
 
 `--uart` defaults to `/dev/serial0`. `--uart -` writes the frames to stdout. `--baud` defaults to 115200.
 
