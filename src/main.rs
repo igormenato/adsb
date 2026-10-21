@@ -13,12 +13,11 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{fix_from_json_line, pack_frame};
+use trck::{fix_from_json_line, pack_frame, sample_frames};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
 const DEFAULT_INTERVAL_S: f64 = 1.0;
-const SAMPLE_LINES: &str = include_str!("../sample/net-json.txt");
 const POLL_SLICE: Duration = Duration::from_millis(200);
 const CONNECT_SLICE: Duration = Duration::from_millis(50);
 /// Finished frames waiting on the UART. The frame being written sits beside this.
@@ -46,7 +45,7 @@ struct Args {
     /// Seconds between passes of `--sample`. The JSON port does not wait.
     #[arg(long, default_value_t = DEFAULT_INTERVAL_S)]
     interval: f64,
-    /// Send the built-in JSON lines through the live packer.
+    /// Repeat a few built-in positions through the live packer.
     #[arg(long)]
     sample: bool,
 }
@@ -338,12 +337,11 @@ fn main() -> ExitCode {
 
 fn run_sample(interval: Duration, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     while !stop.load(Ordering::Relaxed) {
-        for line in SAMPLE_LINES.lines() {
-            let Some(fix) = fix_from_json_line(line.as_bytes()) else {
-                continue;
-            };
-            writer.enqueue(pack_frame(fix.unix_s, &fix.aircraft));
-            eprintln!("fix t={} icao={:06x}", fix.unix_s, fix.aircraft.icao);
+        for frame in sample_frames() {
+            let unix_s = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+            let icao = u32::from_le_bytes([frame[8], frame[9], frame[10], 0]);
+            writer.enqueue(frame);
+            eprintln!("fix t={unix_s} icao={icao:06x}");
         }
         let deadline = Instant::now() + interval;
         loop {

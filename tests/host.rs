@@ -1,4 +1,4 @@
-//! Host tests: JSON lines for the live port, and `--sample` through the same packer.
+//! Host tests: JSON lines for the live port, and `--sample` against `sample_frames`.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -515,25 +515,15 @@ fn a_refused_port_writes_nothing() {
 }
 
 #[test]
-fn sample_sends_the_built_in_lines_through_the_live_packer() {
-    let mut expect = Vec::new();
-    let mut saw_normal = false;
-    let mut saw_7700 = false;
-    for line in include_str!("../sample/net-json.txt").lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let fix = fix_from_json_line(line.as_bytes()).expect(line);
-        if fix.aircraft.emergency.is_none() {
-            saw_normal = true;
-        }
-        if fix.aircraft.emergency == Some(EmergencyKind::General) {
-            saw_7700 = true;
-        }
-        expect.extend_from_slice(&pack_frame(fix.unix_s, &fix.aircraft));
-    }
-    assert!(saw_normal, "fixture needs a normal position");
-    assert!(saw_7700, "fixture needs a 7700");
+fn sample_matches_sample_frames() {
+    let frames = trck::sample_frames();
+    assert!(frames.iter().any(|frame| frame[27] == 0));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame[27] == EmergencyKind::General.code())
+    );
+    let expect: Vec<u8> = frames.into_iter().flatten().collect();
 
     let mut sender = spawn_sample();
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
