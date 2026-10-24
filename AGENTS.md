@@ -1,17 +1,17 @@
 # trck
 
-## Nix
-
-`nix develop` opens the shell.
-
-`nix flake check` builds the Pi Zero binary and runs the host tests.
-
-`nix build` writes `result/bin/trck-pi-zero-w`.
-
 ## Cargo
 
-In that shell, in this order:
+In this order:
 
 1. `cargo fmt --check`
 2. `cargo clippy --locked --all-targets -- -D warnings`
 3. `cargo test --locked`
+
+The Pi binaries:
+
+`cargo build --release --locked --target arm-unknown-linux-musleabihf`
+
+`cargo build --release --locked --target aarch64-unknown-linux-musl`
+
+Copy `target/<triple>/release/trck`. Release assets are `trck-arm` and `trck-aarch64`.
