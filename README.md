@@ -23,8 +23,6 @@ Copy `target/<triple>/release/trck`. `arm-unknown-linux-musleabihf` is the Zero 
 
 Disable the serial login shell and leave the UART enabled. The console shares the port if you do not.
 
-Start readsb with `--net-json-port`. That flag defaults to `0`, which is off. Do not add `--net-json-port-include-noposition`. Do not add `--net-json-port-wind-triggered`.
-
 ```
 readsb --net-json-port 30005
 ./trck --net-json 127.0.0.1:30005
@@ -32,9 +30,17 @@ readsb --net-json-port 30005
 
 `30005` is an example. Pass the same host and port readsb is listening on.
 
-`--uart` defaults to `/dev/serial0`. Pass `--uart -` to write frames to stdout. `--baud` defaults to 115200.
+## Flags
 
-`--check` sends known frames through `pack_frame` instead of reading readsb. `--check` and `--net-json` together are an error. `--interval` is the pause between `--check` passes. `trck` treats a value below 0.2 seconds as 0.2.
+`--net-json HOST:PORT` is the live input. Required unless `--check`.
+
+`--uart` defaults to `/dev/serial0`. Pass `--uart -` to write frames to stdout.
+
+`--baud` defaults to 115200.
+
+`--check` sends known frames through `pack_frame` instead of reading readsb.
+
+`--interval` is the pause between `--check` passes.
 
 ## Frame
 
