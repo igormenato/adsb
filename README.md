@@ -38,9 +38,7 @@ readsb --net-json-port 30005
 
 `--baud` defaults to 115200.
 
-`--check` sends known frames instead of reading readsb, to check the UART.
-
-`--interval` is the pause between `--check` passes.
+`--check` sends known frames instead of reading readsb, to check the UART. It repeats those frames every second.
 
 ## Frame
 

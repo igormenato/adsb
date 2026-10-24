@@ -17,7 +17,7 @@ use trck::{check_positions, fix_from_json_line, pack_frame};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
-const DEFAULT_INTERVAL_S: f64 = 1.0;
+const CHECK_PAUSE: Duration = Duration::from_secs(1);
 const POLL_SLICE: Duration = Duration::from_millis(200);
 const CONNECT_SLICE: Duration = Duration::from_millis(50);
 /// Finished frames waiting on the UART. The frame being written sits beside this.
@@ -47,9 +47,6 @@ struct Args {
     uart: String,
     #[arg(long, default_value_t = DEFAULT_BAUD)]
     baud: u32,
-    /// Seconds between passes of `--check`. The JSON port does not wait.
-    #[arg(long, default_value_t = DEFAULT_INTERVAL_S)]
-    interval: f64,
     /// Send the known frames instead of reading readsb, to check the UART.
     #[arg(long, conflicts_with = "net_json")]
     check: bool,
@@ -323,9 +320,7 @@ fn main() -> ExitCode {
 
     if args.check {
         eprintln!("check uart={} baud={}", args.uart, args.baud);
-        let interval =
-            Duration::try_from_secs_f64(args.interval.max(0.2)).unwrap_or(Duration::from_secs(1));
-        return run_check(interval, &mut writer, &stop);
+        return run_check(&mut writer, &stop);
     }
 
     let Some(text) = args.net_json.as_deref() else {
@@ -340,7 +335,7 @@ fn main() -> ExitCode {
     run_port(&addrs, text, &mut writer, &stop)
 }
 
-fn run_check(interval: Duration, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
+fn run_check(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     while !stop.load(Ordering::Relaxed) {
         for position in check_positions() {
             eprintln!(
@@ -349,7 +344,7 @@ fn run_check(interval: Duration, writer: &mut Writer, stop: &AtomicBool) -> Exit
             );
             writer.enqueue(pack_frame(position.unix_s, &position.aircraft));
         }
-        let deadline = Instant::now() + interval;
+        let deadline = Instant::now() + CHECK_PAUSE;
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
