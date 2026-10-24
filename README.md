@@ -15,9 +15,9 @@ readsb --net-json-port 30005
 
 `30005` is an example. `trck` has no default port. Pass the same host and port readsb is listening on.
 
-Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. That asset is the release binary `trck`, copied under that name. It is static musl, so it does not ask a dynamic loader to start it. The file is ARMv6 with VFPv2 hard float.
+Copy `trck-arm-unknown-linux-musleabihf` or `trck-aarch64-unknown-linux-musl` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi. Those assets are the release binary `trck`, copied as `trck` plus the rustc target. It is static musl, so it does not ask a dynamic loader to start it. The Zero W file is ARMv6 with VFPv2 hard float. The 3B file is aarch64 for a 64-bit OS.
 
-Build it on Fedora. `rust-toolchain.toml` is stable, rustfmt, clippy, and `arm-unknown-linux-musleabihf`, so rustup fetches those. `.cargo/config.toml` sets the musl linker to `rust-lld`.
+`rust-toolchain.toml` is stable, rustfmt, clippy, `arm-unknown-linux-musleabihf`, and `aarch64-unknown-linux-musl`, so rustup fetches those. `.cargo/config.toml` sets each musl linker to `rust-lld`.
 
 Host checks, in this order:
 
@@ -27,12 +27,14 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-The Pi Zero W binary:
+The Pi binaries:
 
 ```
 cargo build --release --locked --target arm-unknown-linux-musleabihf
-cp target/arm-unknown-linux-musleabihf/release/trck trck-pi-zero-w
+cargo build --release --locked --target aarch64-unknown-linux-musl
 ```
+
+Copy `target/<triple>/release/trck`.
 
 ## Flags
 

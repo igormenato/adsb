@@ -2,14 +2,16 @@
 
 ## Cargo
 
-On Fedora, in this order:
+In this order:
 
 1. `cargo fmt --check`
 2. `cargo clippy --locked --all-targets -- -D warnings`
 3. `cargo test --locked`
 
-The Pi Zero W binary:
+The Pi binaries:
 
 `cargo build --release --locked --target arm-unknown-linux-musleabihf`
 
-Copy `target/arm-unknown-linux-musleabihf/release/trck` to the Pi as `trck-pi-zero-w`.
+`cargo build --release --locked --target aarch64-unknown-linux-musl`
+
+Copy `target/<triple>/release/trck`.

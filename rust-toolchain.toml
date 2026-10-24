@@ -1,4 +1,4 @@
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
-targets = ["arm-unknown-linux-musleabihf"]
+targets = ["arm-unknown-linux-musleabihf", "aarch64-unknown-linux-musl"]
