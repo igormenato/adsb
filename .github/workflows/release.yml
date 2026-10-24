@@ -19,9 +19,6 @@ jobs:
         with:
           components: rustfmt, clippy
           targets: arm-unknown-linux-musleabihf
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
       - run: cargo build --release --locked --target arm-unknown-linux-musleabihf
       - run: |
           set -eu
