@@ -1,72 +1,67 @@
 {
-  description = "Rust for building trck";
+  description = "Zig for building trck";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-  inputs.rust-overlay = {
-    url = "github:oxalica/rust-overlay";
-    inputs.nixpkgs.follows = "nixpkgs";
-  };
-  inputs.crane.url = "github:ipetkov/crane/v0.24.0";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  outputs = { nixpkgs, rust-overlay, crane, ... }:
+  outputs = { nixpkgs, ... }:
     let
       system = "x86_64-linux";
-      pkgs = import nixpkgs {
-        inherit system;
-        overlays = [ rust-overlay.overlays.default ];
-      };
-      lib = pkgs.lib;
-      rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-      craneLib = (crane.mkLib pkgs).overrideToolchain rust;
+      pkgs = nixpkgs.legacyPackages.${system};
+      zig = pkgs.zig_0_17;
 
-      # Bundled with the Nix rustc. It links the musl objects shipped in
-      # rust-std, so the release does not need a C sysroot.
-      rustLld = "${rust}/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld";
-      staticMusl = "-C target-feature=+crt-static -C linker-flavor=ld.lld -C link-self-contained=yes";
-
-      src = lib.cleanSourceWith {
-        src = lib.cleanSource ./.;
-        filter = path: type:
-          (craneLib.filterCargoSources path type)
-          || lib.hasSuffix "/sample" path
-          || lib.hasInfix "/sample/" path;
+      src = pkgs.lib.fileset.toSource {
+        root = ./.;
+        fileset = ./src;
       };
 
-      cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+      # The build has no writable $HOME for Zig's cache.
+      zigCache = "export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig-cache";
 
-      hostArtifacts = craneLib.buildDepsOnly {
-        inherit src cargoVendorDir;
-      };
-
-      piZero = craneLib.buildPackage {
-        inherit src cargoVendorDir;
-        strictDeps = true;
-        doCheck = false;
+      # arm1176jzf-s is the Pi Zero W core: ARMv6 with VFPv2. musleabihf passes floats in
+      # VFP registers, and Zig links its bundled musl statically.
+      piZero = pkgs.stdenvNoCC.mkDerivation {
+        name = "trck-pi-zero-w";
+        inherit src;
+        nativeBuildInputs = [ zig ];
+        dontConfigure = true;
         dontStrip = true;
-        CARGO_BUILD_TARGET = "arm-unknown-linux-musleabihf";
-        CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER = rustLld;
-        CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS = staticMusl;
+        buildPhase = ''
+          runHook preBuild
+          ${zigCache}
+          zig build-exe src/main.zig -target arm-linux-musleabihf -mcpu=arm1176jzf_s -lc -O ReleaseSafe --name trck
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          install -Dm755 trck $out/bin/trck-pi-zero-w
+          runHook postInstall
+        '';
       };
 
-      tests = craneLib.cargoTest {
-        inherit src cargoVendorDir;
-        cargoArtifacts = hostArtifacts;
+      tests = pkgs.stdenvNoCC.mkDerivation {
+        name = "trck-tests";
+        inherit src;
+        nativeBuildInputs = [ zig ];
+        dontConfigure = true;
+        buildPhase = ''
+          runHook preBuild
+          ${zigCache}
+          zig fmt --check src
+          zig test src/main.zig -target native-linux-musl -lc
+          runHook postBuild
+        '';
+        installPhase = "touch $out";
       };
     in
     {
-      packages.${system} = {
-        default = pkgs.linkFarm "trck" [
-          { name = "bin/trck-pi-zero-w"; path = "${piZero}/bin/trck"; }
-        ];
-      };
+      packages.${system}.default = piZero;
 
       checks.${system} = {
         inherit piZero tests;
       };
 
-      devShells.${system}.default = craneLib.devShell {
-        CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER = rustLld;
-        CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS = staticMusl;
+      devShells.${system}.default = pkgs.mkShellNoCC {
+        packages = [ zig ];
       };
     };
 }

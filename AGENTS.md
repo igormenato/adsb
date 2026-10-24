@@ -8,10 +8,10 @@
 
 `nix build` writes `result/bin/trck-pi-zero-w`.
 
-## Cargo
+## Zig
 
 In that shell, in this order:
 
-1. `cargo fmt --check`
-2. `cargo clippy --locked --all-targets -- -D warnings`
-3. `cargo test --locked`
+1. `zig fmt --check src`
+2. `zig test src/main.zig -target native-linux-musl -lc`
+3. `nix build`

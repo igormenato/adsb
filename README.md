@@ -17,21 +17,22 @@ readsb --net-json-port 30005
 
 Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. That asset is `result/bin/trck-pi-zero-w` from `nix build`. It is static musl, so it does not ask a dynamic loader to start it. The file is ARMv6 with VFPv2 hard float.
 
-Nix is the build. `nix develop` loads stable Rust from `rust-toolchain.toml`. `cargo test --locked` runs on this machine. `nix build` writes the Zero binary.
+Nix is the build. `nix develop` loads Zig 0.17 from the flake. `zig test` runs on this machine. `nix build` writes the Zero binary.
 
 ```
 nix develop
-cargo test --locked
+zig fmt --check src
+zig test src/main.zig -target native-linux-musl -lc
 nix build
 ```
 
-Inside that shell, `cargo build --release --target arm-unknown-linux-musleabihf` is that same link, and Cargo reuses the incremental cache.
+Inside that shell, `zig build-exe src/main.zig -target arm-linux-musleabihf -mcpu=arm1176jzf_s -lc -O ReleaseSafe --name trck` is that same link, and Zig reuses its cache.
 
 ## Flags
 
 `--net-json HOST:PORT` is the live input. Each accepted position is one JSON object and a newline. `trck` writes one UART frame for that line and does not wait.
 
-`--check` sends the known frames instead of reading readsb, to check the UART. It repeats three positions through `pack_frame`, the same encoder as the live port. Two are ordinary, ICAO `400ABC` and `40621D`. The third is a general emergency, ICAO `4CA123`, byte 27 set to 1. All three use unix time `1700000000`. `--check` and `--net-json` together are an error.
+`--check` sends the known frames instead of reading readsb, to check the UART. It repeats three positions through `pack` in `src/frame.zig`, the same encoder as the live port. Two are ordinary, ICAO `400ABC` and `40621D`. The third is a general emergency, ICAO `4CA123`, byte 27 set to 1. All three use unix time `1700000000`. `--check` and `--net-json` together are an error.
 
 `--uart` defaults to `/dev/serial0`. `--uart -` writes the frames to stdout. `--baud` defaults to 115200.
 
