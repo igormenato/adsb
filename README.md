@@ -17,7 +17,7 @@ readsb --net-json-port 30005
 
 Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. That asset is the release binary `trck`, copied under that name. It is static musl, so it does not ask a dynamic loader to start it. The file is ARMv6 with VFPv2 hard float.
 
-Build it on Fedora. `rust-toolchain.toml` is stable plus `arm-unknown-linux-musleabihf`, so rustup fetches that target. `.cargo/config.toml` passes the musl link flags. `.cargo/rust-lld` runs the `rust-lld` from the active rustup toolchain.
+Build it on Fedora. `rust-toolchain.toml` is stable, rustfmt, clippy, and `arm-unknown-linux-musleabihf`, so rustup fetches those. `.cargo/config.toml` passes the musl link flags. `.cargo/rust-lld` runs the `rust-lld` from the active rustup toolchain.
 
 Host checks, in this order:
 

@@ -23,6 +23,17 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --release --locked --target arm-unknown-linux-musleabihf
+      - run: |
+          set -eu
+          bin=target/arm-unknown-linux-musleabihf/release/trck
+          file "$bin"
+          readelf -d "$bin"
+          readelf -A "$bin"
+          file "$bin" | grep -q 'ELF 32-bit LSB executable, ARM'
+          file "$bin" | grep -q 'statically linked'
+          readelf -d "$bin" | grep -q 'There is no dynamic section in this file.'
+          readelf -A "$bin" | grep -q 'Tag_CPU_arch: v6'
+          readelf -A "$bin" | grep -q 'Tag_FP_arch: VFPv2'
       - run: cp target/arm-unknown-linux-musleabihf/release/trck trck-pi-zero-w
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
