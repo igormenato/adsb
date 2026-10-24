@@ -1,4 +1,5 @@
 [toolchain]
 channel = "stable"
+profile = "minimal"
 components = ["rustfmt", "clippy"]
 targets = ["arm-unknown-linux-musleabihf", "aarch64-unknown-linux-musl"]
