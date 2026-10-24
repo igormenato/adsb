@@ -22,14 +22,14 @@ jobs:
       - run: cargo build --release --locked --target arm-unknown-linux-musleabihf
       - run: cargo build --release --locked --target aarch64-unknown-linux-musl
       - run: |
-          cp target/arm-unknown-linux-musleabihf/release/trck trck-arm-unknown-linux-musleabihf
-          cp target/aarch64-unknown-linux-musl/release/trck trck-aarch64-unknown-linux-musl
+          cp target/arm-unknown-linux-musleabihf/release/trck trck-arm
+          cp target/aarch64-unknown-linux-musl/release/trck trck-aarch64
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
           gh release create "${{ inputs.tag }}"
-          trck-arm-unknown-linux-musleabihf
-          trck-aarch64-unknown-linux-musl
+          trck-arm
+          trck-aarch64
           --title "${{ inputs.tag }}"
           --generate-notes
           --target "${{ github.sha }}"

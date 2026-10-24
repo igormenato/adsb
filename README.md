@@ -15,7 +15,7 @@ readsb --net-json-port 30005
 
 `30005` is an example. `trck` has no default port. Pass the same host and port readsb is listening on.
 
-Copy `trck-arm-unknown-linux-musleabihf` or `trck-aarch64-unknown-linux-musl` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi. Those assets are the release binary `trck`, copied as `trck` plus the rustc target. It is static musl, so it does not ask a dynamic loader to start it. The Zero W file is ARMv6 with VFPv2 hard float. The 3B file is aarch64 for a 64-bit OS.
+Copy `trck-arm` or `trck-aarch64` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi. Those assets are the release binary `trck`. `trck-arm` is `arm-unknown-linux-musleabihf` for the Zero W. `trck-aarch64` is `aarch64-unknown-linux-musl` for the 3B. It is static musl, so it does not ask a dynamic loader to start it. The Zero W file is ARMv6 with VFPv2 hard float. The 3B file is aarch64 for a 64-bit OS.
 
 `rust-toolchain.toml` is stable, rustfmt, clippy, `arm-unknown-linux-musleabihf`, and `aarch64-unknown-linux-musl`, so rustup fetches those. `.cargo/config.toml` sets each musl linker to `rust-lld`.
 
