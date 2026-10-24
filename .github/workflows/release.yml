@@ -15,10 +15,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: arm-unknown-linux-musleabihf, aarch64-unknown-linux-musl
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
       - run: cargo build --release --locked --target arm-unknown-linux-musleabihf
       - run: cargo build --release --locked --target aarch64-unknown-linux-musl
       - run: |
