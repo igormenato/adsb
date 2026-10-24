@@ -1,0 +1,21 @@
+.{
+    .name = .trck,
+    .fingerprint = 0x6dcd45d28af9dbc,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .clap = .{
+            .url = "git+https://github.com/Hejsil/zig-clap#05faf3905e8548f5cc269a8836e154065e70128d",
+            .hash = "clap-0.12.0-oBajB4XpAQCF1WRKnD5KOKPsnwwT_NNdAJ7Ww3irYJac",
+        },
+        .serial = .{
+            .url = "git+https://github.com/jcollie/zig-serial#87bb86c2965ba913429ebe470adf33a0d4d3692f",
+            .hash = "serial-0.1.0-5gcbR3pTAQCwerFi7A3EM9C39T2pX9S3pRqJ_RIarvGz",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

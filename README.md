@@ -17,16 +17,16 @@ readsb --net-json-port 30005
 
 Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. That asset is `result/bin/trck-pi-zero-w` from `nix build`. It is static musl, so it does not ask a dynamic loader to start it. The file is ARMv6 with VFPv2 hard float.
 
-Nix is the build. `nix develop` loads Zig 0.17 from the flake. `zig test` runs on this machine. `nix build` writes the Zero binary.
+Nix is the build. `nix develop` loads Zig 0.17 from the flake. `zig build test` runs on this machine. `nix build` writes the Zero binary.
 
 ```
 nix develop
-zig fmt --check src
-zig test src/main.zig -target native-linux-musl -lc
+zig fmt --check src build.zig
+zig build test -Dtarget=native-linux-musl
 nix build
 ```
 
-Inside that shell, `zig build-exe src/main.zig -target arm-linux-musleabihf -mcpu=arm1176jzf_s -lc -O ReleaseSafe --name trck` is that same link, and Zig reuses its cache.
+Inside that shell, `zig build -Dtarget=arm-linux-musleabihf -Dcpu=arm1176jzf_s -Doptimize=ReleaseSafe` is that same link, and Zig reuses its cache.
 
 ## Flags
 

@@ -12,6 +12,6 @@
 
 In that shell, in this order:
 
-1. `zig fmt --check src`
-2. `zig test src/main.zig -target native-linux-musl -lc`
+1. `zig fmt --check src build.zig`
+2. `zig build test -Dtarget=native-linux-musl`
 3. `nix build`
