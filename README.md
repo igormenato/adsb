@@ -38,6 +38,4 @@ readsb --net-json-port 30005
 
 ## Frame
 
-Each frame is 30 bytes, little-endian, and one aircraft. Magic is `TRCK`. CRC-16/IBM-3740 covers the first 28 bytes. Unknown altitude is the minimum signed 32-bit integer. Unknown ground speed is 65535. Unknown track is 65535. Emergency is the byte at offset 27.
-
 The layout is in [ESP32 satellite telemetry](docs/esp32-alert.md).
