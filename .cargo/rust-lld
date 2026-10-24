@@ -1,0 +1,6 @@
+#!/bin/sh
+# rustup's rust-lld for this host. The host triple comes from rustc, not a fixed path.
+set -eu
+sysroot=$(rustc --print sysroot)
+host=$(rustc --print host-tuple)
+exec "$sysroot/lib/rustlib/$host/bin/rust-lld" "$@"

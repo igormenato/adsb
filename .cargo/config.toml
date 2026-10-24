@@ -1,0 +1,7 @@
+[target.arm-unknown-linux-musleabihf]
+linker = ".cargo/rust-lld"
+rustflags = [
+  "-C", "target-feature=+crt-static",
+  "-C", "linker-flavor=ld.lld",
+  "-C", "link-self-contained=yes",
+]

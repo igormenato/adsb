@@ -15,17 +15,24 @@ readsb --net-json-port 30005
 
 `30005` is an example. `trck` has no default port. Pass the same host and port readsb is listening on.
 
-Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. That asset is `result/bin/trck-pi-zero-w` from `nix build`. It is static musl, so it does not ask a dynamic loader to start it. The file is ARMv6 with VFPv2 hard float.
+Copy `trck-pi-zero-w` from a [Release](https://github.com/igormenato/adsb/releases) onto the Pi Zero W. That asset is the release binary `trck`, copied under that name. It is static musl, so it does not ask a dynamic loader to start it. The file is ARMv6 with VFPv2 hard float.
 
-Nix is the build. `nix develop` loads stable Rust from `rust-toolchain.toml`. `cargo test --locked` runs on this machine. `nix build` writes the Zero binary.
+Build it on Fedora. `rust-toolchain.toml` is stable plus `arm-unknown-linux-musleabihf`, so rustup fetches that target. `.cargo/config.toml` passes the musl link flags. `.cargo/rust-lld` runs the `rust-lld` from the active rustup toolchain.
+
+Host checks, in this order:
 
 ```
-nix develop
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-nix build
 ```
 
-Inside that shell, `cargo build --release --target arm-unknown-linux-musleabihf` is that same link, and Cargo reuses the incremental cache.
+The Pi Zero W binary:
+
+```
+cargo build --release --locked --target arm-unknown-linux-musleabihf
+cp target/arm-unknown-linux-musleabihf/release/trck trck-pi-zero-w
+```
 
 ## Flags
 

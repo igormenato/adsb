@@ -1,17 +1,15 @@
 # trck
 
-## Nix
-
-`nix develop` opens the shell.
-
-`nix flake check` builds the Pi Zero binary and runs the host tests.
-
-`nix build` writes `result/bin/trck-pi-zero-w`.
-
 ## Cargo
 
-In that shell, in this order:
+On Fedora, in this order:
 
 1. `cargo fmt --check`
 2. `cargo clippy --locked --all-targets -- -D warnings`
 3. `cargo test --locked`
+
+The Pi Zero W binary:
+
+`cargo build --release --locked --target arm-unknown-linux-musleabihf`
+
+Copy `target/arm-unknown-linux-musleabihf/release/trck` to the Pi as `trck-pi-zero-w`.

@@ -15,12 +15,15 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: cachix/install-nix-action@v31
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
-      - run: nix flake check
-      - run: nix build
-      - run: cp result/bin/trck-pi-zero-w .
+          components: rustfmt, clippy
+          targets: arm-unknown-linux-musleabihf
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked --target arm-unknown-linux-musleabihf
+      - run: cp target/arm-unknown-linux-musleabihf/release/trck trck-pi-zero-w
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
