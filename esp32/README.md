@@ -1,27 +1,25 @@
 # ESP32-S3 UART ingest
 
-Reads the 30-byte `TRCK` frames `trck` writes, including `trck --check`. Logs ICAO, latitude, longitude, altitude, and emergency on the USB-UART console. Stays in that receive loop.
+Arduino sketch that reads the 30-byte `TRCK` frames `trck` writes, including `trck --check`. Prints ICAO, latitude, longitude, altitude, and emergency on `Serial`. Stays in that receive loop.
 
 This is not the OBC radio firmware. It does not overlay a packed struct on the UART buffer. It does not forward the raw frame as a radio payload.
 
-Pinned ESP-IDF: **v5.5.6**.
+Open `esp32/trck_uart/trck_uart.ino`.
 
-```
-git clone -b v5.5.6 --recursive https://github.com/espressif/esp-idf.git
-```
+Board package: **esp32 by Espressif Systems 3.3.12** ([arduino-esp32 3.3.12](https://github.com/espressif/arduino-esp32/releases/tag/3.3.12)).
 
-Install that tree with its `install.sh` / `export.sh`, then:
+Arduino IDE board settings:
 
-```
-cd esp32
-idf.py set-target esp32s3
-idf.py build
-idf.py -p /dev/ttyACM0 flash monitor
-```
+- Board: **ESP32S3 Dev Module**
+- USB CDC On Boot: **Enabled**
+- USB Mode: **Hardware CDC and JTAG**
+- PSRAM: **Disabled**
+- Upload Speed: **921600**
+- Serial Monitor: **115200 baud**
 
-Use `/dev/ttyUSB0` if that is the DevKit USB-UART port. Board: ESP32-S3-DevKitC-1 or another ESP32-S3 with USB-UART on UART0. Console is 115200 8N1 on that port.
+If the monitor is empty because you are on the DevKit UART/COM port, set USB CDC On Boot to **Disabled** so `Serial` is UART0.
 
-Decoder only, no IDF:
+Decoder only, no board package:
 
 ```
 make -C esp32/host test
@@ -29,7 +27,7 @@ make -C esp32/host test
 
 ## Wire
 
-3.3 V UART. Common ground. Pi TX is GPIO 14 (header pin 8). Firmware RX is GPIO 18.
+3.3 V UART. Common ground. Pi TX is GPIO 14 (header pin 8). Firmware RX is GPIO 18 (`HardwareSerial` UART1).
 
 | Pi | ESP32-S3 |
 | --- | --- |
@@ -48,7 +46,7 @@ On the Pi:
 
 `--check` writes the three known positions, pauses one second, and repeats.
 
-On the ESP32 monitor, after the banner, the same three lines each second:
+On the Serial Monitor, after the banner, the same three lines each second:
 
 ```
 icao=400ABC lat=10.5000000 lon=-20.2500000 alt=12000 emergency=0 none
@@ -56,4 +54,4 @@ icao=40621D lat=52.2572021 lon=3.9193726 alt=38000 emergency=0 none
 icao=4CA123 lat=51.4700000 lon=-0.4500000 alt=8000 emergency=1 general
 ```
 
-Change `PI_UART_RX_GPIO` in `main/main.c` if GPIO 18 is not free on the board.
+Change `kPiRxGpio` in `trck_uart.ino` if GPIO 18 is not free on the board.

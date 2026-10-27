@@ -4,7 +4,7 @@ The Raspberry Pi writes one 30-byte UART frame for each position readsb accepts 
 
 `trck --check` writes those same frames on the UART. The ESP32 can check reception against that. Those frames are the live layout.
 
-`esp32/` in this repo is UART ingest for that check: it finds `TRCK`, checks the CRC, and logs ICAO, latitude, longitude, altitude, and emergency. It is not the satellite radio stack.
+`esp32/trck_uart` in this repo is UART ingest for that check: it finds `TRCK`, checks the CRC, and prints ICAO, latitude, longitude, altitude, and emergency. It is not the satellite radio stack.
 
 ## What you do
 

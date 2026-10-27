@@ -1,5 +1,0 @@
-# Target is ESP32-S3. First build: `idf.py set-target esp32s3`.
-# Console stays on UART0 (DevKit USB-UART). Pi frames arrive on UART1.
-CONFIG_ESP_CONSOLE_UART_DEFAULT=y
-CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
-CONFIG_LOG_DEFAULT_LEVEL_INFO=y

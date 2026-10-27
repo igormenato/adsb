@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define TRCK_FRAME_LEN 30
 #define TRCK_ALT_UNKNOWN INT32_MIN
 #define TRCK_SPEED_UNKNOWN 0xFFFFu
@@ -35,5 +39,9 @@ bool trck_unpack(const uint8_t *bytes, size_t len, trck_fix_t *out);
 
 void trck_scan_init(trck_scan_t *scan);
 bool trck_scan_feed(trck_scan_t *scan, uint8_t byte, trck_fix_t *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
