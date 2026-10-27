@@ -1,14 +1,13 @@
-CXX ?= c++
-CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror
-SKETCH = ../trck_uart/trck_uart.ino
+CC ?= cc
+CFLAGS ?= -std=c11 -Wall -Wextra -Werror
 
 .PHONY: test clean
 
 test: test_trck_frame
 	./test_trck_frame
 
-test_trck_frame: $(SKETCH)
-	$(CXX) $(CXXFLAGS) -x c++ -o $@ $(SKETCH)
+test_trck_frame: test_trck_frame.c
+	$(CC) $(CFLAGS) -o $@ test_trck_frame.c
 
 clean:
 	rm -f test_trck_frame
