@@ -4,7 +4,7 @@ Arduino sketch that reads the 30-byte `TRCK` frames `trck` writes, including `tr
 
 This is not the OBC radio firmware. It does not overlay a packed struct on the UART buffer. It does not forward the raw frame as a radio payload.
 
-Open `esp32/trck_uart/trck_uart.ino`.
+Open `esp32/trck_uart/trck_uart.ino`. That file is the whole sketch.
 
 Board package: **esp32 by Espressif Systems 3.3.12** ([arduino-esp32 3.3.12](https://github.com/espressif/arduino-esp32/releases/tag/3.3.12)).
 
