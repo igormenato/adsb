@@ -6,18 +6,18 @@
 
 Run the host checks in this order.
 
-1. `cargo fmt --check`
-2. `cargo clippy --locked --all-targets -- -D warnings`
-3. `cargo test --locked`
+1. `test -z "$(gofmt -l .)"`
+2. `go vet ./...`
+3. `go test ./...`
 
 Build the Pi binaries.
 
 ```
-cargo build --release --locked --target arm-unknown-linux-musleabihf
-cargo build --release --locked --target aarch64-unknown-linux-musl
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=6 go build -o trck-arm ./cmd/trck
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o trck-aarch64 ./cmd/trck
 ```
 
-Copy `target/<triple>/release/trck`. `arm-unknown-linux-musleabihf` is the Zero W. `aarch64-unknown-linux-musl` is the Pi 3B on a 64-bit OS. Release assets are `trck-arm` and `trck-aarch64`.
+`trck-arm` is linux/arm with GOARM=6, for the Zero W. `trck-aarch64` is linux/arm64, for the Pi 3B on a 64-bit OS.
 
 ## Run
 
