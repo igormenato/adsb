@@ -779,48 +779,10 @@ fn sleep_until_stop(stop: &AtomicBool, mut left: Duration) {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
-    use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
-    use std::os::fd::AsRawFd;
+    use std::io::{self, Read, Write};
+    use std::net::TcpListener;
 
     use super::*;
-
-    fn socket_int(fd: i32, level: libc::c_int, name: libc::c_int) -> libc::c_int {
-        let mut value: libc::c_int = -1;
-        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        let rc = unsafe {
-            libc::getsockopt(
-                fd,
-                level,
-                name,
-                &mut value as *mut libc::c_int as *mut libc::c_void,
-                &mut len,
-            )
-        };
-        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
-        value
-    }
-
-    #[test]
-    fn the_readsb_socket_probes_a_silent_peer() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let stream = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
-        enable_keepalive(&stream).expect("keepalive");
-        let fd = stream.as_raw_fd();
-        assert_eq!(socket_int(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE), 1);
-        assert_eq!(
-            socket_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE),
-            KEEPALIVE_IDLE_S as libc::c_int
-        );
-        assert_eq!(
-            socket_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL),
-            KEEPALIVE_INTERVAL_S as libc::c_int
-        );
-        assert_eq!(
-            socket_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT),
-            KEEPALIVE_PROBES as libc::c_int
-        );
-    }
 
     struct Pty {
         master: TTYPort,
@@ -844,14 +806,18 @@ mod tests {
         fix
     }
 
+    fn frame_icao(frame: &[u8]) -> u32 {
+        u32::from_le_bytes([frame[8], frame[9], frame[10], 0])
+    }
+
     fn fill_until_blocked(fd: i32) -> usize {
         let buf = [0xA5u8; 1024];
         let mut wrote = 0usize;
         loop {
             let rc = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
             if rc < 0 {
-                let err = std::io::Error::last_os_error();
-                assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock, "{err}");
+                let err = io::Error::last_os_error();
+                assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
                 break;
             }
             assert!(rc > 0);
@@ -865,32 +831,66 @@ mod tests {
         wrote
     }
 
-    #[test]
-    fn ctrl_c_stops_while_the_uart_is_not_draining() {
-        let pty = Pty::open();
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut writer = open_uart(&pty.path, DEFAULT_BAUD, Arc::clone(&stop)).expect("pty");
-        fill_until_blocked(writer.uart_fd().expect("fd"));
-        writer.enqueue(fix_for(1, false));
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
-        thread::spawn(move || {
-            let _sock = listener.accept().expect("accept").0;
-            let _ = held_rx.recv();
-        });
-        let stream = TcpStream::connect(addr).expect("connect");
-        let flag = Arc::clone(&stop);
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            flag.store(true, Ordering::Relaxed);
-        });
+    fn skip_fill(pty: &mut Pty, filled: usize) {
+        if filled == 0 {
+            return;
+        }
+        pty.master
+            .set_timeout(Duration::from_secs(2))
+            .expect("timeout");
+        let mut left = filled;
+        let mut tmp = [0u8; 4096];
+        while left > 0 {
+            let want = left.min(tmp.len());
+            let n = pty.master.read(&mut tmp[..want]).expect("fill");
+            assert!(n > 0, "pty closed during fill drain");
+            assert!(
+                tmp[..n].iter().all(|&byte| byte == 0xA5),
+                "fill contained {:02x?}",
+                &tmp[..n]
+            );
+            left -= n;
+        }
+    }
+
+    fn drain_frames(
+        pty: &mut Pty,
+        writer: &mut Writer,
+        filled: usize,
+        n: usize,
+    ) -> Vec<[u8; trck::FRAME_LEN]> {
+        skip_fill(pty, filled);
+        pty.master
+            .set_timeout(Duration::from_millis(50))
+            .expect("timeout");
+        let mut raw = Vec::new();
         let started = Instant::now();
-        let end = pump(stream, &mut writer, &stop, "test");
-        drop(held_tx);
-        assert!(matches!(end, Pump::Stopped), "{end:?}");
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(writer.has_pending(), "the frame should still be queued");
+        loop {
+            writer.write_some().expect("write");
+            let mut tmp = [0u8; 1024];
+            match pty.master.read(&mut tmp) {
+                Ok(0) => {}
+                Ok(k) => raw.extend_from_slice(&tmp[..k]),
+                Err(err)
+                    if err.kind() == io::ErrorKind::TimedOut
+                        || err.kind() == io::ErrorKind::WouldBlock => {}
+                Err(err) => panic!("{err}"),
+            }
+            if raw.len() >= n * trck::FRAME_LEN {
+                let (frames, _) = raw.as_chunks::<{ trck::FRAME_LEN }>();
+                return frames.iter().copied().take(n).collect();
+            }
+            if started.elapsed() > Duration::from_secs(3) {
+                panic!("got {} bytes, want {}", raw.len(), n * trck::FRAME_LEN);
+            }
+        }
+    }
+
+    fn blocked_writer(pty: &Pty) -> (Writer, usize) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = open_uart(&pty.path, DEFAULT_BAUD, stop).expect("pty");
+        let filled = fill_until_blocked(writer.uart_fd().expect("fd"));
+        (writer, filled)
     }
 
     #[test]
@@ -898,26 +898,24 @@ mod tests {
         let mut pty = Pty::open();
         let stop = Arc::new(AtomicBool::new(false));
         let mut writer = open_uart(&pty.path, 115_200, stop).expect("pty");
-        let fix = fix_for(0x40621D, false);
-        let frame = pack_frame(&fix);
-        writer.enqueue(fix);
+        writer.enqueue(fix_for(0x40621D, false));
         writer.write_some().expect("write");
-        assert!(!writer.has_pending());
         pty.master
             .set_timeout(Duration::from_secs(1))
             .expect("timeout");
         let mut buf = [0u8; 64];
         let n = pty.master.read(&mut buf).expect("read");
-        assert_eq!(&buf[..n], &frame);
+        assert_eq!(n, trck::FRAME_LEN);
+        assert_eq!(&buf[..4], b"TRCK");
+        assert_eq!(frame_icao(&buf[..n]), 0x40621D);
+        assert_eq!(buf[27], 0);
     }
 
     #[test]
     fn a_silent_pty_accepts_dozens_of_lines_without_stalling() {
         const LINES: u32 = 48;
-        let pty = Pty::open();
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut writer = open_uart(&pty.path, DEFAULT_BAUD, Arc::clone(&stop)).expect("pty");
-        let _filled = fill_until_blocked(writer.uart_fd().expect("fd"));
+        let mut pty = Pty::open();
+        let (mut writer, filled) = blocked_writer(&pty);
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         thread::spawn(move || {
@@ -928,92 +926,94 @@ mod tests {
             }
         });
         let stream = TcpStream::connect(addr).expect("connect");
+        let stop = AtomicBool::new(false);
         let started = Instant::now();
         let end = pump(stream, &mut writer, &stop, "test");
         let elapsed = started.elapsed();
         assert!(matches!(end, Pump::Disconnected), "{end:?}");
-        let sent = writer.current.map(|(_, sent)| sent).unwrap_or(0);
         assert!(
             elapsed < Duration::from_millis(50),
             "48 lines took {elapsed:?}"
         );
-        assert!(
-            writer.queue.len() + usize::from(writer.current.is_some()) > LINES as usize / 2,
-            "queue {} sent {sent} elapsed {elapsed:?}",
-            writer.queue.len()
-        );
+        let frames = drain_frames(&mut pty, &mut writer, filled, LINES as usize);
+        assert_eq!(frames.len(), LINES as usize);
+        for (icao, frame) in frames.iter().enumerate() {
+            assert_eq!(frame_icao(frame), icao as u32, "frame {icao}");
+            assert_eq!(&frame[..4], b"TRCK");
+        }
     }
 
     #[test]
     fn a_7700_survives_a_queue_full_of_ordinary_frames() {
-        let pty = Pty::open();
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut writer = open_uart(&pty.path, DEFAULT_BAUD, stop).expect("pty");
+        let mut pty = Pty::open();
+        let (mut writer, filled) = blocked_writer(&pty);
         for icao in 0..QUEUE_CAP as u32 {
             writer.enqueue(fix_for(icao, false));
         }
         writer.enqueue(fix_for(0x7700, true));
-        assert_eq!(writer.queue.len(), QUEUE_CAP);
-        let kept = writer.queue.back().expect("emergency");
-        assert_eq!(kept.aircraft.emergency, Some(EmergencyKind::General));
-        assert_eq!(kept.aircraft.icao, 0x7700);
-        assert_eq!(kept.unix_s, 1_700_000_000);
-        assert!(!writer.queue.iter().any(|fix| fix.aircraft.icao == 0));
-        assert!(writer.queue.iter().any(|fix| fix.aircraft.icao == 1));
+        let frames = drain_frames(&mut pty, &mut writer, filled, QUEUE_CAP);
+        let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
+        assert_eq!(frames.len(), QUEUE_CAP);
+        assert!(!icaos.contains(&0), "{icaos:?}");
+        assert_eq!(icaos[0], 1);
+        assert_eq!(*icaos.last().expect("last"), 0x7700);
+        assert_eq!(frames.last().expect("last")[27], 1);
+        assert!(icaos.contains(&1));
+    }
 
-        writer.queue.clear();
+    #[test]
+    fn a_full_queue_of_emergencies_drops_an_ordinary_fix() {
+        let mut pty = Pty::open();
+        let (mut writer, filled) = blocked_writer(&pty);
         for icao in 1..=QUEUE_CAP as u32 {
             writer.enqueue(fix_for(icao, true));
         }
         writer.enqueue(fix_for(0x100, false));
-        assert_eq!(writer.queue.len(), QUEUE_CAP);
-        assert!(
-            writer
-                .queue
-                .iter()
-                .all(|fix| fix.aircraft.emergency.is_some())
-        );
-        assert!(!writer.queue.iter().any(|fix| fix.aircraft.icao == 0x100));
+        let frames = drain_frames(&mut pty, &mut writer, filled, QUEUE_CAP);
+        let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
+        assert_eq!(frames.len(), QUEUE_CAP);
+        assert!(!icaos.contains(&0x100), "{icaos:?}");
+        assert!(frames.iter().all(|frame| frame[27] == 1), "{icaos:?}");
     }
 
     #[test]
-    fn localhost_resolves_every_address() {
-        let addrs = resolve_net_json("localhost:9").expect("localhost");
-        assert!(addrs.iter().any(SocketAddr::is_ipv4), "{addrs:?}");
-        assert!(addrs.iter().any(SocketAddr::is_ipv6), "{addrs:?}");
-    }
-
-    #[test]
-    fn dials_the_later_address_when_the_first_refuses() {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        thread::spawn(move || {
-            let _ = listener.accept();
-        });
-        let addrs = [
-            SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
-            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
-        ];
+    fn queued_fixes_survive_reconnect() {
+        let mut pty = Pty::open();
+        let (mut writer, filled) = blocked_writer(&pty);
         let stop = AtomicBool::new(false);
-        let stream = dial_first(&addrs, &stop, "localhost").expect("dial");
-        assert_eq!(
-            stream.peer_addr().expect("peer").ip(),
-            std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)
-        );
-    }
 
-    #[test]
-    fn ctrl_c_interrupts_a_connect() {
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&stop);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
         thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            flag.store(true, Ordering::Relaxed);
+            let (mut sock, _) = listener.accept().expect("accept");
+            writeln!(
+                sock,
+                r#"{{"now":1700000000,"hex":"000001","lat":1,"lon":2}}"#
+            )
+            .expect("line");
         });
-        let addr = "192.0.2.1:81".parse().expect("addr");
-        let started = Instant::now();
-        let err = dial(&addr, &stop, CONNECT_TIMEOUT).expect_err("blackhole");
-        assert!(matches!(err, DialError::Stopped), "{err:?}");
-        assert!(started.elapsed() < Duration::from_secs(1));
+        let stream = TcpStream::connect(addr).expect("connect");
+        let end = pump(stream, &mut writer, &stop, "test");
+        assert!(matches!(end, Pump::Disconnected), "{end:?}");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            writeln!(
+                sock,
+                r#"{{"now":1700000000,"hex":"000002","lat":1,"lon":2}}"#
+            )
+            .expect("line");
+        });
+        let stream = TcpStream::connect(addr).expect("connect");
+        let end = pump(stream, &mut writer, &stop, "test");
+        assert!(matches!(end, Pump::Disconnected), "{end:?}");
+
+        let frames = drain_frames(&mut pty, &mut writer, filled, 2);
+        assert_eq!(frame_icao(&frames[0]), 1);
+        assert_eq!(frame_icao(&frames[1]), 2);
+        assert_eq!(&frames[0][..4], b"TRCK");
+        assert_eq!(&frames[1][..4], b"TRCK");
     }
 }

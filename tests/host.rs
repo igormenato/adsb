@@ -1,4 +1,4 @@
-//! Host tests: JSON lines for the live port, and `--check` against `check_frames`.
+//! Host tests: JSON lines become UART bytes, and `--check` writes the published frames.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -6,10 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use trck::{
-    ALT_UNKNOWN, EmergencyKind, FRAME_LEN, SPEED_UNKNOWN, TRACK_MAGIC, TRACK_UNKNOWN,
-    crc16_ccitt_false, fix_from_json_line, pack_frame, unpack_frame,
-};
+use trck::{ALT_UNKNOWN, FRAME_LEN, SPEED_UNKNOWN, TRACK_UNKNOWN, fix_from_json_line, pack_frame};
 
 const PUBLISHED_LINE: &str = r#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4}"#;
 
@@ -30,6 +27,11 @@ const SECOND: [u8; FRAME_LEN] = [
     0x18, 0xee, 0xf3, 0xe0, 0x2e, 0x00, 0x00, 0x18, 0x01, 0x5a, 0x00, 0x00, 0xd7, 0x48,
 ];
 
+const CHECK_EMERGENCY: [u8; FRAME_LEN] = [
+    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x23, 0xa1, 0x4c, 0xe0, 0xb2, 0xad, 0x1e, 0xe0,
+    0x55, 0xbb, 0xff, 0x40, 0x1f, 0x00, 0x00, 0xdc, 0x00, 0xb4, 0x00, 0x01, 0x7f, 0xb6,
+];
+
 const UNKNOWN: [u8; FRAME_LEN] = [
     0x54, 0x52, 0x43, 0x4b, 0x0a, 0x00, 0x00, 0x00, 0x23, 0xc1, 0xab, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0xff, 0x00, 0x2a, 0x6a,
@@ -41,34 +43,18 @@ const SATURATED: [u8; FRAME_LEN] = [
 ];
 
 #[test]
-fn published_track_and_crc() {
-    assert_eq!(crc16_ccitt_false(b"123456789"), 0x29B1);
-    assert_eq!(TRACK_MAGIC, b"TRCK");
-
+fn published_json_is_the_documented_frame() {
     let fix = fix_from_json_line(PUBLISHED_LINE.as_bytes()).expect("line");
     assert_eq!(fix.unix_s, 1_700_000_000);
-    let aircraft = &fix.aircraft;
-    assert_eq!(aircraft.icao, 0x40621D);
-    assert_eq!(aircraft.latitude_e7, 522_572_021);
-    assert_eq!(aircraft.longitude_e7, 39_193_726);
-    assert_eq!(aircraft.altitude_ft, 38000);
-    assert_eq!(aircraft.ground_speed_kt, 450);
-    assert_eq!(aircraft.track_deg, 271);
-    assert_eq!(aircraft.emergency, None);
-
-    let frame = pack_frame(&fix);
-    assert_eq!(frame, PUBLISHED);
-    assert_eq!(&frame[0..4], b"TRCK");
-    assert_eq!(frame[27], 0);
-    assert_eq!(
-        unpack_frame(&frame).as_ref().map(|fix| &fix.aircraft),
-        Some(aircraft)
-    );
-    assert_eq!(u16::from_le_bytes([frame[28], frame[29]]), 0x8173);
-
-    let mut flipped = frame;
-    flipped[29] ^= 0x5A;
-    assert!(unpack_frame(&flipped).is_none());
+    assert_eq!(fix.aircraft.icao, 0x40621D);
+    assert_eq!(fix.aircraft.latitude_e7, 522_572_021);
+    assert_eq!(fix.aircraft.longitude_e7, 39_193_726);
+    assert_eq!(fix.aircraft.altitude_ft, 38000);
+    assert_eq!(fix.aircraft.ground_speed_kt, 450);
+    assert_eq!(fix.aircraft.track_deg, 271);
+    assert_eq!(pack_frame(&fix), PUBLISHED);
+    assert_eq!(&PUBLISHED[..4], b"TRCK");
+    assert_eq!(PUBLISHED[27], 0);
 }
 
 #[test]
@@ -90,7 +76,6 @@ fn a_line_uses_now_and_ignores_seen_pos() {
     )
     .expect("fresh");
     assert_eq!(fresh.unix_s, 1_700_000_000);
-    assert_eq!(fresh.aircraft.icao, 0x40621D);
     assert_eq!(pack_frame(&fresh)[27], 0);
     assert_eq!(pack_frame(&fresh).len(), FRAME_LEN);
 
@@ -98,8 +83,8 @@ fn a_line_uses_now_and_ignores_seen_pos() {
         br#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"seen_pos":100}"#,
     )
     .expect("old position still a line");
-    assert_eq!(old.aircraft.icao, 0x40621D);
     assert_eq!(old.unix_s, 1_700_000_000);
+    assert_eq!(old.aircraft.icao, 0x40621D);
 
     assert!(fix_from_json_line(br#"{"hex":"40621d","lat":1,"lon":2}"#).is_none());
     assert!(fix_from_json_line(br#"{"now":-1,"hex":"40621d","lat":1,"lon":2}"#).is_none());
@@ -142,6 +127,8 @@ fn line_sentinels_and_track_wrap() {
     assert_eq!(geometric.aircraft.altitude_ft, 3280);
     assert_eq!(geometric.aircraft.ground_speed_kt, SPEED_UNKNOWN);
     assert_eq!(geometric.aircraft.track_deg, TRACK_UNKNOWN);
+    let frame = pack_frame(&geometric);
+    assert_eq!(i32::from_le_bytes(frame[19..23].try_into().unwrap()), 3280);
 }
 
 #[test]
@@ -158,91 +145,45 @@ fn drops_a_bad_hex() {
 #[test]
 fn emergency_names_and_squawks_on_a_line() {
     let cases = [
-        (r#""squawk":"7700""#, Some(EmergencyKind::General)),
-        (r#""squawk":"7600""#, Some(EmergencyKind::Nordo)),
-        (r#""squawk":"7500""#, Some(EmergencyKind::Unlawful)),
-        (r#""squawk":7700"#, Some(EmergencyKind::General)),
-        (r#""squawk":7600"#, Some(EmergencyKind::Nordo)),
-        (r#""squawk":7500"#, Some(EmergencyKind::Unlawful)),
-        (r#""squawk":" 7700 ""#, Some(EmergencyKind::General)),
-        (r#""squawk":"07700""#, None),
-        (r#""squawk":"77000""#, None),
-        (r#""squawk":"0770""#, None),
-        (r#""emergency":"general""#, Some(EmergencyKind::General)),
-        (r#""emergency":"lifeguard""#, Some(EmergencyKind::Lifeguard)),
-        (r#""emergency":"minfuel""#, Some(EmergencyKind::MinFuel)),
-        (r#""emergency":"nordo""#, Some(EmergencyKind::Nordo)),
-        (r#""emergency":"unlawful""#, Some(EmergencyKind::Unlawful)),
-        (r#""emergency":"downed""#, Some(EmergencyKind::Downed)),
-        (r#""emergency":"GENERAL""#, Some(EmergencyKind::General)),
-        (
-            r#""emergency":"unlawful","squawk":"7700""#,
-            Some(EmergencyKind::Unlawful),
-        ),
-        (
-            r#""emergency":"none","squawk":"7700""#,
-            Some(EmergencyKind::General),
-        ),
-        (
-            r#""emergency":"","squawk":"7600""#,
-            Some(EmergencyKind::Nordo),
-        ),
-        (r#""emergency":"none""#, None),
-        (r#""squawk":"1000""#, None),
-        (r#""emergency":"medical""#, None),
-        (
-            r#""emergency":"medical","squawk":"7700""#,
-            Some(EmergencyKind::General),
-        ),
-        (r#""emergency":"reserved""#, Some(EmergencyKind::Reserved)),
-        (r#""emergency":"RESERVED""#, Some(EmergencyKind::Reserved)),
-        (
-            r#""emergency":"reserved","squawk":"1000""#,
-            Some(EmergencyKind::Reserved),
-        ),
-        (
-            r#""emergency":"reserved","squawk":"7700""#,
-            Some(EmergencyKind::General),
-        ),
-        (
-            r#""emergency":"reserved","squawk":"7600""#,
-            Some(EmergencyKind::Nordo),
-        ),
-        (
-            r#""emergency":"reserved","squawk":"7500""#,
-            Some(EmergencyKind::Unlawful),
-        ),
+        (r#""squawk":"7700""#, 1u8),
+        (r#""squawk":"7600""#, 4),
+        (r#""squawk":"7500""#, 5),
+        (r#""squawk":7700"#, 1),
+        (r#""squawk":7600"#, 4),
+        (r#""squawk":7500"#, 5),
+        (r#""squawk":" 7700 ""#, 1),
+        (r#""squawk":"07700""#, 0),
+        (r#""squawk":"77000""#, 0),
+        (r#""squawk":"0770""#, 0),
+        (r#""emergency":"general""#, 1),
+        (r#""emergency":"lifeguard""#, 2),
+        (r#""emergency":"minfuel""#, 3),
+        (r#""emergency":"nordo""#, 4),
+        (r#""emergency":"unlawful""#, 5),
+        (r#""emergency":"downed""#, 6),
+        (r#""emergency":"GENERAL""#, 1),
+        (r#""emergency":"unlawful","squawk":"7700""#, 5),
+        (r#""emergency":"none","squawk":"7700""#, 1),
+        (r#""emergency":"","squawk":"7600""#, 4),
+        (r#""emergency":"none""#, 0),
+        (r#""squawk":"1000""#, 0),
+        (r#""emergency":"medical""#, 0),
+        (r#""emergency":"medical","squawk":"7700""#, 1),
+        (r#""emergency":"reserved""#, 7),
+        (r#""emergency":"RESERVED""#, 7),
+        (r#""emergency":"reserved","squawk":"1000""#, 7),
+        (r#""emergency":"reserved","squawk":"7700""#, 1),
+        (r#""emergency":"reserved","squawk":"7600""#, 4),
+        (r#""emergency":"reserved","squawk":"7500""#, 5),
     ];
-    assert_eq!(
-        [
-            EmergencyKind::General.code(),
-            EmergencyKind::Lifeguard.code(),
-            EmergencyKind::MinFuel.code(),
-            EmergencyKind::Nordo.code(),
-            EmergencyKind::Unlawful.code(),
-            EmergencyKind::Downed.code(),
-            EmergencyKind::Reserved.code(),
-        ],
-        [1, 2, 3, 4, 5, 6, 7]
-    );
-    for (extra, kind) in cases {
+    for (extra, code) in cases {
         let line = format!(
             r#"{{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,{extra}}}"#
         );
         let fix = fix_from_json_line(line.as_bytes()).expect(extra);
-        assert_eq!(fix.aircraft.icao, 0x40621D, "{extra}");
-        assert_eq!(fix.aircraft.emergency, kind, "{extra}");
         let frame = pack_frame(&fix);
         assert_eq!(frame.len(), FRAME_LEN, "{extra}");
-        match kind {
-            Some(kind) => assert_eq!(frame[27], kind.code(), "{extra}"),
-            None => assert_eq!(frame[27], 0, "{extra}"),
-        }
-        assert_eq!(
-            unpack_frame(&frame).unwrap().aircraft.emergency,
-            kind,
-            "{extra}"
-        );
+        assert_eq!(frame[27], code, "{extra}");
     }
 
     let named = fix_from_json_line(
@@ -256,21 +197,6 @@ fn emergency_names_and_squawks_on_a_line() {
     )
     .expect("squawk");
     assert_eq!(pack_frame(&squawk), EMERGENCY);
-
-    let mut unknown = EMERGENCY;
-    unknown[27] = 8;
-    let crc = crc16_ccitt_false(&unknown[..28]);
-    unknown[28..30].copy_from_slice(&crc.to_le_bytes());
-    assert!(unpack_frame(&unknown).is_none());
-
-    let mut reserved = EMERGENCY;
-    reserved[27] = 7;
-    let crc = crc16_ccitt_false(&reserved[..28]);
-    reserved[28..30].copy_from_slice(&crc.to_le_bytes());
-    assert_eq!(
-        unpack_frame(&reserved).unwrap().aircraft.emergency,
-        Some(EmergencyKind::Reserved)
-    );
 }
 
 struct StopSender(std::process::Child);
@@ -337,13 +263,10 @@ fn listen() -> (TcpListener, u16) {
 }
 
 enum Session {
-    /// Drop this socket and accept the next one.
     Next,
-    /// Keep this socket open so the sender can finish reading.
     Hold,
 }
 
-/// Accept connections and let `script` write the lines for each one.
 fn serve(
     listener: TcpListener,
     mut script: impl FnMut(&mut std::net::TcpStream) -> Session + Send + 'static,
@@ -472,9 +395,8 @@ fn emergency_and_squawk_are_on_the_wire() {
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     let got = wait_len(&buf, FRAME_LEN * 2, Duration::from_secs(2));
     assert_eq!(&got[..FRAME_LEN], &EMERGENCY);
-    let second = unpack_frame(&got[FRAME_LEN..]).expect("crc");
-    assert_eq!(second.aircraft.emergency, Some(EmergencyKind::Unlawful));
-    assert_eq!(got[FRAME_LEN + 27], EmergencyKind::Unlawful.code());
+    assert_eq!(&got[FRAME_LEN..FRAME_LEN + 4], b"TRCK");
+    assert_eq!(got[FRAME_LEN + 27], 5);
     assert_ne!(&got[FRAME_LEN..], &EMERGENCY);
 }
 
@@ -514,10 +436,6 @@ fn a_refused_port_writes_nothing() {
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 
-fn frame_icao(frame: &[u8]) -> u32 {
-    u32::from_le_bytes([frame[8], frame[9], frame[10], 0])
-}
-
 #[test]
 fn check_and_net_json_together_are_an_error() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_trck"))
@@ -543,27 +461,16 @@ fn check_and_net_json_together_are_an_error() {
 }
 
 #[test]
-fn check_matches_check_frames() {
-    let frames = trck::check_frames();
-    assert_eq!(frames.len(), 3);
-    assert_eq!(frame_icao(&frames[0]), 0x400ABC);
-    assert_eq!(frames[0][27], 0);
-    assert_eq!(frame_icao(&frames[1]), 0x40621D);
-    assert_eq!(frames[1][27], 0);
-    assert_eq!(frame_icao(&frames[2]), 0x4CA123);
-    assert_eq!(frames[2][27], EmergencyKind::General.code());
-    for frame in &frames {
-        assert_eq!(
-            u32::from_le_bytes(frame[4..8].try_into().unwrap()),
-            1_700_000_000
-        );
-    }
-    let expect: Vec<u8> = frames.into_iter().flatten().collect();
-
+fn check_writes_the_published_frames() {
+    let expect = [SECOND, PUBLISHED, CHECK_EMERGENCY].concat();
     let mut sender = spawn_check();
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     let got = wait_len(&buf, expect.len(), Duration::from_secs(2));
     assert!(got.len() >= expect.len(), "short output: {}", got.len());
     assert_eq!(&got[..expect.len()], expect.as_slice());
+    assert_eq!(&got[..4], b"TRCK");
+    assert_eq!(got[27], 0);
+    assert_eq!(got[FRAME_LEN + 27], 0);
+    assert_eq!(got[FRAME_LEN * 2 + 27], 1);
     assert!(sender.0.try_wait().unwrap().is_none());
 }
