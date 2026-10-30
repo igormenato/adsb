@@ -20,7 +20,6 @@ const DEFAULT_BAUD: u32 = 115_200;
 const CHECK_PAUSE: Duration = Duration::from_secs(1);
 const POLL_SLICE: Duration = Duration::from_millis(200);
 const CONNECT_SLICE: Duration = Duration::from_millis(50);
-/// Positions waiting on the UART. The frame being written sits beside this.
 const QUEUE_CAP: usize = 64;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_MIN: Duration = Duration::from_secs(1);
@@ -74,7 +73,6 @@ struct Writer {
     sink: Sink,
     stop: Arc<AtomicBool>,
     queue: VecDeque<Fix>,
-    /// Remainder of a short write. `sent` bytes of `frame` are already in the kernel.
     current: Option<([u8; trck::FRAME_LEN], usize)>,
 }
 
