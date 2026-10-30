@@ -53,7 +53,7 @@ impl EmergencyKind {
 }
 
 /// One aircraft that already has a position.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Aircraft {
     pub icao: u32,
     pub latitude_e7: i32,
@@ -65,7 +65,7 @@ pub struct Aircraft {
 }
 
 /// One accepted position. `unix_s` is the line's `now`, truncated to seconds.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fix {
     pub unix_s: u32,
     pub aircraft: Aircraft,
@@ -78,10 +78,11 @@ pub fn deg_e7(degrees: f64) -> i32 {
 }
 
 /// Magic, unix seconds, one aircraft, then CRC-16/CCITT-FALSE over the first 28 bytes.
-pub fn pack_frame(unix_s: u32, aircraft: &Aircraft) -> [u8; FRAME_LEN] {
+pub fn pack_frame(fix: &Fix) -> [u8; FRAME_LEN] {
+    let aircraft = &fix.aircraft;
     let mut raw = [0u8; FRAME_LEN];
     raw[0..4].copy_from_slice(TRACK_MAGIC);
-    raw[4..8].copy_from_slice(&unix_s.to_le_bytes());
+    raw[4..8].copy_from_slice(&fix.unix_s.to_le_bytes());
     let icao = (aircraft.icao & 0x00ff_ffff).to_le_bytes();
     raw[8..11].copy_from_slice(&icao[..3]);
     raw[11..15].copy_from_slice(&aircraft.latitude_e7.to_le_bytes());
@@ -138,7 +139,7 @@ pub fn check_positions() -> [Fix; 3] {
 }
 
 pub fn check_frames() -> [[u8; FRAME_LEN]; 3] {
-    check_positions().map(|position| pack_frame(position.unix_s, &position.aircraft))
+    check_positions().map(|position| pack_frame(&position))
 }
 
 pub fn unpack_frame(bytes: &[u8]) -> Option<Fix> {
