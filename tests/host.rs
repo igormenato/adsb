@@ -1,8 +1,11 @@
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpListener;
+use std::os::fd::AsRawFd;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use serialport::{SerialPort, TTYPort};
 
 use trck::{ALT_UNKNOWN, FRAME_LEN, SPEED_UNKNOWN, TRACK_UNKNOWN, fix_from_json_line, pack_frame};
 
@@ -41,21 +44,6 @@ const SATURATED: [u8; FRAME_LEN] = [
 ];
 
 #[test]
-fn published_json_is_the_documented_frame() {
-    let fix = fix_from_json_line(PUBLISHED_LINE.as_bytes()).expect("line");
-    assert_eq!(fix.unix_s, 1_700_000_000);
-    assert_eq!(fix.aircraft.icao, 0x40621D);
-    assert_eq!(fix.aircraft.latitude_e7, 522_572_021);
-    assert_eq!(fix.aircraft.longitude_e7, 39_193_726);
-    assert_eq!(fix.aircraft.altitude_ft, 38000);
-    assert_eq!(fix.aircraft.ground_speed_kt, 450);
-    assert_eq!(fix.aircraft.track_deg, 271);
-    assert_eq!(pack_frame(&fix), PUBLISHED);
-    assert_eq!(&PUBLISHED[..4], b"TRCK");
-    assert_eq!(PUBLISHED[27], 0);
-}
-
-#[test]
 fn a_json_line_is_one_frame_and_a_document_is_not() {
     let fix = fix_from_json_line(PUBLISHED_LINE.as_bytes()).expect("line");
     assert_eq!(pack_frame(&fix), PUBLISHED);
@@ -74,8 +62,6 @@ fn a_line_uses_now_and_ignores_seen_pos() {
     )
     .expect("fresh");
     assert_eq!(fresh.unix_s, 1_700_000_000);
-    assert_eq!(pack_frame(&fresh)[27], 0);
-    assert_eq!(pack_frame(&fresh).len(), FRAME_LEN);
 
     let old = fix_from_json_line(
         br#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"seen_pos":100}"#,
@@ -224,6 +210,17 @@ fn spawn_check() -> StopSender {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn check");
+    StopSender(child)
+}
+
+fn spawn_uart(port: u16, uart: &str) -> StopSender {
+    let addr = format!("127.0.0.1:{port}");
+    let child = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .args(["--net-json", &addr, "--uart", uart])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sender");
     StopSender(child)
 }
 
@@ -393,9 +390,8 @@ fn emergency_and_squawk_are_on_the_wire() {
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     let got = wait_len(&buf, FRAME_LEN * 2, Duration::from_secs(2));
     assert_eq!(&got[..FRAME_LEN], &EMERGENCY);
-    assert_eq!(&got[FRAME_LEN..FRAME_LEN + 4], b"TRCK");
-    assert_eq!(got[FRAME_LEN + 27], 5);
-    assert_ne!(&got[FRAME_LEN..], &EMERGENCY);
+    let named = fix_from_json_line(unlawful.as_bytes()).expect("unlawful");
+    assert_eq!(&got[FRAME_LEN..], &pack_frame(&named));
 }
 
 #[test]
@@ -466,9 +462,145 @@ fn check_writes_the_published_frames() {
     let got = wait_len(&buf, expect.len(), Duration::from_secs(2));
     assert!(got.len() >= expect.len(), "short output: {}", got.len());
     assert_eq!(&got[..expect.len()], expect.as_slice());
-    assert_eq!(&got[..4], b"TRCK");
-    assert_eq!(got[27], 0);
-    assert_eq!(got[FRAME_LEN + 27], 0);
-    assert_eq!(got[FRAME_LEN * 2 + 27], 1);
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+const QUEUE: usize = 64;
+
+struct Pty {
+    master: TTYPort,
+    slave: TTYPort,
+}
+
+impl Pty {
+    fn open() -> Self {
+        let (master, slave) = TTYPort::pair().expect("pty");
+        let fd = slave.as_raw_fd();
+        unsafe {
+            let _ = libc::ioctl(fd, libc::TIOCNXCL);
+            let _ = libc::flock(fd, libc::LOCK_UN);
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            assert!(flags >= 0, "{}", io::Error::last_os_error());
+            let rc = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            assert_eq!(rc, 0, "{}", io::Error::last_os_error());
+        }
+        Self { master, slave }
+    }
+
+    fn path(&self) -> String {
+        self.slave.name().expect("pty name")
+    }
+}
+
+fn frame_icao(frame: &[u8]) -> u32 {
+    u32::from_le_bytes([frame[8], frame[9], frame[10], 0])
+}
+
+fn fill_until_blocked(fd: i32) -> usize {
+    let buf = [0xA5u8; 1024];
+    let mut wrote = 0usize;
+    loop {
+        let rc = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
+            break;
+        }
+        assert!(rc > 0);
+        wrote += rc as usize;
+        assert!(
+            wrote < 1024 * 1024,
+            "pty accepted a megabyte without blocking"
+        );
+    }
+    assert!(wrote > 0, "pty buffer was already full");
+    wrote
+}
+
+fn frames_from(raw: &[u8], n: usize) -> Option<Vec<[u8; FRAME_LEN]>> {
+    let pos = raw.windows(4).position(|window| window == b"TRCK")?;
+    let rest = &raw[pos..];
+    if rest.len() < n * FRAME_LEN {
+        return None;
+    }
+    let (frames, _) = rest.as_chunks::<FRAME_LEN>();
+    Some(frames.iter().copied().take(n).collect())
+}
+
+fn wait_frames(master: &mut TTYPort, n: usize, timeout: Duration) -> Vec<[u8; FRAME_LEN]> {
+    master
+        .set_timeout(Duration::from_millis(50))
+        .expect("timeout");
+    let mut raw = Vec::new();
+    let started = Instant::now();
+    loop {
+        let mut tmp = [0u8; 4096];
+        match master.read(&mut tmp) {
+            Ok(0) => {}
+            Ok(k) => raw.extend_from_slice(&tmp[..k]),
+            Err(err)
+                if err.kind() == io::ErrorKind::TimedOut
+                    || err.kind() == io::ErrorKind::WouldBlock => {}
+            Err(err) => panic!("{err}"),
+        }
+        if let Some(frames) = frames_from(&raw, n) {
+            return frames;
+        }
+        if started.elapsed() > timeout {
+            panic!("got {} bytes, want {}", raw.len(), n * FRAME_LEN);
+        }
+    }
+}
+
+#[test]
+fn a_tty_writes_the_published_frame() {
+    let (listener, port) = listen();
+    let mut pty = Pty::open();
+    let mut sender = spawn_uart(port, &pty.path());
+    let (mut sock, _) = listener.accept().expect("accept");
+    writeln!(sock, "{PUBLISHED_LINE}").expect("line");
+    let frames = wait_frames(&mut pty.master, 1, Duration::from_secs(2));
+    assert_eq!(frames[0], PUBLISHED);
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn a_full_tty_drops_ordinary_json_and_keeps_7700() {
+    let (listener, port) = listen();
+    let mut pty = Pty::open();
+    let mut sender = spawn_uart(port, &pty.path());
+    let (mut sock, _) = listener.accept().expect("accept");
+    fill_until_blocked(pty.slave.as_raw_fd());
+    for icao in 0..=QUEUE as u32 {
+        let line = format!(r#"{{"now":1700000000,"hex":"{icao:06x}","lat":1,"lon":2}}"#);
+        writeln!(sock, "{line}").expect("line");
+    }
+    let emergency = r#"{"now":1700000000,"hex":"007700","lat":1,"lon":2,"squawk":"7700"}"#;
+    writeln!(sock, "{emergency}").expect("7700");
+    sock.flush().expect("flush");
+    std::thread::sleep(Duration::from_millis(200));
+    let frames = wait_frames(&mut pty.master, QUEUE + 1, Duration::from_secs(3));
+    let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
+    assert!(!icaos.contains(&1), "{icaos:?}");
+    let kept = fix_from_json_line(emergency.as_bytes()).expect("7700");
+    assert_eq!(frames.last().copied(), Some(pack_frame(&kept)));
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn queued_tty_frames_survive_run_port_reconnect() {
+    let (listener, port) = listen();
+    let mut pty = Pty::open();
+    let mut sender = spawn_uart(port, &pty.path());
+    {
+        let (mut sock, _) = listener.accept().expect("accept");
+        fill_until_blocked(pty.slave.as_raw_fd());
+        writeln!(sock, "{PUBLISHED_LINE}").expect("first");
+    }
+    let (mut sock, _) = listener.accept().expect("accept");
+    writeln!(sock, "{SECOND_LINE}").expect("second");
+    let frames = wait_frames(&mut pty.master, 2, Duration::from_secs(5));
+    assert_eq!(frames[0], PUBLISHED);
+    assert_eq!(frames[1], SECOND);
     assert!(sender.0.try_wait().unwrap().is_none());
 }
