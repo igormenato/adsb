@@ -1,5 +1,3 @@
-//! Host tests: JSON lines become UART bytes, and `--check` writes the published frames.
-
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
@@ -263,8 +261,8 @@ fn listen() -> (TcpListener, u16) {
 }
 
 enum Session {
-    Next,
-    Hold,
+    CloseAndAccept,
+    KeepOpen,
 }
 
 fn serve(
@@ -274,7 +272,7 @@ fn serve(
     std::thread::spawn(move || {
         loop {
             let (mut sock, _) = listener.accept().expect("accept");
-            if matches!(script(&mut sock), Session::Hold) {
+            if matches!(script(&mut sock), Session::KeepOpen) {
                 std::thread::sleep(Duration::from_secs(2));
                 break;
             }
@@ -291,7 +289,7 @@ fn nothing_is_written_until_a_line_arrives() {
         ready_tx.send(()).expect("ready");
         go_rx.recv().expect("go");
         writeln!(sock, "{PUBLISHED_LINE}").expect("line");
-        Session::Hold
+        Session::KeepOpen
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
@@ -319,7 +317,7 @@ fn one_frame_per_valid_line_and_none_for_a_bad_line() {
             "not json\n{{\"now\":1}}\n{{\"now\":-1,\"hex\":\"abc123\",\"lat\":1,\"lon\":2}}\n{{\"hex\":\"abc123\",\"lat\":1,\"lon\":2}}\n{{\"now\":1.5,\"hex\":\"abc123\",\"lon\":2}}\n{{\"now\":\"1700000000\",\"hex\":\"abc123\",\"lat\":1,\"lon\":2}}\n{PUBLISHED_LINE}\n{{\"now\":1700000000,\"aircraft\":[]}}\n{SECOND_LINE}\n"
         )
         .expect("lines");
-        Session::Hold
+        Session::KeepOpen
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
@@ -338,7 +336,7 @@ fn the_same_icao_is_sent_twice() {
     serve(listener, |sock| {
         writeln!(sock, "{PUBLISHED_LINE}").expect("first");
         writeln!(sock, "{PUBLISHED_LINE}").expect("second");
-        Session::Hold
+        Session::KeepOpen
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
@@ -361,7 +359,7 @@ fn a_split_line_is_one_frame() {
         ready_tx.send(()).expect("ready");
         go_rx.recv().expect("go");
         sock.write_all(&tail).expect("tail");
-        Session::Hold
+        Session::KeepOpen
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
@@ -389,7 +387,7 @@ fn emergency_and_squawk_are_on_the_wire() {
         )
         .expect("squawk");
         writeln!(sock, "{unlawful}").expect("name");
-        Session::Hold
+        Session::KeepOpen
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
@@ -407,10 +405,10 @@ fn a_dead_socket_writes_nothing_until_the_next_line() {
     serve(listener, move |sock| {
         if first {
             first = false;
-            return Session::Next;
+            return Session::CloseAndAccept;
         }
         writeln!(sock, "{PUBLISHED_LINE}").expect("line");
-        Session::Hold
+        Session::KeepOpen
     });
     let mut sender = spawn_net(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
