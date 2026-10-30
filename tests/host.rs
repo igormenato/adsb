@@ -56,7 +56,7 @@ fn published_track_and_crc() {
     assert_eq!(aircraft.track_deg, 271);
     assert_eq!(aircraft.emergency, None);
 
-    let frame = pack_frame(fix.unix_s, aircraft);
+    let frame = pack_frame(&fix);
     assert_eq!(frame, PUBLISHED);
     assert_eq!(&frame[0..4], b"TRCK");
     assert_eq!(frame[27], 0);
@@ -74,7 +74,7 @@ fn published_track_and_crc() {
 #[test]
 fn a_json_line_is_one_frame_and_a_document_is_not() {
     let fix = fix_from_json_line(PUBLISHED_LINE.as_bytes()).expect("line");
-    assert_eq!(pack_frame(fix.unix_s, &fix.aircraft), PUBLISHED);
+    assert_eq!(pack_frame(&fix), PUBLISHED);
     assert!(
         fix_from_json_line(
             br#"{"now":1700000000.9,"aircraft":[{"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375}]}"#
@@ -91,8 +91,8 @@ fn a_line_uses_now_and_ignores_seen_pos() {
     .expect("fresh");
     assert_eq!(fresh.unix_s, 1_700_000_000);
     assert_eq!(fresh.aircraft.icao, 0x40621D);
-    assert_eq!(pack_frame(fresh.unix_s, &fresh.aircraft)[27], 0);
-    assert_eq!(pack_frame(fresh.unix_s, &fresh.aircraft).len(), FRAME_LEN);
+    assert_eq!(pack_frame(&fresh)[27], 0);
+    assert_eq!(pack_frame(&fresh).len(), FRAME_LEN);
 
     let old = fix_from_json_line(
         br#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"seen_pos":100}"#,
@@ -125,7 +125,7 @@ fn line_sentinels_and_track_wrap() {
     assert_eq!(unknown.aircraft.altitude_ft, ALT_UNKNOWN);
     assert_eq!(unknown.aircraft.ground_speed_kt, SPEED_UNKNOWN);
     assert_eq!(unknown.aircraft.track_deg, TRACK_UNKNOWN);
-    assert_eq!(pack_frame(unknown.unix_s, &unknown.aircraft), UNKNOWN);
+    assert_eq!(pack_frame(&unknown), UNKNOWN);
 
     let saturated = fix_from_json_line(
         br#"{"now":10,"hex":"abc124","lat":0,"lon":1,"alt_baro":"ground","gs":65534.6,"track":360}"#,
@@ -134,7 +134,7 @@ fn line_sentinels_and_track_wrap() {
     assert_eq!(saturated.aircraft.altitude_ft, 0);
     assert_eq!(saturated.aircraft.ground_speed_kt, 65534);
     assert_eq!(saturated.aircraft.track_deg, 0);
-    assert_eq!(pack_frame(saturated.unix_s, &saturated.aircraft), SATURATED);
+    assert_eq!(pack_frame(&saturated), SATURATED);
 
     let geometric =
         fix_from_json_line(br#"{"now":10,"hex":"000001","lat":1,"lon":2,"alt_geom":3280.4}"#)
@@ -232,7 +232,7 @@ fn emergency_names_and_squawks_on_a_line() {
         let fix = fix_from_json_line(line.as_bytes()).expect(extra);
         assert_eq!(fix.aircraft.icao, 0x40621D, "{extra}");
         assert_eq!(fix.aircraft.emergency, kind, "{extra}");
-        let frame = pack_frame(fix.unix_s, &fix.aircraft);
+        let frame = pack_frame(&fix);
         assert_eq!(frame.len(), FRAME_LEN, "{extra}");
         match kind {
             Some(kind) => assert_eq!(frame[27], kind.code(), "{extra}"),
@@ -249,13 +249,13 @@ fn emergency_names_and_squawks_on_a_line() {
         br#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"emergency":"general"}"#,
     )
     .expect("named");
-    assert_eq!(pack_frame(named.unix_s, &named.aircraft), EMERGENCY);
+    assert_eq!(pack_frame(&named), EMERGENCY);
 
     let squawk = fix_from_json_line(
         br#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"squawk":"7700"}"#,
     )
     .expect("squawk");
-    assert_eq!(pack_frame(squawk.unix_s, &squawk.aircraft), EMERGENCY);
+    assert_eq!(pack_frame(&squawk), EMERGENCY);
 
     let mut unknown = EMERGENCY;
     unknown[27] = 8;

@@ -13,14 +13,13 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{check_positions, fix_from_json_line, pack_frame};
+use trck::{EmergencyKind, Fix, check_positions, fix_from_json_line, pack_frame};
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
 const CHECK_PAUSE: Duration = Duration::from_secs(1);
 const POLL_SLICE: Duration = Duration::from_millis(200);
 const CONNECT_SLICE: Duration = Duration::from_millis(50);
-/// Finished frames waiting on the UART. The frame being written sits beside this.
 const QUEUE_CAP: usize = 64;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_MIN: Duration = Duration::from_secs(1);
@@ -73,8 +72,7 @@ enum Sink {
 struct Writer {
     sink: Sink,
     stop: Arc<AtomicBool>,
-    queue: VecDeque<[u8; trck::FRAME_LEN]>,
-    /// Remainder of a short write. `sent` bytes of `frame` are already in the kernel.
+    queue: VecDeque<Fix>,
     current: Option<([u8; trck::FRAME_LEN], usize)>,
 }
 
@@ -90,24 +88,28 @@ impl Writer {
         }
     }
 
-    fn enqueue(&mut self, frame: [u8; trck::FRAME_LEN]) {
+    fn enqueue(&mut self, fix: Fix) {
         if self.queue.len() < QUEUE_CAP {
-            self.queue.push_back(frame);
+            self.queue.push_back(fix);
             return;
         }
-        if let Some(index) = self.queue.iter().position(|queued| queued[27] == 0) {
-            let dropped = self.queue.remove(index).expect("ordinary frame");
+        if let Some(index) = self
+            .queue
+            .iter()
+            .position(|queued| queued.aircraft.emergency.is_none())
+        {
+            let dropped = self.queue.remove(index).expect("ordinary position");
             log_drop(&dropped);
-            self.queue.push_back(frame);
+            self.queue.push_back(fix);
             return;
         }
-        if frame[27] == 0 {
-            log_drop(&frame);
+        if fix.aircraft.emergency.is_none() {
+            log_drop(&fix);
             return;
         }
         let dropped = self.queue.pop_front().expect("full queue");
         log_drop(&dropped);
-        self.queue.push_back(frame);
+        self.queue.push_back(fix);
     }
 
     /// Write until the port would block or the queue is empty. A short write stays in `current`.
@@ -117,10 +119,10 @@ impl Writer {
                 return Err(ChunkError::Stopped);
             }
             if self.current.is_none() {
-                let Some(frame) = self.queue.pop_front() else {
+                let Some(fix) = self.queue.pop_front() else {
                     return Ok(());
                 };
-                self.current = Some((frame, 0));
+                self.current = Some((pack_frame(&fix), 0));
             }
             let (frame, sent) = self.current.expect("current frame");
             let rest = &frame[sent..];
@@ -151,9 +153,12 @@ impl Writer {
     }
 }
 
-fn log_drop(frame: &[u8; trck::FRAME_LEN]) {
-    let icao = u32::from_le_bytes([frame[8], frame[9], frame[10], 0]);
-    eprintln!("dropped frame icao={icao:06x} emergency={}", frame[27]);
+fn log_drop(fix: &Fix) {
+    let emergency = fix.aircraft.emergency.map(EmergencyKind::code).unwrap_or(0);
+    eprintln!(
+        "dropped frame icao={:06x} emergency={emergency}",
+        fix.aircraft.icao
+    );
 }
 
 fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
@@ -342,7 +347,7 @@ fn run_check(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
                 "fix t={} icao={:06x}",
                 position.unix_s, position.aircraft.icao
             );
-            writer.enqueue(pack_frame(position.unix_s, &position.aircraft));
+            writer.enqueue(position);
         }
         let deadline = Instant::now() + CHECK_PAUSE;
         loop {
@@ -733,7 +738,7 @@ fn enqueue_ready(lines: &mut JsonLines, writer: &mut Writer) {
         let Some(fix) = fix_from_json_line(&line) else {
             continue;
         };
-        writer.enqueue(pack_frame(fix.unix_s, &fix.aircraft));
+        writer.enqueue(fix);
         eprintln!("fix t={} icao={:06x}", fix.unix_s, fix.aircraft.icao);
     }
     lines.note_overflow();
@@ -831,16 +836,12 @@ mod tests {
         }
     }
 
-    fn frame_icao(frame: &[u8]) -> u32 {
-        u32::from_le_bytes([frame[8], frame[9], frame[10], 0])
-    }
-
-    fn frame_for(icao: u32, emergency: bool) -> [u8; trck::FRAME_LEN] {
+    fn fix_for(icao: u32, emergency: bool) -> Fix {
         let squawk = if emergency { r#","squawk":"7700""# } else { "" };
         let line = format!(r#"{{"now":1700000000,"hex":"{icao:06x}","lat":1,"lon":2{squawk}}}"#);
         let fix = fix_from_json_line(line.as_bytes()).expect("line");
         assert_eq!(fix.aircraft.emergency.is_some(), emergency, "{line}");
-        pack_frame(fix.unix_s, &fix.aircraft)
+        fix
     }
 
     fn fill_until_blocked(fd: i32) -> usize {
@@ -870,7 +871,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let mut writer = open_uart(&pty.path, DEFAULT_BAUD, Arc::clone(&stop)).expect("pty");
         fill_until_blocked(writer.uart_fd().expect("fd"));
-        writer.enqueue(frame_for(1, false));
+        writer.enqueue(fix_for(1, false));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
@@ -897,8 +898,9 @@ mod tests {
         let mut pty = Pty::open();
         let stop = Arc::new(AtomicBool::new(false));
         let mut writer = open_uart(&pty.path, 115_200, stop).expect("pty");
-        let frame = frame_for(0x40621D, false);
-        writer.enqueue(frame);
+        let fix = fix_for(0x40621D, false);
+        let frame = pack_frame(&fix);
+        writer.enqueue(fix);
         writer.write_some().expect("write");
         assert!(!writer.has_pending());
         pty.master
@@ -948,28 +950,30 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let mut writer = open_uart(&pty.path, DEFAULT_BAUD, stop).expect("pty");
         for icao in 0..QUEUE_CAP as u32 {
-            writer.enqueue(frame_for(icao, false));
+            writer.enqueue(fix_for(icao, false));
         }
-        writer.enqueue(frame_for(0x7700, true));
+        writer.enqueue(fix_for(0x7700, true));
         assert_eq!(writer.queue.len(), QUEUE_CAP);
         let kept = writer.queue.back().expect("emergency");
-        assert_eq!(kept[27], trck::EmergencyKind::General.code());
-        assert_eq!(frame_icao(kept), 0x7700);
-        assert_eq!(
-            u32::from_le_bytes(kept[4..8].try_into().unwrap()),
-            1_700_000_000
-        );
-        assert!(!writer.queue.iter().any(|frame| frame_icao(frame) == 0));
-        assert!(writer.queue.iter().any(|frame| frame_icao(frame) == 1));
+        assert_eq!(kept.aircraft.emergency, Some(EmergencyKind::General));
+        assert_eq!(kept.aircraft.icao, 0x7700);
+        assert_eq!(kept.unix_s, 1_700_000_000);
+        assert!(!writer.queue.iter().any(|fix| fix.aircraft.icao == 0));
+        assert!(writer.queue.iter().any(|fix| fix.aircraft.icao == 1));
 
         writer.queue.clear();
         for icao in 1..=QUEUE_CAP as u32 {
-            writer.enqueue(frame_for(icao, true));
+            writer.enqueue(fix_for(icao, true));
         }
-        writer.enqueue(frame_for(0x100, false));
+        writer.enqueue(fix_for(0x100, false));
         assert_eq!(writer.queue.len(), QUEUE_CAP);
-        assert!(writer.queue.iter().all(|frame| frame[27] != 0));
-        assert!(!writer.queue.iter().any(|frame| frame_icao(frame) == 0x100));
+        assert!(
+            writer
+                .queue
+                .iter()
+                .all(|fix| fix.aircraft.emergency.is_some())
+        );
+        assert!(!writer.queue.iter().any(|fix| fix.aircraft.icao == 0x100));
     }
 
     #[test]
