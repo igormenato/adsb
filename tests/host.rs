@@ -475,13 +475,13 @@ struct Pty {
 impl Pty {
     fn open() -> Self {
         let (master, slave) = TTYPort::pair().expect("pty");
-        let fd = slave.as_raw_fd();
+        let slave_fd = slave.as_raw_fd();
         unsafe {
-            let _ = libc::ioctl(fd, libc::TIOCNXCL);
-            let _ = libc::flock(fd, libc::LOCK_UN);
-            let flags = libc::fcntl(fd, libc::F_GETFL);
+            let _ = libc::ioctl(slave_fd, libc::TIOCNXCL);
+            let _ = libc::flock(slave_fd, libc::LOCK_UN);
+            let flags = libc::fcntl(slave_fd, libc::F_GETFL);
             assert!(flags >= 0, "{}", io::Error::last_os_error());
-            let rc = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            let rc = libc::fcntl(slave_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
             assert_eq!(rc, 0, "{}", io::Error::last_os_error());
         }
         Self { master, slave }
@@ -499,12 +499,17 @@ fn frame_icao(frame: &[u8]) -> u32 {
 fn fill_until_blocked(fd: i32) -> usize {
     let buf = [0xA5u8; 1024];
     let mut wrote = 0usize;
+    let mut chunk = buf.len();
     loop {
-        let rc = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
+        let rc = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, chunk) };
         if rc < 0 {
             let err = io::Error::last_os_error();
             assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
-            break;
+            if chunk == 1 {
+                break;
+            }
+            chunk = 1;
+            continue;
         }
         assert!(rc > 0);
         wrote += rc as usize;
@@ -517,39 +522,69 @@ fn fill_until_blocked(fd: i32) -> usize {
     wrote
 }
 
-fn frames_from(raw: &[u8], n: usize) -> Option<Vec<[u8; FRAME_LEN]>> {
-    let pos = raw.windows(4).position(|window| window == b"TRCK")?;
-    let rest = &raw[pos..];
-    if rest.len() < n * FRAME_LEN {
-        return None;
-    }
-    let (frames, _) = rest.as_chunks::<FRAME_LEN>();
-    Some(frames.iter().copied().take(n).collect())
+fn complete_frames(raw: &[u8]) -> Vec<[u8; FRAME_LEN]> {
+    let Some(pos) = raw.windows(4).position(|window| window == b"TRCK") else {
+        return Vec::new();
+    };
+    let (frames, _) = raw[pos..].as_chunks::<FRAME_LEN>();
+    frames.to_vec()
 }
 
-fn wait_frames(master: &mut TTYPort, n: usize, timeout: Duration) -> Vec<[u8; FRAME_LEN]> {
-    master
-        .set_timeout(Duration::from_millis(50))
-        .expect("timeout");
+fn wait_frames_until(
+    master: &mut TTYPort,
+    timeout: Duration,
+    ready: impl Fn(&[[u8; FRAME_LEN]]) -> bool,
+) -> Vec<[u8; FRAME_LEN]> {
+    let fd = master.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        assert!(flags >= 0, "{}", io::Error::last_os_error());
+        let rc = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        assert_eq!(rc, 0, "{}", io::Error::last_os_error());
+    }
     let mut raw = Vec::new();
     let started = Instant::now();
     loop {
         let mut tmp = [0u8; 4096];
-        match master.read(&mut tmp) {
-            Ok(0) => {}
-            Ok(k) => raw.extend_from_slice(&tmp[..k]),
-            Err(err)
-                if err.kind() == io::ErrorKind::TimedOut
-                    || err.kind() == io::ErrorKind::WouldBlock => {}
-            Err(err) => panic!("{err}"),
+        let rc = unsafe { libc::read(fd, tmp.as_mut_ptr() as *mut libc::c_void, tmp.len()) };
+        if rc > 0 {
+            raw.extend_from_slice(&tmp[..rc as usize]);
+            let frames = complete_frames(&raw);
+            if ready(&frames) {
+                return frames;
+            }
+            continue;
         }
-        if let Some(frames) = frames_from(&raw, n) {
-            return frames;
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            assert!(
+                err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::Interrupted,
+                "{err}"
+            );
         }
         if started.elapsed() > timeout {
-            panic!("got {} bytes, want {}", raw.len(), n * FRAME_LEN);
+            let frames = complete_frames(&raw);
+            let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
+            panic!("got {} bytes, icaos {icaos:?}", raw.len());
+        }
+        let left = timeout.saturating_sub(started.elapsed());
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let prc = unsafe { libc::poll(&mut poll_fd, 1, left.as_millis() as libc::c_int) };
+        if prc < 0 {
+            let err = io::Error::last_os_error();
+            assert_eq!(err.kind(), io::ErrorKind::Interrupted, "{err}");
         }
     }
+}
+
+fn wait_frames(master: &mut TTYPort, n: usize, timeout: Duration) -> Vec<[u8; FRAME_LEN]> {
+    let mut frames = wait_frames_until(master, timeout, |frames| frames.len() >= n);
+    frames.truncate(n);
+    frames
 }
 
 #[test]
@@ -571,19 +606,25 @@ fn a_full_tty_drops_ordinary_json_and_keeps_7700() {
     let mut sender = spawn_uart(port, &pty.path());
     let (mut sock, _) = listener.accept().expect("accept");
     fill_until_blocked(pty.slave.as_raw_fd());
+    sock.set_nodelay(true).expect("nodelay");
+    let mut body = String::new();
     for icao in 0..=QUEUE as u32 {
-        let line = format!(r#"{{"now":1700000000,"hex":"{icao:06x}","lat":1,"lon":2}}"#);
-        writeln!(sock, "{line}").expect("line");
+        body.push_str(&format!(
+            r#"{{"now":1700000000,"hex":"{icao:06x}","lat":1,"lon":2}}"#
+        ));
+        body.push('\n');
     }
     let emergency = r#"{"now":1700000000,"hex":"007700","lat":1,"lon":2,"squawk":"7700"}"#;
-    writeln!(sock, "{emergency}").expect("7700");
-    sock.flush().expect("flush");
-    std::thread::sleep(Duration::from_millis(200));
-    let frames = wait_frames(&mut pty.master, QUEUE + 1, Duration::from_secs(3));
+    body.push_str(emergency);
+    body.push('\n');
+    sock.write_all(body.as_bytes()).expect("lines");
+    let kept = pack_frame(&fix_from_json_line(emergency.as_bytes()).expect("7700"));
+    let frames = wait_frames_until(&mut pty.master, Duration::from_secs(5), |frames| {
+        frames.last() == Some(&kept)
+    });
     let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
     assert!(!icaos.contains(&1), "{icaos:?}");
-    let kept = fix_from_json_line(emergency.as_bytes()).expect("7700");
-    assert_eq!(frames.last().copied(), Some(pack_frame(&kept)));
+    assert_eq!(frames.last().copied(), Some(kept));
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 
