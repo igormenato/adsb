@@ -15,12 +15,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
-      - run: cargo build --release --locked --target arm-unknown-linux-musleabihf
-      - run: cargo build --release --locked --target aarch64-unknown-linux-musl
-      - run: |
-          cp target/arm-unknown-linux-musleabihf/release/trck trck-arm
-          cp target/aarch64-unknown-linux-musl/release/trck trck-aarch64
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=6 go build -o trck-arm ./cmd/trck
+      - run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o trck-aarch64 ./cmd/trck
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >

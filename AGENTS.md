@@ -1,17 +1,17 @@
 # trck
 
-## Cargo
+## Go
 
 In this order:
 
-1. `cargo fmt --check`
-2. `cargo clippy --locked --all-targets -- -D warnings`
-3. `cargo test --locked`
+1. `test -z "$(gofmt -l .)"`
+2. `go vet ./...`
+3. `go test ./...`
 
 The Pi binaries:
 
-`cargo build --release --locked --target arm-unknown-linux-musleabihf`
+`CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=6 go build -o trck-arm ./cmd/trck`
 
-`cargo build --release --locked --target aarch64-unknown-linux-musl`
+`CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o trck-aarch64 ./cmd/trck`
 
-Copy `target/<triple>/release/trck`. Release assets are `trck-arm` and `trck-aarch64`.
+Release assets are `trck-arm` and `trck-aarch64`.
