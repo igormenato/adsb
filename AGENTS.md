@@ -1,5 +1,7 @@
 # trck
 
+Follow https://microsoft.github.io/rust-guidelines/agents/all.txt
+
 ## Cargo
 
 In this order:

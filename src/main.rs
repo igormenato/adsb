@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::AsRawFd;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,10 +15,14 @@ use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBit
 
 use trck::{EmergencyKind, Fix, check_positions, fix_from_json_line, pack_frame};
 
+mod sys;
+
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
 const CHECK_PAUSE: Duration = Duration::from_secs(1);
+/// Quiet-link upper bound so Ctrl-C is noticed without a UART or socket event.
 const POLL_SLICE: Duration = Duration::from_millis(200);
+/// Connect wait slice so Ctrl-C is noticed during `CONNECT_TIMEOUT`.
 const CONNECT_SLICE: Duration = Duration::from_millis(50);
 const QUEUE_CAP: usize = 64;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -163,22 +167,13 @@ fn log_drop(fix: &Fix) {
 
 fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
     match sink {
-        Sink::Uart(port) => write_fd(port.as_raw_fd(), bytes),
+        Sink::Uart(port) => sys::write(port.as_raw_fd(), bytes),
         Sink::Stdout => {
             let mut out = io::stdout().lock();
             out.write_all(bytes)?;
             out.flush()?;
             Ok(bytes.len())
         }
-    }
-}
-
-fn write_fd(fd: i32, bytes: &[u8]) -> io::Result<usize> {
-    let rc = unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
-    if rc < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(rc as usize)
     }
 }
 
@@ -239,30 +234,6 @@ impl JsonLines {
     }
 }
 
-fn set_nonblocking(fd: i32) -> io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn clear_nonblocking(fd: i32) -> io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 fn open_failed(path: &str, err: impl std::fmt::Display) -> ExitCode {
     eprintln!("cannot open {path}: {err}");
     ExitCode::from(1)
@@ -279,11 +250,11 @@ fn open_uart(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, Exi
         .map_err(|err| open_failed(path, err))?;
     port.clear(ClearBuffer::All)
         .map_err(|err| open_failed(path, err))?;
-    set_nonblocking(port.as_raw_fd()).map_err(|err| open_failed(path, err))?;
+    sys::set_nonblocking(port.as_raw_fd()).map_err(|err| open_failed(path, err))?;
     Ok(Writer {
         sink: Sink::Uart(port),
         stop,
-        queue: VecDeque::new(),
+        queue: VecDeque::with_capacity(QUEUE_CAP),
         current: None,
     })
 }
@@ -293,7 +264,7 @@ fn open_output(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, E
         return Ok(Writer {
             sink: Sink::Stdout,
             stop,
-            queue: VecDeque::new(),
+            queue: VecDeque::with_capacity(QUEUE_CAP),
             current: None,
         });
     }
@@ -366,12 +337,8 @@ fn run_check(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
                 break;
             };
             let slice = deadline.saturating_duration_since(now).min(POLL_SLICE);
-            let mut poll_fd = libc::pollfd {
-                fd,
-                events: libc::POLLOUT,
-                revents: 0,
-            };
-            if let Err(err) = poll_wait(std::slice::from_mut(&mut poll_fd), slice) {
+            let mut poll_fd = sys::pollfd(fd, libc::POLLOUT);
+            if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), slice) {
                 eprintln!("uart poll: {err}");
                 return ExitCode::from(1);
             }
@@ -440,36 +407,6 @@ fn dial_first(addrs: &[SocketAddr], stop: &AtomicBool, text: &str) -> Result<Tcp
     })))
 }
 
-struct SocketFd(i32);
-
-impl Drop for SocketFd {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.0) };
-    }
-}
-
-impl SocketFd {
-    fn new(domain: libc::c_int) -> io::Result<Self> {
-        let fd = unsafe {
-            libc::socket(
-                domain,
-                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                0,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self(fd))
-    }
-
-    fn into_stream(self) -> TcpStream {
-        let fd = self.0;
-        std::mem::forget(self);
-        unsafe { TcpStream::from_raw_fd(fd) }
-    }
-}
-
 fn dial(addr: &SocketAddr, stop: &AtomicBool, timeout: Duration) -> Result<TcpStream, DialError> {
     if stop.load(Ordering::Relaxed) {
         return Err(DialError::Stopped);
@@ -479,13 +416,12 @@ fn dial(addr: &SocketAddr, stop: &AtomicBool, timeout: Duration) -> Result<TcpSt
     } else {
         libc::AF_INET6
     };
-    let sock = SocketFd::new(domain).map_err(DialError::Failed)?;
-    match connect_fd(sock.0, addr) {
+    let sock = sys::SocketFd::new(domain).map_err(DialError::Failed)?;
+    match sys::connect(sock.as_raw_fd(), addr) {
         Ok(()) => {}
-        Err(err) if pending_connect(&err) => wait_connected(sock.0, stop, timeout)?,
+        Err(err) if pending_connect(&err) => wait_connected(sock.as_raw_fd(), stop, timeout)?,
         Err(err) => return Err(DialError::Failed(err)),
     }
-    clear_nonblocking(sock.0).map_err(DialError::Failed)?;
     Ok(sock.into_stream())
 }
 
@@ -498,51 +434,6 @@ fn pending_connect(err: &io::Error) -> bool {
                 || code == libc::EWOULDBLOCK
                 || code == libc::EINTR
     )
-}
-
-fn connect_fd(fd: i32, addr: &SocketAddr) -> io::Result<()> {
-    let rc = match *addr {
-        SocketAddr::V4(addr) => {
-            let raw = libc::sockaddr_in {
-                sin_family: libc::AF_INET as libc::sa_family_t,
-                sin_port: addr.port().to_be(),
-                sin_addr: libc::in_addr {
-                    s_addr: u32::from(*addr.ip()).to_be(),
-                },
-                sin_zero: [0; 8],
-            };
-            unsafe {
-                libc::connect(
-                    fd,
-                    &raw as *const libc::sockaddr_in as *const libc::sockaddr,
-                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-                )
-            }
-        }
-        SocketAddr::V6(addr) => {
-            let raw = libc::sockaddr_in6 {
-                sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                sin6_port: addr.port().to_be(),
-                sin6_flowinfo: addr.flowinfo(),
-                sin6_addr: libc::in6_addr {
-                    s6_addr: addr.ip().octets(),
-                },
-                sin6_scope_id: addr.scope_id(),
-            };
-            unsafe {
-                libc::connect(
-                    fd,
-                    &raw as *const libc::sockaddr_in6 as *const libc::sockaddr,
-                    std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
-                )
-            }
-        }
-    };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
 }
 
 /// Poll until the connect finishes so Ctrl-C is noticed during the wait.
@@ -560,39 +451,18 @@ fn wait_connected(fd: i32, stop: &AtomicBool, timeout: Duration) -> Result<(), D
             )));
         }
         let slice = deadline.saturating_duration_since(now).min(CONNECT_SLICE);
-        let mut poll_fd = libc::pollfd {
-            fd,
-            events: libc::POLLOUT,
-            revents: 0,
+        let mut poll_fd = sys::pollfd(fd, libc::POLLOUT);
+        let rc = match sys::poll(std::slice::from_mut(&mut poll_fd), slice) {
+            Ok(rc) => rc,
+            Err(err) => return Err(DialError::Failed(err)),
         };
-        let rc = unsafe { libc::poll(&mut poll_fd, 1, slice.as_millis() as libc::c_int) };
-        if rc < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(DialError::Failed(err));
-        }
         if rc == 0 {
             continue;
         }
         if poll_fd.revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) == 0 {
             continue;
         }
-        let mut so_error: libc::c_int = 0;
-        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        let grc = unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_ERROR,
-                &mut so_error as *mut libc::c_int as *mut libc::c_void,
-                &mut len,
-            )
-        };
-        if grc < 0 {
-            return Err(DialError::Failed(io::Error::last_os_error()));
-        }
+        let so_error = sys::so_error(fd).map_err(DialError::Failed)?;
         if so_error != 0 {
             return Err(DialError::Failed(io::Error::from_raw_os_error(so_error)));
         }
@@ -600,65 +470,28 @@ fn wait_connected(fd: i32, stop: &AtomicBool, timeout: Duration) -> Result<(), D
     }
 }
 
-fn set_socket_int(fd: i32, level: libc::c_int, name: libc::c_int, value: u32) -> io::Result<()> {
-    let value = value as libc::c_int;
-    let rc = unsafe {
-        libc::setsockopt(
-            fd,
-            level,
-            name,
-            &value as *const libc::c_int as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if rc < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
 /// These probes turn a peer that dies without a FIN into a read error, so the caller reconnects.
 fn enable_keepalive(stream: &TcpStream) -> io::Result<()> {
     let fd = stream.as_raw_fd();
-    set_socket_int(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1)?;
-    set_socket_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, KEEPALIVE_IDLE_S)?;
-    set_socket_int(
+    sys::setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1)?;
+    sys::setsockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, KEEPALIVE_IDLE_S)?;
+    sys::setsockopt_int(
         fd,
         libc::IPPROTO_TCP,
         libc::TCP_KEEPINTVL,
         KEEPALIVE_INTERVAL_S,
     )?;
-    set_socket_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, KEEPALIVE_PROBES)
-}
-
-fn poll_wait(fds: &mut [libc::pollfd], timeout: Duration) -> io::Result<i32> {
-    let millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
-    loop {
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
-        if rc < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
-        return Ok(rc);
-    }
+    sys::setsockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, KEEPALIVE_PROBES)
 }
 
 fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -> Pump {
-    if let Err(err) = set_nonblocking(stream.as_raw_fd()) {
-        eprintln!("net-json {text}: {err}");
-        return Pump::Disconnected;
-    }
     if let Err(err) = enable_keepalive(&stream) {
         eprintln!("net-json {text} keepalive: {err}");
         return Pump::Disconnected;
     }
     let mut lines = JsonLines {
         reader: stream,
-        pending: Vec::new(),
+        pending: Vec::with_capacity(MAX_LINE),
         state: Pending::Collecting,
     };
     loop {
@@ -666,29 +499,17 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
             return Pump::Stopped;
         }
         let mut fds = [
-            libc::pollfd {
-                fd: lines.reader.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: -1,
-                events: 0,
-                revents: 0,
-            },
+            sys::pollfd(lines.reader.as_raw_fd(), libc::POLLIN),
+            sys::pollfd(-1, 0),
         ];
         let mut nfds = 1usize;
         if writer.has_pending()
             && let Some(fd) = writer.uart_fd()
         {
-            fds[1] = libc::pollfd {
-                fd,
-                events: libc::POLLOUT,
-                revents: 0,
-            };
+            fds[1] = sys::pollfd(fd, libc::POLLOUT);
             nfds = 2;
         }
-        if let Err(err) = poll_wait(&mut fds[..nfds], POLL_SLICE) {
+        if let Err(err) = sys::poll(&mut fds[..nfds], POLL_SLICE) {
             eprintln!("net-json {text}: {err}");
             return end_socket(writer);
         }
