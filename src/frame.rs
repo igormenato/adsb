@@ -11,6 +11,8 @@ pub const FRAME_LEN: usize = 30;
 pub const SPEED_UNKNOWN: u16 = 0xFFFF;
 pub const TRACK_UNKNOWN: u16 = 0xFFFF;
 pub const ALT_UNKNOWN: i32 = i32::MIN;
+/// ADS-B ICAO address is 24 bits. The wire field is three bytes.
+const ICAO24: u32 = 0x00ff_ffff;
 
 /// CRC-16/CCITT-FALSE. `crc16_ccitt_false(b"123456789") == 0x29B1`.
 pub fn crc16_ccitt_false(data: &[u8]) -> u16 {
@@ -83,7 +85,7 @@ pub fn pack_frame(fix: &Fix) -> [u8; FRAME_LEN] {
     let mut raw = [0u8; FRAME_LEN];
     raw[0..4].copy_from_slice(TRACK_MAGIC);
     raw[4..8].copy_from_slice(&fix.unix_s.to_le_bytes());
-    let icao = (aircraft.icao & 0x00ff_ffff).to_le_bytes();
+    let icao = (aircraft.icao & ICAO24).to_le_bytes();
     raw[8..11].copy_from_slice(&icao[..3]);
     raw[11..15].copy_from_slice(&aircraft.latitude_e7.to_le_bytes());
     raw[15..19].copy_from_slice(&aircraft.longitude_e7.to_le_bytes());
@@ -136,10 +138,6 @@ pub fn check_positions() -> [Fix; 3] {
             },
         },
     ]
-}
-
-pub fn check_frames() -> [[u8; FRAME_LEN]; 3] {
-    check_positions().map(|position| pack_frame(&position))
 }
 
 pub fn unpack_frame(bytes: &[u8]) -> Option<Fix> {

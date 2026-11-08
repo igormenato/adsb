@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 
 use serialport::{SerialPort, TTYPort};
 
-use trck::{ALT_UNKNOWN, FRAME_LEN, SPEED_UNKNOWN, TRACK_UNKNOWN, fix_from_json_line, pack_frame};
+use trck::{
+    ALT_UNKNOWN, FRAME_LEN, SPEED_UNKNOWN, TRACK_UNKNOWN, check_positions, crc16_ccitt_false,
+    fix_from_json_line, pack_frame, unpack_frame,
+};
 
 const PUBLISHED_LINE: &str = r#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4}"#;
 
@@ -47,12 +50,29 @@ const SATURATED: [u8; FRAME_LEN] = [
 fn a_json_line_is_one_frame_and_a_document_is_not() {
     let fix = fix_from_json_line(PUBLISHED_LINE.as_bytes()).expect("line");
     assert_eq!(pack_frame(&fix), PUBLISHED);
+    assert_eq!(unpack_frame(&PUBLISHED), Some(fix));
     assert!(
         fix_from_json_line(
             br#"{"now":1700000000.9,"aircraft":[{"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375}]}"#
         )
         .is_none()
     );
+}
+
+#[test]
+fn pack_and_unpack_are_inverses() {
+    assert_eq!(crc16_ccitt_false(b"123456789"), 0x29B1);
+    for position in check_positions() {
+        let frame = pack_frame(&position);
+        assert_eq!(unpack_frame(&frame), Some(position));
+    }
+    assert!(unpack_frame(&PUBLISHED[..FRAME_LEN - 1]).is_none());
+    let mut bad_crc = PUBLISHED;
+    bad_crc[28] ^= 0xFF;
+    assert!(unpack_frame(&bad_crc).is_none());
+    let mut bad_magic = PUBLISHED;
+    bad_magic[0] = b'X';
+    assert!(unpack_frame(&bad_magic).is_none());
 }
 
 #[test]
@@ -166,7 +186,6 @@ fn emergency_names_and_squawks_on_a_line() {
         );
         let fix = fix_from_json_line(line.as_bytes()).expect(extra);
         let frame = pack_frame(&fix);
-        assert_eq!(frame.len(), FRAME_LEN, "{extra}");
         assert_eq!(frame[27], code, "{extra}");
     }
 
@@ -476,6 +495,7 @@ impl Pty {
     fn open() -> Self {
         let (master, slave) = TTYPort::pair().expect("pty");
         let slave_fd = slave.as_raw_fd();
+        // SAFETY: `slave_fd` is the open pty slave this `Pty` owns.
         unsafe {
             let _ = libc::ioctl(slave_fd, libc::TIOCNXCL);
             let _ = libc::flock(slave_fd, libc::LOCK_UN);
@@ -501,7 +521,8 @@ fn fill_until_blocked(fd: i32) -> usize {
     let mut wrote = 0usize;
     let mut chunk = buf.len();
     loop {
-        let rc = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, chunk) };
+        // SAFETY: `fd` is the open pty slave. `buf` is a live slice `write` does not keep.
+        let rc = unsafe { libc::write(fd, buf.as_ptr().cast(), chunk) };
         if rc < 0 {
             let err = io::Error::last_os_error();
             assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
@@ -536,6 +557,7 @@ fn wait_frames_until(
     ready: impl Fn(&[[u8; FRAME_LEN]]) -> bool,
 ) -> Vec<[u8; FRAME_LEN]> {
     let fd = master.as_raw_fd();
+    // SAFETY: `fd` is the open pty master this test owns.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
         assert!(flags >= 0, "{}", io::Error::last_os_error());
@@ -546,7 +568,8 @@ fn wait_frames_until(
     let started = Instant::now();
     loop {
         let mut tmp = [0u8; 4096];
-        let rc = unsafe { libc::read(fd, tmp.as_mut_ptr() as *mut libc::c_void, tmp.len()) };
+        // SAFETY: `fd` is the open pty master. `tmp` is a live buffer `read` does not keep.
+        let rc = unsafe { libc::read(fd, tmp.as_mut_ptr().cast(), tmp.len()) };
         if rc > 0 {
             raw.extend_from_slice(&tmp[..rc as usize]);
             let frames = complete_frames(&raw);
@@ -573,6 +596,7 @@ fn wait_frames_until(
             events: libc::POLLIN,
             revents: 0,
         };
+        // SAFETY: `poll_fd` is one live `pollfd` for the pty master this test owns.
         let prc = unsafe { libc::poll(&mut poll_fd, 1, left.as_millis() as libc::c_int) };
         if prc < 0 {
             let err = io::Error::last_os_error();
