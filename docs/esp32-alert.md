@@ -66,4 +66,4 @@ One plane on the radio is 32 bytes. Copy bytes 8 through 35 of the frame (the 28
 
 The 32 bytes for the first example are `1D 62 40 42 41 57 31 32 33 20 20 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 0F 01 00 00 F1 53 65`.
 
-The nRF24L01 payload max is 32 bytes. These 32 bytes are the aircraft content. There is no spare byte for a radio header inside that payload. Packet 0x02 is a radio draft. It does not set the UART contract.
+The nRF24L01 payload max is 32 bytes. These 32 bytes are the aircraft content. There is no spare byte for a radio header inside that payload. The UART frame stays 38 bytes.
