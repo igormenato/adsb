@@ -110,7 +110,6 @@ Move **sync commit** forward only after `check.sh` exits 0 and you have confirme
 - Constant: `QUEUE_CAP`
 - Spec: `verify/uart-queue/WriterQueue.tla`, `WriterQueue.cfg`
 - Runner: `verify/uart-queue/check.sh`
-- Sync commit: see the last line of this file. Update that line, not a copy elsewhere.
 
 ## Out of scope
 
@@ -118,4 +117,6 @@ JSON lines, `pack_frame`, CRC, `sys.rs`, Ctrl-C, dial, keepalive. `end_socket` /
 
 ## Sync commit
 
-`SYNC_COMMIT` not yet recorded. Set it to the commit that added this skill after `check.sh` passes on that commit.
+`4ff99139928365e5f32b4c93c5cd6734637d38c3`
+
+Confirmed `check.sh` exit 0 and LET `q` matches `Writer::enqueue` at that commit.
