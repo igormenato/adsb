@@ -3,7 +3,7 @@
 use serde_json::Value;
 
 use crate::frame::{
-    ALT_UNKNOWN, Aircraft, EmergencyKind, Fix, SPEED_UNKNOWN, TRACK_UNKNOWN, deg_e7,
+    ALT_UNKNOWN, Aircraft, EmergencyKind, Fix, SPEED_UNKNOWN, TRACK_UNKNOWN, deg_e7, pad_callsign,
 };
 
 /// One `--net-json-port` line. `None` means skip the line.
@@ -37,6 +37,7 @@ fn aircraft_from_position(entry: &Value) -> Option<Aircraft> {
     }
     Some(Aircraft {
         icao,
+        callsign: pad_callsign(entry.get("flight").and_then(Value::as_str).unwrap_or("")),
         latitude_e7: deg_e7(latitude),
         longitude_e7: deg_e7(longitude),
         altitude_ft: altitude(entry),

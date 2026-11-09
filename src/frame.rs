@@ -7,12 +7,14 @@ use crc::{CRC_16_IBM_3740, Crc};
 const CCITT_FALSE: Crc<u16> = Crc::<u16>::new(&CRC_16_IBM_3740);
 
 pub const TRACK_MAGIC: &[u8; 4] = b"TRCK";
-pub const FRAME_LEN: usize = 30;
+pub const FRAME_LEN: usize = 38;
+pub const CALLSIGN_LEN: usize = 8;
 pub const SPEED_UNKNOWN: u16 = 0xFFFF;
 pub const TRACK_UNKNOWN: u16 = 0xFFFF;
 pub const ALT_UNKNOWN: i32 = i32::MIN;
 /// ADS-B ICAO address is 24 bits. The wire field is three bytes.
 const ICAO24: u32 = 0x00ff_ffff;
+const BODY_LEN: usize = FRAME_LEN - 2;
 
 /// CRC-16/CCITT-FALSE. `crc16_ccitt_false(b"123456789") == 0x29B1`.
 pub fn crc16_ccitt_false(data: &[u8]) -> u16 {
@@ -58,12 +60,22 @@ impl EmergencyKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Aircraft {
     pub icao: u32,
+    pub callsign: [u8; CALLSIGN_LEN],
     pub latitude_e7: i32,
     pub longitude_e7: i32,
     pub altitude_ft: i32,
     pub ground_speed_kt: u16,
     pub track_deg: u16,
     pub emergency: Option<EmergencyKind>,
+}
+
+/// Eight-byte ADS-B ident. Missing or short text is space-padded. Longer text is cut.
+pub(crate) fn pad_callsign(text: &str) -> [u8; CALLSIGN_LEN] {
+    let mut callsign = [b' '; CALLSIGN_LEN];
+    let bytes = text.as_bytes();
+    let n = bytes.len().min(CALLSIGN_LEN);
+    callsign[..n].copy_from_slice(&bytes[..n]);
+    callsign
 }
 
 /// One accepted position. `unix_s` is the line's `now`, truncated to seconds.
@@ -79,7 +91,7 @@ pub fn deg_e7(degrees: f64) -> i32 {
     if degrees < 0.0 { -scaled } else { scaled }
 }
 
-/// Magic, unix seconds, one aircraft, then CRC-16/CCITT-FALSE over the first 28 bytes.
+/// Magic, unix seconds, one aircraft, then CRC-16/CCITT-FALSE over the body.
 pub fn pack_frame(fix: &Fix) -> [u8; FRAME_LEN] {
     let aircraft = &fix.aircraft;
     let mut raw = [0u8; FRAME_LEN];
@@ -87,14 +99,15 @@ pub fn pack_frame(fix: &Fix) -> [u8; FRAME_LEN] {
     raw[4..8].copy_from_slice(&fix.unix_s.to_le_bytes());
     let icao = (aircraft.icao & ICAO24).to_le_bytes();
     raw[8..11].copy_from_slice(&icao[..3]);
-    raw[11..15].copy_from_slice(&aircraft.latitude_e7.to_le_bytes());
-    raw[15..19].copy_from_slice(&aircraft.longitude_e7.to_le_bytes());
-    raw[19..23].copy_from_slice(&aircraft.altitude_ft.to_le_bytes());
-    raw[23..25].copy_from_slice(&aircraft.ground_speed_kt.to_le_bytes());
-    raw[25..27].copy_from_slice(&aircraft.track_deg.to_le_bytes());
-    raw[27] = aircraft.emergency.map(EmergencyKind::code).unwrap_or(0);
-    let crc = crc16_ccitt_false(&raw[..28]);
-    raw[28..30].copy_from_slice(&crc.to_le_bytes());
+    raw[11..19].copy_from_slice(&aircraft.callsign);
+    raw[19..23].copy_from_slice(&aircraft.latitude_e7.to_le_bytes());
+    raw[23..27].copy_from_slice(&aircraft.longitude_e7.to_le_bytes());
+    raw[27..31].copy_from_slice(&aircraft.altitude_ft.to_le_bytes());
+    raw[31..33].copy_from_slice(&aircraft.ground_speed_kt.to_le_bytes());
+    raw[33..35].copy_from_slice(&aircraft.track_deg.to_le_bytes());
+    raw[35] = aircraft.emergency.map(EmergencyKind::code).unwrap_or(0);
+    let crc = crc16_ccitt_false(&raw[..BODY_LEN]);
+    raw[BODY_LEN..FRAME_LEN].copy_from_slice(&crc.to_le_bytes());
     raw
 }
 
@@ -105,6 +118,7 @@ pub fn check_positions() -> [Fix; 3] {
             unix_s: UNIX_S,
             aircraft: Aircraft {
                 icao: 0x400ABC,
+                callsign: pad_callsign("SIM0001"),
                 latitude_e7: deg_e7(10.5),
                 longitude_e7: deg_e7(-20.25),
                 altitude_ft: 12_000,
@@ -117,6 +131,7 @@ pub fn check_positions() -> [Fix; 3] {
             unix_s: UNIX_S,
             aircraft: Aircraft {
                 icao: 0x40621D,
+                callsign: pad_callsign("BAW123"),
                 latitude_e7: deg_e7(52.2572021484375),
                 longitude_e7: deg_e7(3.91937255859375),
                 altitude_ft: 38_000,
@@ -129,6 +144,7 @@ pub fn check_positions() -> [Fix; 3] {
             unix_s: UNIX_S,
             aircraft: Aircraft {
                 icao: 0x4CA123,
+                callsign: pad_callsign("EZY456"),
                 latitude_e7: deg_e7(51.47),
                 longitude_e7: deg_e7(-0.45),
                 altitude_ft: 8_000,
@@ -144,8 +160,8 @@ pub fn unpack_frame(bytes: &[u8]) -> Option<Fix> {
     if bytes.len() != FRAME_LEN || &bytes[0..4] != TRACK_MAGIC {
         return None;
     }
-    let expect = crc16_ccitt_false(&bytes[..28]);
-    let got = u16::from_le_bytes([bytes[28], bytes[29]]);
+    let expect = crc16_ccitt_false(&bytes[..BODY_LEN]);
+    let got = u16::from_le_bytes(bytes[BODY_LEN..FRAME_LEN].try_into().ok()?);
     if expect != got {
         return None;
     }
@@ -156,12 +172,13 @@ pub fn unpack_frame(bytes: &[u8]) -> Option<Fix> {
         unix_s,
         aircraft: Aircraft {
             icao: u32::from_le_bytes(icao),
-            latitude_e7: i32::from_le_bytes(bytes[11..15].try_into().ok()?),
-            longitude_e7: i32::from_le_bytes(bytes[15..19].try_into().ok()?),
-            altitude_ft: i32::from_le_bytes(bytes[19..23].try_into().ok()?),
-            ground_speed_kt: u16::from_le_bytes(bytes[23..25].try_into().ok()?),
-            track_deg: u16::from_le_bytes(bytes[25..27].try_into().ok()?),
-            emergency: match bytes[27] {
+            callsign: bytes[11..19].try_into().ok()?,
+            latitude_e7: i32::from_le_bytes(bytes[19..23].try_into().ok()?),
+            longitude_e7: i32::from_le_bytes(bytes[23..27].try_into().ok()?),
+            altitude_ft: i32::from_le_bytes(bytes[27..31].try_into().ok()?),
+            ground_speed_kt: u16::from_le_bytes(bytes[31..33].try_into().ok()?),
+            track_deg: u16::from_le_bytes(bytes[33..35].try_into().ok()?),
+            emergency: match bytes[35] {
                 0 => None,
                 code => Some(EmergencyKind::from_code(code)?),
             },
