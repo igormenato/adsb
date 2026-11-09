@@ -48,8 +48,8 @@ const UNKNOWN: [u8; FRAME_LEN] = [
 
 const SATURATED: [u8; FRAME_LEN] = [
     0x54, 0x52, 0x43, 0x4b, 0x0a, 0x00, 0x00, 0x00, 0x24, 0xc1, 0xab, 0x20, 0x20, 0x20, 0x20, 0x20,
-    0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x00, 0x80, 0x96, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe,
-    0xff, 0x00, 0x00, 0x00, 0xd1, 0xc0,
+    0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x00, 0x80, 0x96, 0x98, 0x00, 0x00, 0x00, 0x00, 0x80, 0xfe,
+    0xff, 0x00, 0x00, 0x00, 0xf1, 0x14,
 ];
 
 #[test]
@@ -126,10 +126,16 @@ fn line_sentinels_and_track_wrap() {
         br#"{"now":10,"hex":"abc124","lat":0,"lon":1,"alt_baro":"ground","gs":65534.6,"track":360}"#,
     )
     .expect("saturated");
-    assert_eq!(saturated.aircraft.altitude_ft, 0);
+    assert_eq!(saturated.aircraft.altitude_ft, ALT_UNKNOWN);
     assert_eq!(saturated.aircraft.ground_speed_kt, 65534);
     assert_eq!(saturated.aircraft.track_deg, 0);
     assert_eq!(pack_frame(&saturated), SATURATED);
+
+    let on_ground = fix_from_json_line(
+        br#"{"now":10,"hex":"000001","lat":1,"lon":2,"alt_baro":"ground","alt_geom":3280.4}"#,
+    )
+    .expect("ground uses geom");
+    assert_eq!(on_ground.aircraft.altitude_ft, 3280);
 
     let geometric =
         fix_from_json_line(br#"{"now":10,"hex":"000001","lat":1,"lon":2,"alt_geom":3280.4}"#)
