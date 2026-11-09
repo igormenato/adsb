@@ -8,42 +8,52 @@ use std::time::{Duration, Instant};
 use serialport::{SerialPort, TTYPort};
 
 use trck::{
-    ALT_UNKNOWN, FRAME_LEN, SPEED_UNKNOWN, TRACK_UNKNOWN, check_positions, crc16_ccitt_false,
-    fix_from_json_line, pack_frame, unpack_frame,
+    FRAME_LEN, Icao, check_positions, crc16_ccitt_false, fix_from_json_line, pack_frame,
+    unpack_frame,
 };
 
-const PUBLISHED_LINE: &str = r#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4}"#;
+fn icao(n: u32) -> Icao {
+    Icao::from_u24(n).expect("24-bit")
+}
 
-const SECOND_LINE: &str = r#"{"now":1700000000.9,"hex":"400abc","lat":10.5,"lon":-20.25,"alt_baro":12000,"gs":280,"track":90}"#;
+const PUBLISHED_LINE: &str = r#"{"now":1700000000.9,"hex":"40621d","flight":"BAW123","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4}"#;
+
+const SECOND_LINE: &str = r#"{"now":1700000000.9,"hex":"400abc","flight":"SIM0001","lat":10.5,"lon":-20.25,"alt_baro":12000,"gs":280,"track":90}"#;
 
 const PUBLISHED: [u8; FRAME_LEN] = [
-    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x1d, 0x62, 0x40, 0xf5, 0xd0, 0x25, 0x1f, 0x7e,
-    0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00, 0xc2, 0x01, 0x0f, 0x01, 0x00, 0x73, 0x81,
+    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x1d, 0x62, 0x40, 0x42, 0x41, 0x57, 0x31, 0x32,
+    0x33, 0x20, 0x20, 0xf5, 0xd0, 0x25, 0x1f, 0x7e, 0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00, 0xc2,
+    0x01, 0x0f, 0x01, 0x00, 0x06, 0xbe,
 ];
 
 const EMERGENCY: [u8; FRAME_LEN] = [
-    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x1d, 0x62, 0x40, 0xf5, 0xd0, 0x25, 0x1f, 0x7e,
-    0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00, 0xc2, 0x01, 0x0f, 0x01, 0x01, 0x52, 0x91,
+    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x1d, 0x62, 0x40, 0x42, 0x41, 0x57, 0x31, 0x32,
+    0x33, 0x20, 0x20, 0xf5, 0xd0, 0x25, 0x1f, 0x7e, 0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00, 0xc2,
+    0x01, 0x0f, 0x01, 0x01, 0x27, 0xae,
 ];
 
 const SECOND: [u8; FRAME_LEN] = [
-    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0xbc, 0x0a, 0x40, 0x40, 0x2c, 0x42, 0x06, 0x60,
-    0x18, 0xee, 0xf3, 0xe0, 0x2e, 0x00, 0x00, 0x18, 0x01, 0x5a, 0x00, 0x00, 0xd7, 0x48,
+    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0xbc, 0x0a, 0x40, 0x53, 0x49, 0x4d, 0x30, 0x30,
+    0x30, 0x31, 0x20, 0x40, 0x2c, 0x42, 0x06, 0x60, 0x18, 0xee, 0xf3, 0xe0, 0x2e, 0x00, 0x00, 0x18,
+    0x01, 0x5a, 0x00, 0x00, 0x58, 0x1d,
 ];
 
 const CHECK_EMERGENCY: [u8; FRAME_LEN] = [
-    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x23, 0xa1, 0x4c, 0xe0, 0xb2, 0xad, 0x1e, 0xe0,
-    0x55, 0xbb, 0xff, 0x40, 0x1f, 0x00, 0x00, 0xdc, 0x00, 0xb4, 0x00, 0x01, 0x7f, 0xb6,
+    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x23, 0xa1, 0x4c, 0x45, 0x5a, 0x59, 0x34, 0x35,
+    0x36, 0x20, 0x20, 0xe0, 0xb2, 0xad, 0x1e, 0xe0, 0x55, 0xbb, 0xff, 0x40, 0x1f, 0x00, 0x00, 0xdc,
+    0x00, 0xb4, 0x00, 0x01, 0xcc, 0xc9,
 ];
 
 const UNKNOWN: [u8; FRAME_LEN] = [
-    0x54, 0x52, 0x43, 0x4b, 0x0a, 0x00, 0x00, 0x00, 0x23, 0xc1, 0xab, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0xff, 0x00, 0x2a, 0x6a,
+    0x54, 0x52, 0x43, 0x4b, 0x0a, 0x00, 0x00, 0x00, 0x23, 0xc1, 0xab, 0x20, 0x20, 0x20, 0x20, 0x20,
+    0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff,
+    0xff, 0xff, 0xff, 0x00, 0xa6, 0xd0,
 ];
 
 const SATURATED: [u8; FRAME_LEN] = [
-    0x54, 0x52, 0x43, 0x4b, 0x0a, 0x00, 0x00, 0x00, 0x24, 0xc1, 0xab, 0x00, 0x00, 0x00, 0x00, 0x80,
-    0x96, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe, 0xff, 0x00, 0x00, 0x00, 0xa8, 0x0d,
+    0x54, 0x52, 0x43, 0x4b, 0x0a, 0x00, 0x00, 0x00, 0x24, 0xc1, 0xab, 0x20, 0x20, 0x20, 0x20, 0x20,
+    0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x00, 0x80, 0x96, 0x98, 0x00, 0x00, 0x00, 0x00, 0x80, 0xfe,
+    0xff, 0x00, 0x00, 0x00, 0xf1, 0x14,
 ];
 
 #[test]
@@ -68,7 +78,7 @@ fn pack_and_unpack_are_inverses() {
     }
     assert!(unpack_frame(&PUBLISHED[..FRAME_LEN - 1]).is_none());
     let mut bad_crc = PUBLISHED;
-    bad_crc[28] ^= 0xFF;
+    bad_crc[36] ^= 0xFF;
     assert!(unpack_frame(&bad_crc).is_none());
     let mut bad_magic = PUBLISHED;
     bad_magic[0] = b'X';
@@ -88,7 +98,7 @@ fn a_line_uses_now_and_ignores_seen_pos() {
     )
     .expect("old position still a line");
     assert_eq!(old.unix_s, 1_700_000_000);
-    assert_eq!(old.aircraft.icao, 0x40621D);
+    assert_eq!(old.aircraft.icao, icao(0x40621D));
 
     assert!(fix_from_json_line(br#"{"hex":"40621d","lat":1,"lon":2}"#).is_none());
     assert!(fix_from_json_line(br#"{"now":-1,"hex":"40621d","lat":1,"lon":2}"#).is_none());
@@ -111,34 +121,66 @@ fn line_sentinels_and_track_wrap() {
     let unknown =
         fix_from_json_line(br#"{"now":10,"hex":"abc123","lat":0,"lon":0,"gs":-1,"track":-5}"#)
             .expect("unknown");
-    assert_eq!(unknown.aircraft.altitude_ft, ALT_UNKNOWN);
-    assert_eq!(unknown.aircraft.ground_speed_kt, SPEED_UNKNOWN);
-    assert_eq!(unknown.aircraft.track_deg, TRACK_UNKNOWN);
+    assert_eq!(unknown.aircraft.altitude_ft, None);
+    assert_eq!(unknown.aircraft.ground_speed_kt, None);
+    assert_eq!(unknown.aircraft.track_deg, None);
     assert_eq!(pack_frame(&unknown), UNKNOWN);
 
     let saturated = fix_from_json_line(
         br#"{"now":10,"hex":"abc124","lat":0,"lon":1,"alt_baro":"ground","gs":65534.6,"track":360}"#,
     )
     .expect("saturated");
-    assert_eq!(saturated.aircraft.altitude_ft, 0);
-    assert_eq!(saturated.aircraft.ground_speed_kt, 65534);
-    assert_eq!(saturated.aircraft.track_deg, 0);
+    assert_eq!(saturated.aircraft.altitude_ft, None);
+    assert_eq!(saturated.aircraft.ground_speed_kt, Some(65534));
+    assert_eq!(saturated.aircraft.track_deg, Some(0));
     assert_eq!(pack_frame(&saturated), SATURATED);
+
+    let on_ground = fix_from_json_line(
+        br#"{"now":10,"hex":"000001","lat":1,"lon":2,"alt_baro":"ground","alt_geom":3280.4}"#,
+    )
+    .expect("ground uses geom");
+    assert_eq!(on_ground.aircraft.altitude_ft, Some(3280));
 
     let geometric =
         fix_from_json_line(br#"{"now":10,"hex":"000001","lat":1,"lon":2,"alt_geom":3280.4}"#)
             .expect("geom");
-    assert_eq!(geometric.aircraft.altitude_ft, 3280);
-    assert_eq!(geometric.aircraft.ground_speed_kt, SPEED_UNKNOWN);
-    assert_eq!(geometric.aircraft.track_deg, TRACK_UNKNOWN);
+    assert_eq!(geometric.aircraft.altitude_ft, Some(3280));
+    assert_eq!(geometric.aircraft.ground_speed_kt, None);
+    assert_eq!(geometric.aircraft.track_deg, None);
     let frame = pack_frame(&geometric);
-    assert_eq!(i32::from_le_bytes(frame[19..23].try_into().unwrap()), 3280);
+    assert_eq!(i32::from_le_bytes(frame[27..31].try_into().unwrap()), 3280);
+}
+
+fn callsign_on_wire(line: &[u8]) -> [u8; 8] {
+    let frame = pack_frame(&fix_from_json_line(line).expect("line"));
+    frame[11..19].try_into().expect("callsign")
+}
+
+#[test]
+fn callsign_is_eight_space_padded_bytes() {
+    assert_eq!(
+        callsign_on_wire(br#"{"now":10,"hex":"abc123","lat":0,"lon":0}"#),
+        *b"        "
+    );
+    assert_eq!(
+        callsign_on_wire(br#"{"now":10,"hex":"abc123","flight":"BAW123","lat":0,"lon":0}"#),
+        *b"BAW123  "
+    );
+    assert_eq!(
+        callsign_on_wire(br#"{"now":10,"hex":"abc123","flight":"ABCDEFGH","lat":0,"lon":0}"#),
+        *b"ABCDEFGH"
+    );
+    assert_eq!(
+        callsign_on_wire(br#"{"now":10,"hex":"abc123","flight":"ABCDEFGHIJ","lat":0,"lon":0}"#),
+        *b"ABCDEFGH"
+    );
 }
 
 #[test]
 fn drops_a_bad_hex() {
     let tilde = fix_from_json_line(br#"{"now":1,"hex":"~40621d","lat":1,"lon":2}"#).expect("tilde");
-    assert_eq!(tilde.aircraft.icao, 0x40621D);
+    assert_eq!(tilde.aircraft.icao, icao(0x40621D));
+    assert!(Icao::from_u24(0x0100_0000).is_none());
     assert!(fix_from_json_line(br#"{"now":1,"hex":"40G621","lat":1,"lon":2}"#).is_none());
     assert!(fix_from_json_line(br#"{"now":1,"hex":"abcdefg","lat":1,"lon":2}"#).is_none());
     assert!(fix_from_json_line(br#"{"now":1,"hex":" abc","lat":1,"lon":2}"#).is_none());
@@ -186,17 +228,17 @@ fn emergency_names_and_squawks_on_a_line() {
         );
         let fix = fix_from_json_line(line.as_bytes()).expect(extra);
         let frame = pack_frame(&fix);
-        assert_eq!(frame[27], code, "{extra}");
+        assert_eq!(frame[35], code, "{extra}");
     }
 
     let named = fix_from_json_line(
-        br#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"emergency":"general"}"#,
+        br#"{"now":1700000000.9,"hex":"40621d","flight":"BAW123","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"emergency":"general"}"#,
     )
     .expect("named");
     assert_eq!(pack_frame(&named), EMERGENCY);
 
     let squawk = fix_from_json_line(
-        br#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"squawk":"7700"}"#,
+        br#"{"now":1700000000.9,"hex":"40621d","flight":"BAW123","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"squawk":"7700"}"#,
     )
     .expect("squawk");
     assert_eq!(pack_frame(&squawk), EMERGENCY);
@@ -395,11 +437,11 @@ fn a_split_line_is_one_frame() {
 #[test]
 fn emergency_and_squawk_are_on_the_wire() {
     let (listener, port) = listen();
-    let unlawful = r#"{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"emergency":"unlawful","squawk":"7700"}"#;
+    let unlawful = r#"{"now":1700000000.9,"hex":"40621d","flight":"BAW123","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"emergency":"unlawful","squawk":"7700"}"#;
     serve(listener, move |sock| {
         writeln!(
             sock,
-            r#"{{"now":1700000000.9,"hex":"40621d","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"squawk":"7700"}}"#
+            r#"{{"now":1700000000.9,"hex":"40621d","flight":"BAW123","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4,"squawk":"7700"}}"#
         )
         .expect("squawk");
         writeln!(sock, "{unlawful}").expect("name");
@@ -648,6 +690,38 @@ fn a_full_tty_drops_ordinary_json_and_keeps_7700() {
     });
     let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
     assert!(!icaos.contains(&1), "{icaos:?}");
+    assert_eq!(frames.last().copied(), Some(kept));
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn a_full_tty_of_emergencies_drops_ordinary_json() {
+    let (listener, port) = listen();
+    let mut pty = Pty::open();
+    let mut sender = spawn_uart(port, &pty.path());
+    let (mut sock, _) = listener.accept().expect("accept");
+    fill_until_blocked(pty.slave.as_raw_fd());
+    sock.set_nodelay(true).expect("nodelay");
+    let mut body = String::new();
+    for icao in 1..=QUEUE as u32 {
+        body.push_str(&format!(
+            r#"{{"now":1700000000,"hex":"{icao:06x}","lat":1,"lon":2,"squawk":"7700"}}"#
+        ));
+        body.push('\n');
+    }
+    let ordinary = r#"{"now":1700000000,"hex":"00aaaa","lat":1,"lon":2}"#;
+    let later = r#"{"now":1700000000,"hex":"00e001","lat":1,"lon":2,"squawk":"7700"}"#;
+    body.push_str(ordinary);
+    body.push('\n');
+    body.push_str(later);
+    body.push('\n');
+    sock.write_all(body.as_bytes()).expect("lines");
+    let kept = pack_frame(&fix_from_json_line(later.as_bytes()).expect("later"));
+    let frames = wait_frames_until(&mut pty.master, Duration::from_secs(5), |frames| {
+        frames.last() == Some(&kept)
+    });
+    let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
+    assert!(!icaos.contains(&0x00aaaa), "{icaos:?}");
     assert_eq!(frames.last().copied(), Some(kept));
     assert!(sender.0.try_wait().unwrap().is_none());
 }
