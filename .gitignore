@@ -1,1 +1,3 @@
 /target
+verify/uart-queue/.tools/
+verify/uart-queue/states/
