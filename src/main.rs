@@ -1,6 +1,5 @@
 //! Read readsb `--net-json-port` and write one UART frame per position.
 
-use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
@@ -13,7 +12,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{EmergencyKind, Fix, check_positions, fix_from_json_line, pack_frame};
+use trck::{EmergencyKind, Fix, Lines, Queue, check_positions, fix_from_json_line};
 
 mod sys;
 
@@ -76,13 +75,12 @@ enum Sink {
 struct Writer {
     sink: Sink,
     stop: Arc<AtomicBool>,
-    queue: VecDeque<Fix>,
-    current: Option<([u8; trck::FRAME_LEN], usize)>,
+    queue: Queue,
 }
 
 impl Writer {
     fn has_pending(&self) -> bool {
-        self.current.is_some() || !self.queue.is_empty()
+        self.queue.has_pending()
     }
 
     fn uart_fd(&self) -> Option<i32> {
@@ -93,66 +91,32 @@ impl Writer {
     }
 
     fn enqueue(&mut self, fix: Fix) {
-        if self.queue.len() < QUEUE_CAP {
-            self.queue.push_back(fix);
-            return;
-        }
-        if let Some(index) = self
-            .queue
-            .iter()
-            .position(|queued| queued.aircraft.emergency.is_none())
-        {
-            let dropped = self.queue.remove(index).expect("ordinary position");
+        if let Some(dropped) = self.queue.push(fix) {
             log_drop(&dropped);
-            self.queue.push_back(fix);
-            return;
         }
-        if fix.aircraft.emergency.is_none() {
-            log_drop(&fix);
-            return;
-        }
-        let dropped = self.queue.pop_front().expect("full queue");
-        log_drop(&dropped);
-        self.queue.push_back(fix);
     }
 
-    /// Write until the port would block or the queue is empty. A short write stays in `current`.
     fn write_some(&mut self) -> Result<(), ChunkError> {
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 return Err(ChunkError::Stopped);
             }
-            if self.current.is_none() {
-                let Some(fix) = self.queue.pop_front() else {
-                    return Ok(());
-                };
-                self.current = Some((pack_frame(&fix), 0));
+            if !self.queue.begin() {
+                return Ok(());
             }
-            let (frame, sent) = self.current.expect("current frame");
-            let rest = &frame[sent..];
-            if rest.is_empty() {
-                self.current = None;
-                continue;
-            }
-            match write_sink(&mut self.sink, rest) {
+            let wrote = match write_sink(&mut self.sink, self.queue.unsent()) {
                 Ok(0) => {
                     return Err(ChunkError::Failed(io::Error::new(
                         io::ErrorKind::WriteZero,
                         "uart write wrote nothing",
                     )));
                 }
-                Ok(n) => {
-                    let sent = sent + n;
-                    if sent >= frame.len() {
-                        self.current = None;
-                    } else {
-                        self.current = Some((frame, sent));
-                    }
-                }
+                Ok(n) => n,
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => return Err(ChunkError::Failed(err)),
-            }
+            };
+            self.queue.advance(wrote);
         }
     }
 }
@@ -177,15 +141,9 @@ fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
     }
 }
 
-enum Pending {
-    Collecting,
-    DiscardUntilNewline,
-}
-
 struct JsonLines {
     reader: TcpStream,
-    pending: Vec<u8>,
-    state: Pending,
+    buf: Lines,
 }
 
 enum Pull {
@@ -200,36 +158,11 @@ impl JsonLines {
         loop {
             match self.reader.read(&mut tmp) {
                 Ok(0) => return Ok(Pull::Eof),
-                Ok(n) => self.pending.extend_from_slice(&tmp[..n]),
+                Ok(n) => self.buf.append(&tmp[..n]),
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(Pull::Bytes),
                 Err(err) => return Err(err),
             }
-        }
-    }
-
-    fn pop_line(&mut self) -> Option<Vec<u8>> {
-        loop {
-            let split = self.pending.iter().position(|byte| *byte == b'\n')?;
-            let mut line: Vec<u8> = self.pending.drain(..=split).collect();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            match self.state {
-                Pending::DiscardUntilNewline => {
-                    self.state = Pending::Collecting;
-                    continue;
-                }
-                Pending::Collecting => return Some(line),
-            }
-        }
-    }
-
-    fn note_overflow(&mut self) {
-        if self.pending.len() > MAX_LINE && !self.pending.contains(&b'\n') {
-            self.pending.clear();
-            self.state = Pending::DiscardUntilNewline;
         }
     }
 }
@@ -254,8 +187,7 @@ fn open_uart(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, Exi
     Ok(Writer {
         sink: Sink::Uart(port),
         stop,
-        queue: VecDeque::with_capacity(QUEUE_CAP),
-        current: None,
+        queue: Queue::new(QUEUE_CAP),
     })
 }
 
@@ -264,8 +196,7 @@ fn open_output(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, E
         return Ok(Writer {
             sink: Sink::Stdout,
             stop,
-            queue: VecDeque::with_capacity(QUEUE_CAP),
-            current: None,
+            queue: Queue::new(QUEUE_CAP),
         });
     }
     open_uart(path, baud, stop)
@@ -491,8 +422,7 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
     }
     let mut lines = JsonLines {
         reader: stream,
-        pending: Vec::with_capacity(MAX_LINE),
-        state: Pending::Collecting,
+        buf: Lines::new(MAX_LINE),
     };
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -555,14 +485,13 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
 }
 
 fn enqueue_ready(lines: &mut JsonLines, writer: &mut Writer) {
-    while let Some(line) = lines.pop_line() {
-        let Some(fix) = fix_from_json_line(&line) else {
-            continue;
+    lines.buf.drain(|line| {
+        let Some(fix) = fix_from_json_line(line) else {
+            return;
         };
         writer.enqueue(fix);
         eprintln!("fix t={} icao={:06x}", fix.unix_s, fix.aircraft.icao);
-    }
-    lines.note_overflow();
+    });
 }
 
 fn end_socket(writer: &mut Writer) -> Pump {
