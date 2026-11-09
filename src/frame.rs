@@ -69,7 +69,6 @@ pub struct Aircraft {
     pub emergency: Option<EmergencyKind>,
 }
 
-/// Eight-byte ADS-B ident. Missing or short text is space-padded. Longer text is cut.
 pub(crate) fn pad_callsign(text: &str) -> [u8; CALLSIGN_LEN] {
     let mut callsign = [b' '; CALLSIGN_LEN];
     let bytes = text.as_bytes();
@@ -91,7 +90,6 @@ pub fn deg_e7(degrees: f64) -> i32 {
     if degrees < 0.0 { -scaled } else { scaled }
 }
 
-/// Magic, unix seconds, one aircraft, then CRC-16/CCITT-FALSE over the body.
 pub fn pack_frame(fix: &Fix) -> [u8; FRAME_LEN] {
     let aircraft = &fix.aircraft;
     let mut raw = [0u8; FRAME_LEN];
