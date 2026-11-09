@@ -125,7 +125,7 @@ pub struct Aircraft {
     pub longitude_e7: i32,
     pub altitude_ft: Option<i32>,
     pub ground_speed_kt: Option<u16>,
-    pub track_e1: Option<u16>,
+    pub track_deg: Option<u16>,
     pub emergency: Option<EmergencyKind>,
 }
 
@@ -158,7 +158,7 @@ pub fn pack_frame(fix: &Fix) -> [u8; FRAME_LEN] {
             .unwrap_or(SPEED_UNKNOWN)
             .to_le_bytes(),
     );
-    raw[33..35].copy_from_slice(&aircraft.track_e1.unwrap_or(TRACK_UNKNOWN).to_le_bytes());
+    raw[33..35].copy_from_slice(&aircraft.track_deg.unwrap_or(TRACK_UNKNOWN).to_le_bytes());
     raw[35] = aircraft.emergency.map(EmergencyKind::code).unwrap_or(0);
     let crc = crc16_ccitt_false(&raw[..BODY_LEN]);
     raw[BODY_LEN..FRAME_LEN].copy_from_slice(&crc.to_le_bytes());
@@ -177,7 +177,7 @@ pub fn check_positions() -> [Fix; 3] {
                 longitude_e7: deg_e7(-20.25),
                 altitude_ft: Some(12_000),
                 ground_speed_kt: Some(280),
-                track_e1: Some(900),
+                track_deg: Some(90),
                 emergency: None,
             },
         },
@@ -190,7 +190,7 @@ pub fn check_positions() -> [Fix; 3] {
                 longitude_e7: deg_e7(3.91937255859375),
                 altitude_ft: Some(38_000),
                 ground_speed_kt: Some(450),
-                track_e1: Some(2714),
+                track_deg: Some(271),
                 emergency: None,
             },
         },
@@ -203,7 +203,7 @@ pub fn check_positions() -> [Fix; 3] {
                 longitude_e7: deg_e7(-0.45),
                 altitude_ft: Some(8_000),
                 ground_speed_kt: Some(220),
-                track_e1: Some(1800),
+                track_deg: Some(180),
                 emergency: Some(EmergencyKind::General),
             },
         },
@@ -222,7 +222,7 @@ pub fn unpack_frame(bytes: &[u8]) -> Option<Fix> {
     let unix_s = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
     let altitude_ft = i32::from_le_bytes(bytes[27..31].try_into().ok()?);
     let ground_speed_kt = u16::from_le_bytes(bytes[31..33].try_into().ok()?);
-    let track_e1 = u16::from_le_bytes(bytes[33..35].try_into().ok()?);
+    let track_deg = u16::from_le_bytes(bytes[33..35].try_into().ok()?);
     Some(Fix {
         unix_s,
         aircraft: Aircraft {
@@ -232,7 +232,7 @@ pub fn unpack_frame(bytes: &[u8]) -> Option<Fix> {
             longitude_e7: i32::from_le_bytes(bytes[23..27].try_into().ok()?),
             altitude_ft: (altitude_ft != ALT_UNKNOWN).then_some(altitude_ft),
             ground_speed_kt: (ground_speed_kt != SPEED_UNKNOWN).then_some(ground_speed_kt),
-            track_e1: (track_e1 != TRACK_UNKNOWN).then_some(track_e1),
+            track_deg: (track_deg != TRACK_UNKNOWN).then_some(track_deg),
             emergency: match bytes[35] {
                 0 => None,
                 code => Some(EmergencyKind::from_code(code)?),

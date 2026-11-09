@@ -40,7 +40,7 @@ fn aircraft_from_position(entry: &Value) -> Option<Aircraft> {
         longitude_e7: deg_e7(longitude),
         altitude_ft: altitude(entry),
         ground_speed_kt: ground_speed(entry),
-        track_e1: track(entry),
+        track_deg: track(entry),
         emergency: emergency_kind(entry),
     })
 }
@@ -154,14 +154,14 @@ fn ground_speed(entry: &Value) -> Option<u16> {
 
 fn track(entry: &Value) -> Option<u16> {
     let degrees = entry.get("track").and_then(finite_number)?;
-    let tenths = (degrees * 10.0).round();
-    if !(0.0..=3600.0).contains(&tenths) {
+    let rounded = degrees.round();
+    if !(0.0..=360.0).contains(&rounded) {
         return None;
     }
-    let tenths = tenths as u16;
-    if tenths == 3600 {
+    let degrees = rounded as u16;
+    if degrees == 360 {
         Some(0)
     } else {
-        Some(tenths)
+        Some(degrees)
     }
 }
