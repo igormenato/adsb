@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use serialport::{SerialPort, TTYPort};
 
 use trck::{
-    Callsign, FRAME_LEN, Icao, check_positions, crc16_ccitt_false, fix_from_json_line, pack_frame,
+    FRAME_LEN, Icao, check_positions, crc16_ccitt_false, fix_from_json_line, pack_frame,
     unpack_frame,
 };
 
@@ -151,26 +151,29 @@ fn line_sentinels_and_track_wrap() {
     assert_eq!(i32::from_le_bytes(frame[27..31].try_into().unwrap()), 3280);
 }
 
+fn callsign_on_wire(line: &[u8]) -> [u8; 8] {
+    let frame = pack_frame(&fix_from_json_line(line).expect("line"));
+    frame[11..19].try_into().expect("callsign")
+}
+
 #[test]
 fn callsign_is_eight_space_padded_bytes() {
-    let missing =
-        fix_from_json_line(br#"{"now":10,"hex":"abc123","lat":0,"lon":0}"#).expect("missing");
-    assert_eq!(missing.aircraft.callsign, Callsign::pad(""));
-
-    let short =
-        fix_from_json_line(br#"{"now":10,"hex":"abc123","flight":"BAW123","lat":0,"lon":0}"#)
-            .expect("short");
-    assert_eq!(short.aircraft.callsign, Callsign::pad("BAW123"));
-
-    let exact =
-        fix_from_json_line(br#"{"now":10,"hex":"abc123","flight":"ABCDEFGH","lat":0,"lon":0}"#)
-            .expect("exact");
-    assert_eq!(exact.aircraft.callsign, Callsign::pad("ABCDEFGH"));
-
-    let long =
-        fix_from_json_line(br#"{"now":10,"hex":"abc123","flight":"ABCDEFGHIJ","lat":0,"lon":0}"#)
-            .expect("long");
-    assert_eq!(long.aircraft.callsign, Callsign::pad("ABCDEFGHIJ"));
+    assert_eq!(
+        callsign_on_wire(br#"{"now":10,"hex":"abc123","lat":0,"lon":0}"#),
+        *b"        "
+    );
+    assert_eq!(
+        callsign_on_wire(br#"{"now":10,"hex":"abc123","flight":"BAW123","lat":0,"lon":0}"#),
+        *b"BAW123  "
+    );
+    assert_eq!(
+        callsign_on_wire(br#"{"now":10,"hex":"abc123","flight":"ABCDEFGH","lat":0,"lon":0}"#),
+        *b"ABCDEFGH"
+    );
+    assert_eq!(
+        callsign_on_wire(br#"{"now":10,"hex":"abc123","flight":"ABCDEFGHIJ","lat":0,"lon":0}"#),
+        *b"ABCDEFGH"
+    );
 }
 
 #[test]
@@ -687,6 +690,38 @@ fn a_full_tty_drops_ordinary_json_and_keeps_7700() {
     });
     let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
     assert!(!icaos.contains(&1), "{icaos:?}");
+    assert_eq!(frames.last().copied(), Some(kept));
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn a_full_tty_of_emergencies_drops_ordinary_json() {
+    let (listener, port) = listen();
+    let mut pty = Pty::open();
+    let mut sender = spawn_uart(port, &pty.path());
+    let (mut sock, _) = listener.accept().expect("accept");
+    fill_until_blocked(pty.slave.as_raw_fd());
+    sock.set_nodelay(true).expect("nodelay");
+    let mut body = String::new();
+    for icao in 1..=QUEUE as u32 {
+        body.push_str(&format!(
+            r#"{{"now":1700000000,"hex":"{icao:06x}","lat":1,"lon":2,"squawk":"7700"}}"#
+        ));
+        body.push('\n');
+    }
+    let ordinary = r#"{"now":1700000000,"hex":"00aaaa","lat":1,"lon":2}"#;
+    let later = r#"{"now":1700000000,"hex":"00e001","lat":1,"lon":2,"squawk":"7700"}"#;
+    body.push_str(ordinary);
+    body.push('\n');
+    body.push_str(later);
+    body.push('\n');
+    sock.write_all(body.as_bytes()).expect("lines");
+    let kept = pack_frame(&fix_from_json_line(later.as_bytes()).expect("later"));
+    let frames = wait_frames_until(&mut pty.master, Duration::from_secs(5), |frames| {
+        frames.last() == Some(&kept)
+    });
+    let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
+    assert!(!icaos.contains(&0x00aaaa), "{icaos:?}");
     assert_eq!(frames.last().copied(), Some(kept));
     assert!(sender.0.try_wait().unwrap().is_none());
 }
