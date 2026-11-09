@@ -128,6 +128,6 @@ JSON lines, `pack_frame`, CRC, `sys.rs`, Ctrl-C, dial, keepalive. `end_socket` /
 
 ## Sync commit
 
-`4ff99139928365e5f32b4c93c5cd6734637d38c3`
+`298f0eb292da20f8355c49aacc1978e19340c61b`
 
-Confirmed `check.sh` exit 0 and LET `q` matches `Writer::enqueue` at that commit.
+Confirmed `check.sh` exit 0, Kani cap-2 proof exit 0, and LET `q` matches `enqueue_fix` at that commit.
