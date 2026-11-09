@@ -1,17 +1,17 @@
 # ESP32 satellite telemetry
 
-The Raspberry Pi writes one 38-byte UART frame for each position readsb accepts on `--net-json-port`. The frame is one aircraft. It is not a list. An emergency is one byte in that frame. The ESP32 reads the frame and copies the aircraft fields into the satellite telemetry that goes to the ground. It does not cast the frame to a struct. It does not forward the raw frame as the radio payload. It does not decode 1090 MHz ADS-B.
+The Raspberry Pi writes one 38-byte UART frame for each position readsb accepts on `--net-json-port`. One aircraft per frame. Emergency is one byte. The ESP32 copies those fields into the satellite telemetry. It does not overlay a struct on the UART bytes, forward the raw frame as the radio payload, or decode 1090 MHz ADS-B.
 
-`trck --check` writes those same frames on the UART. The ESP32 can check reception against that. Those frames are the live layout.
+`trck --check` writes the same frames as the live sender.
 
 ## What you do
 
 1. Read the UART at 115200 baud, 8 data bits, no parity, 1 stop bit.
-2. Find `TRCK` (`54 52 43 4B`). The frame is the next 38 bytes, including those four.
+2. Find `TRCK` (`54 52 43 4B`). The frame is 38 bytes including those four.
 3. Check CRC-16/CCITT-FALSE (poly `0x1021`, init `0xFFFF`, not reflected, xorout `0`) over the first 36 bytes. The last two bytes are that CRC, little-endian.
-4. If the CRC matches, copy the fields below into the telemetry. If it does not match, drop the frame. The next `TRCK` is the next frame.
+4. Copy the fields below when the CRC matches. Drop a mismatch. The next `TRCK` is the next frame.
 
-No bytes means the Pi sent nothing. There is no count of 0 and no heartbeat. Do not treat a quiet UART as an empty list.
+No bytes means the Pi sent nothing. There is no count of 0 and no heartbeat. A quiet UART is not an empty sky.
 
 ## Frame
 
@@ -31,9 +31,9 @@ No bytes means the Pi sent nothing. There is no count of 0 and no heartbeat. Do 
 | 35 | u8 | emergency |
 | 36 | u16 | CRC over bytes 0..35 |
 
-Callsign is the readsb `flight` field, the simulated registration on the CubeDesign 2026 submit table. Eight bytes. Shorter text is padded with spaces on the right. Longer text is cut to eight. Missing `flight` is eight spaces. The position is still sent.
+Callsign is readsb `flight`. Shorter text is padded with spaces on the right. Longer text is cut to eight. Missing `flight` is eight spaces. The position is still sent.
 
-Unknown altitude is the minimum signed 32-bit integer. readsb `alt_baro` of `ground` is not 0. The frame uses `alt_geom` when that is present, otherwise unknown. Unknown ground speed is 65535. Unknown track is 65535. Track `271.4` is `271`. `360` wraps to `0`.
+Unknown altitude is the minimum signed 32-bit integer. readsb `alt_baro` of `ground` is not 0. The frame uses `alt_geom` when that is present, otherwise unknown. Unknown ground speed is 65535. Unknown track is 65535. Track is whole degrees: `271.4` is `271`. `360` wraps to `0`.
 
 | Code | Name |
 | --- | --- |
@@ -46,7 +46,7 @@ Unknown altitude is the minimum signed 32-bit integer. readsb `alt_baro` of `gro
 | 6 | downed |
 | 7 | reserved |
 
-Squawk 7700, 7600, and 7500 become `general`, `nordo`, and `unlawful` when readsb leaves `emergency` unset, empty, or `none`, and when the name is any word that is not one of the eight (`none`, `general`, `lifeguard`, `minfuel`, `nordo`, `unlawful`, `downed`, `reserved`). A known readsb emergency name is the byte that is sent. `reserved` with squawk 7700, 7600, or 7500 is that squawk's code. `reserved` with no emergency squawk is 7.
+A known readsb emergency name is the byte that is sent. Squawk 7700, 7600, and 7500 become `general`, `nordo`, and `unlawful` when the name is missing, empty, `none`, or any word outside the eight in the table. `reserved` with one of those squawks uses the squawk. `reserved` with no emergency squawk is 7.
 
 One position, callsign `BAW123`, no emergency, Unix time `1700000000`:
 
@@ -62,10 +62,8 @@ The same position with emergency `general`:
 
 ## Radio payload
 
-One plane on the radio is 32 bytes. Copy bytes 8 through 35 of the frame (the 28-byte aircraft record), then copy the Unix time at bytes 4 through 7. Write each field yourself, low byte first. Do not cast the UART buffer. Do not walk the frame as a list of aircraft. There is one aircraft in it.
+One plane on the radio is 32 bytes. Copy bytes 8 through 35 of the frame (the 28-byte aircraft record), then copy the Unix time at bytes 4 through 7. Write each field low byte first. Do not overlay a struct on the UART buffer.
 
 The 32 bytes for the first example are `1D 62 40 42 41 57 31 32 33 20 20 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 0F 01 00 00 F1 53 65`.
 
-The nRF24L01 payload max is 32 bytes. These 32 bytes are the aircraft content. There is no spare byte for a radio header inside that payload. If the radio packet needs a header, that is a radio-team layout choice. The UART frame is 38 bytes either way.
-
-The ESP32 reads the frame and copies the aircraft fields into the satellite telemetry. The ground station reads that telemetry.
+The nRF24L01 payload max is 32 bytes. These 32 bytes are the aircraft content. There is no spare byte for a radio header inside that payload. Packet 0x02 is a radio draft. It does not set the UART contract.
