@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{EmergencyKind, Fix, check_positions, fix_from_json_line, pack_frame};
+use trck::{EmergencyKind, Fix, check_positions, enqueue_fix, fix_from_json_line, pack_frame};
 
 mod sys;
 
@@ -93,27 +93,9 @@ impl Writer {
     }
 
     fn enqueue(&mut self, fix: Fix) {
-        if self.queue.len() < QUEUE_CAP {
-            self.queue.push_back(fix);
-            return;
-        }
-        if let Some(index) = self
-            .queue
-            .iter()
-            .position(|queued| queued.aircraft.emergency.is_none())
-        {
-            let dropped = self.queue.remove(index).expect("ordinary position");
+        if let Some(dropped) = enqueue_fix(&mut self.queue, QUEUE_CAP, fix) {
             log_drop(&dropped);
-            self.queue.push_back(fix);
-            return;
         }
-        if fix.aircraft.emergency.is_none() {
-            log_drop(&fix);
-            return;
-        }
-        let dropped = self.queue.pop_front().expect("full queue");
-        log_drop(&dropped);
-        self.queue.push_back(fix);
     }
 
     /// Write until the port would block or the queue is empty. A short write stays in `current`.

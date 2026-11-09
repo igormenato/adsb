@@ -18,11 +18,13 @@ If that breaks, the satellite never sees the alert.
 
 Run it when the diff touches any of:
 
+- `src/queue.rs` `enqueue_fix`
 - `src/main.rs` `Writer::enqueue`
 - `src/main.rs` `Writer::write_some` (the pop into `current`, or clearing `current`)
 - `src/main.rs` `QUEUE_CAP`
 - `src/main.rs` `Writer.queue` or `Writer.current`
 - `verify/uart-queue/WriterQueue.tla` or `WriterQueue.cfg`
+- `src/lib.rs` `kani_proofs`
 
 Skip it for JSON parse, `pack_frame`, CRC, CLI flags, and `sys.rs`.
 
@@ -37,6 +39,14 @@ verify/uart-queue/check.sh
 ```
 
 Exit 0 means TLC found no invariant break in the model, under the bounds below. Any other exit is a fail. `check.sh` fetches `tla2tools.jar` 1.7.4 (sha1 `bee4a54f3ee3d4afc347c3240ec2d9e93b075104`) into `verify/uart-queue/.tools/` on first run. Java 21 is enough.
+
+Kani proves the same drop rule on `enqueue_fix` at cap 2, after `cargo install --locked kani-verifier --version 0.68.0` and `cargo kani setup`:
+
+```sh
+cargo kani --lib --harness ordinary_never_evicts_emergency
+```
+
+That uses Kani's own nightly (1.100 as of 0.68.0), not rustc 1.99.1. Cap 3 on `VecDeque<Fix>` ran out of memory on this machine. Cap 2 finished in about 30 seconds. A `pop_front`-only `enqueue_fix` fails `emergency_count(&queue) == before`.
 
 Read every TLC result with `/statechart`. It turns an invariant break into the shortest path in plain words. A pass gets a chart of how the queue moves. Do not copy `/statechart` commands from memory. Open that skill.
 
@@ -67,7 +77,7 @@ A pass is a pass of this model at cap 3. It is not a proof of the binary, of cap
 | `queue` | `Writer.queue` (`VecDeque<Fix>`) |
 | `"ordinary"` / `"emergency"` | `aircraft.emergency.is_none()` / `is_some()` |
 | `current` | `Writer.current` empty vs occupied |
-| `Enqueue` LET `q` | `Writer::enqueue` body |
+| `Enqueue` LET `q` | `enqueue_fix` in `src/queue.rs` |
 | `Len(queue) < QueueCap` then `Append` | `queue.len() < QUEUE_CAP` then `push_back` |
 | `HasOrdinary` then `RemoveFirstOrdinary` then `Append` | `position(emergency.is_none())` then `remove` then `push_back` |
 | `kind = "ordinary"` then `q = queue` | `fix.aircraft.emergency.is_none()` then `return` |
@@ -79,7 +89,7 @@ The LET `q` is the policy. The primed `evictedEmergencyForOrdinary` and `current
 
 ## Bug vs modeling error
 
-Replay the TLC path against `Writer::enqueue` and `write_some`.
+Replay the TLC path against `enqueue_fix` and `write_some`.
 
 - Each `EnqueueOrdinary` / `EnqueueEmergency` must match one of the four branches above.
 - Each `StartWrite` needs `current.is_none()` and a non-empty queue.
@@ -101,15 +111,16 @@ The real `enqueue` would have removed an ordinary plane instead.
 
 If the drop policy is meant to change, rewrite LET `q` to match the new `enqueue`. Change `OrdinaryNeverEvictsEmergency` or `EnqueueLeavesCurrent` only with evidence in the tests or the commit message. Keep `QueueCap` at 3 unless the new policy depends on the numeric cap.
 
-Move **sync commit** forward only after `check.sh` exits 0 and you have confirmed LET `q` still matches `Writer::enqueue`.
+Move **sync commit** forward only after `check.sh` exits 0 and you have confirmed LET `q` still matches `enqueue_fix`.
 
 ## Coverage
 
-- File: `src/main.rs`
-- Functions: `Writer::enqueue`, `Writer::write_some`
+- File: `src/queue.rs`, `src/main.rs`, `src/lib.rs`
+- Functions: `enqueue_fix`, `Writer::enqueue`, `Writer::write_some`
 - Constant: `QUEUE_CAP`
 - Spec: `verify/uart-queue/WriterQueue.tla`, `WriterQueue.cfg`
 - Runner: `verify/uart-queue/check.sh`
+- Kani: `cargo kani --lib --harness ordinary_never_evicts_emergency` (kani-verifier 0.68.0, cap 2)
 
 ## Out of scope
 
