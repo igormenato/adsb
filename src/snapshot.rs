@@ -2,9 +2,7 @@
 
 use serde_json::Value;
 
-use crate::frame::{
-    ALT_UNKNOWN, Aircraft, EmergencyKind, Fix, SPEED_UNKNOWN, TRACK_UNKNOWN, deg_e7, pad_callsign,
-};
+use crate::frame::{Aircraft, EmergencyKind, Fix, Icao, deg_e7, pad_callsign};
 
 /// One `--net-json-port` line. `None` means skip the line.
 ///
@@ -98,71 +96,72 @@ fn squawk_code(text: &str) -> Option<EmergencyKind> {
 }
 
 /// readsb writes six hex digits, optionally with one leading `~`.
-fn parse_icao(hex: &str) -> Option<u32> {
+fn parse_icao(hex: &str) -> Option<Icao> {
     let digits = hex.strip_prefix('~').unwrap_or(hex);
     if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
-    u32::from_str_radix(digits, 16).ok()
+    u32::from_str_radix(digits, 16)
+        .ok()
+        .and_then(Icao::from_u24)
 }
 
 fn finite_number(value: &Value) -> Option<f64> {
     value.as_f64().filter(|number| number.is_finite())
 }
 
-fn altitude(entry: &Value) -> i32 {
+fn altitude(entry: &Value) -> Option<i32> {
     match entry.get("alt_baro") {
-        Some(Value::Number(number)) => number
-            .as_f64()
-            .map(round_i32)
-            .unwrap_or_else(|| geometric(entry)),
+        Some(Value::Number(number)) => match number.as_f64() {
+            Some(n) => round_i32(n),
+            None => geometric(entry),
+        },
         _ => geometric(entry),
     }
 }
 
-fn geometric(entry: &Value) -> i32 {
+fn geometric(entry: &Value) -> Option<i32> {
     entry
         .get("alt_geom")
         .and_then(finite_number)
-        .map(round_i32)
-        .unwrap_or(ALT_UNKNOWN)
+        .and_then(round_i32)
 }
 
-fn round_i32(number: f64) -> i32 {
+fn round_i32(number: f64) -> Option<i32> {
     if !number.is_finite() {
-        return ALT_UNKNOWN;
+        return None;
     }
     let rounded = number.round();
-    if rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
-        ALT_UNKNOWN
+    if rounded <= f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
+        None
     } else {
-        rounded as i32
+        Some(rounded as i32)
     }
 }
 
-fn ground_speed(entry: &Value) -> u16 {
-    let Some(knots) = entry.get("gs").and_then(finite_number) else {
-        return SPEED_UNKNOWN;
-    };
+fn ground_speed(entry: &Value) -> Option<u16> {
+    let knots = entry.get("gs").and_then(finite_number)?;
     if knots < 0.0 {
-        return SPEED_UNKNOWN;
+        return None;
     }
     let rounded = knots.round();
     if rounded >= 65535.0 {
-        65534
+        Some(65534)
     } else {
-        rounded as u16
+        Some(rounded as u16)
     }
 }
 
-fn track(entry: &Value) -> u16 {
-    let Some(degrees) = entry.get("track").and_then(finite_number) else {
-        return TRACK_UNKNOWN;
-    };
+fn track(entry: &Value) -> Option<u16> {
+    let degrees = entry.get("track").and_then(finite_number)?;
     let rounded = degrees.round();
     if !(0.0..=360.0).contains(&rounded) {
-        return TRACK_UNKNOWN;
+        return None;
     }
     let degrees = rounded as u16;
-    if degrees == 360 { 0 } else { degrees }
+    if degrees == 360 {
+        Some(0)
+    } else {
+        Some(degrees)
+    }
 }

@@ -8,9 +8,13 @@ use std::time::{Duration, Instant};
 use serialport::{SerialPort, TTYPort};
 
 use trck::{
-    ALT_UNKNOWN, FRAME_LEN, SPEED_UNKNOWN, TRACK_UNKNOWN, check_positions, crc16_ccitt_false,
-    fix_from_json_line, pack_frame, unpack_frame,
+    FRAME_LEN, Icao, check_positions, crc16_ccitt_false, fix_from_json_line, pack_frame,
+    unpack_frame,
 };
+
+fn icao(n: u32) -> Icao {
+    Icao::from_u24(n).expect("24-bit")
+}
 
 const PUBLISHED_LINE: &str = r#"{"now":1700000000.9,"hex":"40621d","flight":"BAW123","lat":52.2572021484375,"lon":3.91937255859375,"alt_baro":38000,"gs":450.2,"track":271.4}"#;
 
@@ -94,7 +98,7 @@ fn a_line_uses_now_and_ignores_seen_pos() {
     )
     .expect("old position still a line");
     assert_eq!(old.unix_s, 1_700_000_000);
-    assert_eq!(old.aircraft.icao, 0x40621D);
+    assert_eq!(old.aircraft.icao, icao(0x40621D));
 
     assert!(fix_from_json_line(br#"{"hex":"40621d","lat":1,"lon":2}"#).is_none());
     assert!(fix_from_json_line(br#"{"now":-1,"hex":"40621d","lat":1,"lon":2}"#).is_none());
@@ -117,32 +121,32 @@ fn line_sentinels_and_track_wrap() {
     let unknown =
         fix_from_json_line(br#"{"now":10,"hex":"abc123","lat":0,"lon":0,"gs":-1,"track":-5}"#)
             .expect("unknown");
-    assert_eq!(unknown.aircraft.altitude_ft, ALT_UNKNOWN);
-    assert_eq!(unknown.aircraft.ground_speed_kt, SPEED_UNKNOWN);
-    assert_eq!(unknown.aircraft.track_deg, TRACK_UNKNOWN);
+    assert_eq!(unknown.aircraft.altitude_ft, None);
+    assert_eq!(unknown.aircraft.ground_speed_kt, None);
+    assert_eq!(unknown.aircraft.track_deg, None);
     assert_eq!(pack_frame(&unknown), UNKNOWN);
 
     let saturated = fix_from_json_line(
         br#"{"now":10,"hex":"abc124","lat":0,"lon":1,"alt_baro":"ground","gs":65534.6,"track":360}"#,
     )
     .expect("saturated");
-    assert_eq!(saturated.aircraft.altitude_ft, ALT_UNKNOWN);
-    assert_eq!(saturated.aircraft.ground_speed_kt, 65534);
-    assert_eq!(saturated.aircraft.track_deg, 0);
+    assert_eq!(saturated.aircraft.altitude_ft, None);
+    assert_eq!(saturated.aircraft.ground_speed_kt, Some(65534));
+    assert_eq!(saturated.aircraft.track_deg, Some(0));
     assert_eq!(pack_frame(&saturated), SATURATED);
 
     let on_ground = fix_from_json_line(
         br#"{"now":10,"hex":"000001","lat":1,"lon":2,"alt_baro":"ground","alt_geom":3280.4}"#,
     )
     .expect("ground uses geom");
-    assert_eq!(on_ground.aircraft.altitude_ft, 3280);
+    assert_eq!(on_ground.aircraft.altitude_ft, Some(3280));
 
     let geometric =
         fix_from_json_line(br#"{"now":10,"hex":"000001","lat":1,"lon":2,"alt_geom":3280.4}"#)
             .expect("geom");
-    assert_eq!(geometric.aircraft.altitude_ft, 3280);
-    assert_eq!(geometric.aircraft.ground_speed_kt, SPEED_UNKNOWN);
-    assert_eq!(geometric.aircraft.track_deg, TRACK_UNKNOWN);
+    assert_eq!(geometric.aircraft.altitude_ft, Some(3280));
+    assert_eq!(geometric.aircraft.ground_speed_kt, None);
+    assert_eq!(geometric.aircraft.track_deg, None);
     let frame = pack_frame(&geometric);
     assert_eq!(i32::from_le_bytes(frame[27..31].try_into().unwrap()), 3280);
 }
@@ -172,7 +176,8 @@ fn callsign_is_eight_space_padded_bytes() {
 #[test]
 fn drops_a_bad_hex() {
     let tilde = fix_from_json_line(br#"{"now":1,"hex":"~40621d","lat":1,"lon":2}"#).expect("tilde");
-    assert_eq!(tilde.aircraft.icao, 0x40621D);
+    assert_eq!(tilde.aircraft.icao, icao(0x40621D));
+    assert!(Icao::from_u24(0x0100_0000).is_none());
     assert!(fix_from_json_line(br#"{"now":1,"hex":"40G621","lat":1,"lon":2}"#).is_none());
     assert!(fix_from_json_line(br#"{"now":1,"hex":"abcdefg","lat":1,"lon":2}"#).is_none());
     assert!(fix_from_json_line(br#"{"now":1,"hex":" abc","lat":1,"lon":2}"#).is_none());
