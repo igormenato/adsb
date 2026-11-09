@@ -27,13 +27,13 @@ No bytes means the Pi sent nothing. There is no count of 0 and no heartbeat. Do 
 | 23 | i32 | longitude, degrees × 1e7 |
 | 27 | i32 | altitude, feet |
 | 31 | u16 | ground speed, knots |
-| 33 | u16 | track, degrees, 0 to 359 |
+| 33 | u16 | track, degrees × 10, 0 to 3599 |
 | 35 | u8 | emergency |
 | 36 | u16 | CRC over bytes 0..35 |
 
 Callsign is the readsb `flight` field, the simulated registration on the CubeDesign 2026 submit table. Eight bytes. Shorter text is padded with spaces on the right. Longer text is cut to eight. Missing `flight` is eight spaces. The position is still sent.
 
-Unknown altitude is the minimum signed 32-bit integer. readsb `alt_baro` of `ground` is not 0. The frame uses `alt_geom` when that is present, otherwise unknown. Unknown ground speed is 65535. Unknown track is 65535.
+Unknown altitude is the minimum signed 32-bit integer. readsb `alt_baro` of `ground` is not 0. The frame uses `alt_geom` when that is present, otherwise unknown. Unknown ground speed is 65535. Unknown track is 65535. Track `271.4` is `2714`. `3600` tenths wraps to `0`.
 
 | Code | Name |
 | --- | --- |
@@ -51,20 +51,20 @@ Squawk 7700, 7600, and 7500 become `general`, `nordo`, and `unlawful` when reads
 One position, callsign `BAW123`, no emergency, Unix time `1700000000`:
 
 ```
-54 52 43 4B 00 F1 53 65 1D 62 40 42 41 57 31 32 33 20 20 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 0F 01 00 06 BE
+54 52 43 4B 00 F1 53 65 1D 62 40 42 41 57 31 32 33 20 20 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 9A 0A 00 35 F1
 ```
 
 The same position with emergency `general`:
 
 ```
-54 52 43 4B 00 F1 53 65 1D 62 40 42 41 57 31 32 33 20 20 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 0F 01 01 27 AE
+54 52 43 4B 00 F1 53 65 1D 62 40 42 41 57 31 32 33 20 20 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 9A 0A 01 14 E1
 ```
 
 ## Radio payload
 
 One plane on the radio is 32 bytes. Copy bytes 8 through 35 of the frame (the 28-byte aircraft record), then copy the Unix time at bytes 4 through 7. Write each field yourself, low byte first. Do not cast the UART buffer. Do not walk the frame as a list of aircraft. There is one aircraft in it.
 
-The 32 bytes for the first example are `1D 62 40 42 41 57 31 32 33 20 20 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 0F 01 00 00 F1 53 65`.
+The 32 bytes for the first example are `1D 62 40 42 41 57 31 32 33 20 20 F5 D0 25 1F 7E 0C 56 02 70 94 00 00 C2 01 9A 0A 00 00 F1 53 65`.
 
 The nRF24L01 payload max is 32 bytes. These 32 bytes are the aircraft content. There is no spare byte for a radio header inside that payload. If the radio packet needs a header, that is a radio-team layout choice. The UART frame is 38 bytes either way.
 

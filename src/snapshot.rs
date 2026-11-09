@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::frame::{Aircraft, EmergencyKind, Fix, Icao, deg_e7, pad_callsign};
+use crate::frame::{Aircraft, Callsign, EmergencyKind, Fix, Icao, deg_e7};
 
 /// One `--net-json-port` line. `None` means skip the line.
 ///
@@ -35,12 +35,12 @@ fn aircraft_from_position(entry: &Value) -> Option<Aircraft> {
     }
     Some(Aircraft {
         icao,
-        callsign: pad_callsign(entry.get("flight").and_then(Value::as_str).unwrap_or("")),
+        callsign: Callsign::pad(entry.get("flight").and_then(Value::as_str).unwrap_or("")),
         latitude_e7: deg_e7(latitude),
         longitude_e7: deg_e7(longitude),
         altitude_ft: altitude(entry),
         ground_speed_kt: ground_speed(entry),
-        track_deg: track(entry),
+        track_e1: track(entry),
         emergency: emergency_kind(entry),
     })
 }
@@ -154,14 +154,14 @@ fn ground_speed(entry: &Value) -> Option<u16> {
 
 fn track(entry: &Value) -> Option<u16> {
     let degrees = entry.get("track").and_then(finite_number)?;
-    let rounded = degrees.round();
-    if !(0.0..=360.0).contains(&rounded) {
+    let tenths = (degrees * 10.0).round();
+    if !(0.0..=3600.0).contains(&tenths) {
         return None;
     }
-    let degrees = rounded as u16;
-    if degrees == 360 {
+    let tenths = tenths as u16;
+    if tenths == 3600 {
         Some(0)
     } else {
-        Some(degrees)
+        Some(tenths)
     }
 }

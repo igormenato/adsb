@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use serialport::{SerialPort, TTYPort};
 
 use trck::{
-    FRAME_LEN, Icao, check_positions, crc16_ccitt_false, fix_from_json_line, pack_frame,
+    Callsign, FRAME_LEN, Icao, check_positions, crc16_ccitt_false, fix_from_json_line, pack_frame,
     unpack_frame,
 };
 
@@ -23,25 +23,25 @@ const SECOND_LINE: &str = r#"{"now":1700000000.9,"hex":"400abc","flight":"SIM000
 const PUBLISHED: [u8; FRAME_LEN] = [
     0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x1d, 0x62, 0x40, 0x42, 0x41, 0x57, 0x31, 0x32,
     0x33, 0x20, 0x20, 0xf5, 0xd0, 0x25, 0x1f, 0x7e, 0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00, 0xc2,
-    0x01, 0x0f, 0x01, 0x00, 0x06, 0xbe,
+    0x01, 0x9a, 0x0a, 0x00, 0x35, 0xf1,
 ];
 
 const EMERGENCY: [u8; FRAME_LEN] = [
     0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x1d, 0x62, 0x40, 0x42, 0x41, 0x57, 0x31, 0x32,
     0x33, 0x20, 0x20, 0xf5, 0xd0, 0x25, 0x1f, 0x7e, 0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00, 0xc2,
-    0x01, 0x0f, 0x01, 0x01, 0x27, 0xae,
+    0x01, 0x9a, 0x0a, 0x01, 0x14, 0xe1,
 ];
 
 const SECOND: [u8; FRAME_LEN] = [
     0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0xbc, 0x0a, 0x40, 0x53, 0x49, 0x4d, 0x30, 0x30,
     0x30, 0x31, 0x20, 0x40, 0x2c, 0x42, 0x06, 0x60, 0x18, 0xee, 0xf3, 0xe0, 0x2e, 0x00, 0x00, 0x18,
-    0x01, 0x5a, 0x00, 0x00, 0x58, 0x1d,
+    0x01, 0x84, 0x03, 0x00, 0x9e, 0x36,
 ];
 
 const CHECK_EMERGENCY: [u8; FRAME_LEN] = [
     0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x23, 0xa1, 0x4c, 0x45, 0x5a, 0x59, 0x34, 0x35,
     0x36, 0x20, 0x20, 0xe0, 0xb2, 0xad, 0x1e, 0xe0, 0x55, 0xbb, 0xff, 0x40, 0x1f, 0x00, 0x00, 0xdc,
-    0x00, 0xb4, 0x00, 0x01, 0xcc, 0xc9,
+    0x00, 0x08, 0x07, 0x01, 0xc5, 0xdb,
 ];
 
 const UNKNOWN: [u8; FRAME_LEN] = [
@@ -123,7 +123,7 @@ fn line_sentinels_and_track_wrap() {
             .expect("unknown");
     assert_eq!(unknown.aircraft.altitude_ft, None);
     assert_eq!(unknown.aircraft.ground_speed_kt, None);
-    assert_eq!(unknown.aircraft.track_deg, None);
+    assert_eq!(unknown.aircraft.track_e1, None);
     assert_eq!(pack_frame(&unknown), UNKNOWN);
 
     let saturated = fix_from_json_line(
@@ -132,7 +132,7 @@ fn line_sentinels_and_track_wrap() {
     .expect("saturated");
     assert_eq!(saturated.aircraft.altitude_ft, None);
     assert_eq!(saturated.aircraft.ground_speed_kt, Some(65534));
-    assert_eq!(saturated.aircraft.track_deg, Some(0));
+    assert_eq!(saturated.aircraft.track_e1, Some(0));
     assert_eq!(pack_frame(&saturated), SATURATED);
 
     let on_ground = fix_from_json_line(
@@ -146,7 +146,7 @@ fn line_sentinels_and_track_wrap() {
             .expect("geom");
     assert_eq!(geometric.aircraft.altitude_ft, Some(3280));
     assert_eq!(geometric.aircraft.ground_speed_kt, None);
-    assert_eq!(geometric.aircraft.track_deg, None);
+    assert_eq!(geometric.aircraft.track_e1, None);
     let frame = pack_frame(&geometric);
     assert_eq!(i32::from_le_bytes(frame[27..31].try_into().unwrap()), 3280);
 }
@@ -155,22 +155,22 @@ fn line_sentinels_and_track_wrap() {
 fn callsign_is_eight_space_padded_bytes() {
     let missing =
         fix_from_json_line(br#"{"now":10,"hex":"abc123","lat":0,"lon":0}"#).expect("missing");
-    assert_eq!(missing.aircraft.callsign, *b"        ");
+    assert_eq!(missing.aircraft.callsign, Callsign::pad(""));
 
     let short =
         fix_from_json_line(br#"{"now":10,"hex":"abc123","flight":"BAW123","lat":0,"lon":0}"#)
             .expect("short");
-    assert_eq!(short.aircraft.callsign, *b"BAW123  ");
+    assert_eq!(short.aircraft.callsign, Callsign::pad("BAW123"));
 
     let exact =
         fix_from_json_line(br#"{"now":10,"hex":"abc123","flight":"ABCDEFGH","lat":0,"lon":0}"#)
             .expect("exact");
-    assert_eq!(exact.aircraft.callsign, *b"ABCDEFGH");
+    assert_eq!(exact.aircraft.callsign, Callsign::pad("ABCDEFGH"));
 
     let long =
         fix_from_json_line(br#"{"now":10,"hex":"abc123","flight":"ABCDEFGHIJ","lat":0,"lon":0}"#)
             .expect("long");
-    assert_eq!(long.aircraft.callsign, *b"ABCDEFGH");
+    assert_eq!(long.aircraft.callsign, Callsign::pad("ABCDEFGHIJ"));
 }
 
 #[test]
