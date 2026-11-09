@@ -33,7 +33,7 @@ No bytes means the Pi sent nothing. There is no count of 0 and no heartbeat. Do 
 
 Callsign is the readsb `flight` field, the simulated registration on the CubeDesign 2026 submit table. Eight bytes. Shorter text is padded with spaces on the right. Longer text is cut to eight. Missing `flight` is eight spaces. The position is still sent.
 
-Unknown altitude is the minimum signed 32-bit integer. Unknown ground speed is 65535. Unknown track is 65535.
+Unknown altitude is the minimum signed 32-bit integer. readsb `alt_baro` of `ground` is not 0. The frame uses `alt_geom` when that is present, otherwise unknown. Unknown ground speed is 65535. Unknown track is 65535.
 
 | Code | Name |
 | --- | --- |

@@ -112,14 +112,20 @@ fn finite_number(value: &Value) -> Option<f64> {
 
 fn altitude(entry: &Value) -> i32 {
     match entry.get("alt_baro") {
-        Some(Value::String(text)) if text == "ground" => 0,
-        Some(Value::Number(number)) => number.as_f64().map(round_i32).unwrap_or(ALT_UNKNOWN),
-        _ => entry
-            .get("alt_geom")
-            .and_then(finite_number)
+        Some(Value::Number(number)) => number
+            .as_f64()
             .map(round_i32)
-            .unwrap_or(ALT_UNKNOWN),
+            .unwrap_or_else(|| geometric(entry)),
+        _ => geometric(entry),
     }
+}
+
+fn geometric(entry: &Value) -> i32 {
+    entry
+        .get("alt_geom")
+        .and_then(finite_number)
+        .map(round_i32)
+        .unwrap_or(ALT_UNKNOWN)
 }
 
 fn round_i32(number: f64) -> i32 {
