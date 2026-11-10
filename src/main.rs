@@ -3,6 +3,7 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,11 +13,12 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{EmergencyKind, Fix, Lines, Queue, check_positions, fix_from_json_line};
+use trck::{EmergencyKind, Fix, Lines, Queue, Table, check_positions, fix_from_json_line};
 
 mod sys;
 
 const DEFAULT_UART: &str = "/dev/serial0";
+const DEFAULT_TABLE: &str = "aircraft.csv";
 const DEFAULT_BAUD: u32 = 115_200;
 const CHECK_PAUSE: Duration = Duration::from_secs(1);
 /// Quiet-link upper bound so Ctrl-C is noticed without a UART or socket event.
@@ -52,6 +54,9 @@ struct Args {
     /// Send the known frames instead of reading readsb, to check the UART.
     #[arg(long, conflicts_with = "net_json")]
     check: bool,
+    /// Append-only CSV of accepted positions. Pi time, not contest reception.
+    #[arg(long, default_value = DEFAULT_TABLE, value_name = "PATH")]
+    table: PathBuf,
 }
 
 #[derive(Debug)]
@@ -76,6 +81,7 @@ struct Writer {
     sink: Sink,
     stop: Arc<AtomicBool>,
     queue: Queue,
+    table: Table,
 }
 
 impl Writer {
@@ -91,6 +97,9 @@ impl Writer {
     }
 
     fn enqueue(&mut self, fix: Fix) {
+        if let Err(err) = self.table.append(&fix) {
+            eprintln!("table write failed: {err}");
+        }
         if let Some(dropped) = self.queue.push(fix) {
             log_drop(&dropped);
         }
@@ -172,7 +181,12 @@ fn open_failed(path: &str, err: impl std::fmt::Display) -> ExitCode {
     ExitCode::from(1)
 }
 
-fn open_uart(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, ExitCode> {
+fn open_uart(
+    path: &str,
+    baud: u32,
+    stop: Arc<AtomicBool>,
+    table: Table,
+) -> Result<Writer, ExitCode> {
     let port = serialport::new(path, baud)
         .data_bits(DataBits::Eight)
         .parity(Parity::None)
@@ -188,18 +202,25 @@ fn open_uart(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, Exi
         sink: Sink::Uart(port),
         stop,
         queue: Queue::new(QUEUE_CAP),
+        table,
     })
 }
 
-fn open_output(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, ExitCode> {
+fn open_output(
+    path: &str,
+    baud: u32,
+    stop: Arc<AtomicBool>,
+    table: Table,
+) -> Result<Writer, ExitCode> {
     if path == "-" {
         return Ok(Writer {
             sink: Sink::Stdout,
             stop,
             queue: Queue::new(QUEUE_CAP),
+            table,
         });
     }
-    open_uart(path, baud, stop)
+    open_uart(path, baud, stop, table)
 }
 
 fn resolve_net_json(text: &str) -> Option<Vec<SocketAddr>> {
@@ -214,7 +235,11 @@ fn grow(delay: Duration) -> Duration {
 fn main() -> ExitCode {
     let args = Args::parse();
     let stop = Arc::new(AtomicBool::new(false));
-    let mut writer = match open_output(&args.uart, args.baud, Arc::clone(&stop)) {
+    let table = match Table::open(&args.table) {
+        Ok(table) => table,
+        Err(err) => return open_failed(&args.table.display().to_string(), err),
+    };
+    let mut writer = match open_output(&args.uart, args.baud, Arc::clone(&stop), table) {
         Ok(writer) => writer,
         Err(code) => return code,
     };
@@ -226,7 +251,12 @@ fn main() -> ExitCode {
     }
 
     if args.check {
-        eprintln!("check uart={} baud={}", args.uart, args.baud);
+        eprintln!(
+            "check uart={} baud={} table={}",
+            args.uart,
+            args.baud,
+            args.table.display()
+        );
         return run_check(&mut writer, &stop);
     }
 
@@ -238,7 +268,12 @@ fn main() -> ExitCode {
         eprintln!("net-json {text}: expected host:port");
         return ExitCode::from(1);
     };
-    eprintln!("net-json={text} uart={} baud={}", args.uart, args.baud);
+    eprintln!(
+        "net-json={text} uart={} baud={} table={}",
+        args.uart,
+        args.baud,
+        args.table.display()
+    );
     run_port(&addrs, text, &mut writer, &stop)
 }
 
