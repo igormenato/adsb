@@ -1,6 +1,9 @@
 name: Release
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -13,8 +16,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: |
+          set -euo pipefail
+          version=$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)
+          test "${TAG}" = "v${version}"
+          git fetch origin main
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
       - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
       - run: cargo build --release --locked --target arm-unknown-linux-musleabihf
       - run: cargo build --release --locked --target aarch64-unknown-linux-musl
@@ -24,9 +37,9 @@ jobs:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
-          gh release create "${{ inputs.tag }}"
+          gh release create "${TAG}"
           trck-arm
           trck-aarch64
-          --title "${{ inputs.tag }}"
+          --title "${TAG}"
           --generate-notes
           --target "${{ github.sha }}"
