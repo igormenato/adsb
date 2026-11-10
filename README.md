@@ -40,6 +40,8 @@ readsb --net-json-port 30005
 
 `--check` sends known frames instead of reading readsb, to check the UART. It repeats those frames every second.
 
+`--table` defaults to `aircraft.csv` in the working directory. Each accepted position appends one CSV row: ICAO (six hex), callsign, lat, lon, altitude in feet, ground speed in knots, track in degrees, timestamp. The timestamp is the Pi clock when the row is written. Contest reception time is when the row arrives on the ground. `--check` writes the same rows. At 8 MiB the file is renamed `aircraft.csv.old` and a new file starts.
+
 ## Frame
 
 The layout is in [ESP32 satellite telemetry](docs/esp32-alert.md).

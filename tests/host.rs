@@ -1,7 +1,9 @@
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -253,10 +255,41 @@ impl Drop for StopSender {
     }
 }
 
-fn spawn_net(port: u16) -> StopSender {
+static TABLE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+struct TempTable(PathBuf);
+
+impl TempTable {
+    fn new() -> Self {
+        let n = TABLE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("trck-host-table-{}-{n}.csv", std::process::id()));
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempTable {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let mut old = self.0.clone().into_os_string();
+        old.push(".old");
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+fn table_arg(table: &Path) -> [&str; 2] {
+    ["--table", table.to_str().expect("utf8 table path")]
+}
+
+fn spawn_net(port: u16, table: &Path) -> StopSender {
     let addr = format!("127.0.0.1:{port}");
     let child = Command::new(env!("CARGO_BIN_EXE_trck"))
         .args(["--net-json", &addr, "--uart", "-"])
+        .args(table_arg(table))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -264,9 +297,10 @@ fn spawn_net(port: u16) -> StopSender {
     StopSender(child)
 }
 
-fn spawn_check() -> StopSender {
+fn spawn_check(table: &Path) -> StopSender {
     let child = Command::new(env!("CARGO_BIN_EXE_trck"))
         .args(["--check", "--uart", "-"])
+        .args(table_arg(table))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -274,15 +308,28 @@ fn spawn_check() -> StopSender {
     StopSender(child)
 }
 
-fn spawn_uart(port: u16, uart: &str) -> StopSender {
+fn spawn_uart(port: u16, uart: &str, table: &Path) -> StopSender {
     let addr = format!("127.0.0.1:{port}");
     let child = Command::new(env!("CARGO_BIN_EXE_trck"))
         .args(["--net-json", &addr, "--uart", uart])
+        .args(table_arg(table))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn sender");
     StopSender(child)
+}
+
+fn wait_csv_rows(path: &Path, n: usize, timeout: Duration) -> String {
+    let start = Instant::now();
+    loop {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let rows = text.lines().count().saturating_sub(1);
+        if rows >= n || start.elapsed() > timeout {
+            return text;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn collect_stdout(stdout: impl Read + Send + 'static) -> Arc<Mutex<Vec<u8>>> {
@@ -349,7 +396,8 @@ fn nothing_is_written_until_a_line_arrives() {
         writeln!(sock, "{PUBLISHED_LINE}").expect("line");
         Session::KeepOpen
     });
-    let mut sender = spawn_net(port);
+    let table = TempTable::new();
+    let mut sender = spawn_net(port, table.path());
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     ready_rx
         .recv_timeout(Duration::from_secs(2))
@@ -377,7 +425,8 @@ fn one_frame_per_valid_line_and_none_for_a_bad_line() {
         .expect("lines");
         Session::KeepOpen
     });
-    let mut sender = spawn_net(port);
+    let table = TempTable::new();
+    let mut sender = spawn_net(port, table.path());
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     let got = wait_len(&buf, FRAME_LEN * 2, Duration::from_secs(2));
     assert_eq!(got.len(), FRAME_LEN * 2, "got {}", got.len());
@@ -385,6 +434,11 @@ fn one_frame_per_valid_line_and_none_for_a_bad_line() {
     assert_eq!(&got[FRAME_LEN..], &SECOND);
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(buf.lock().expect("lock").len(), FRAME_LEN * 2);
+    let csv = wait_csv_rows(table.path(), 2, Duration::from_secs(2));
+    let rows: Vec<_> = csv.lines().skip(1).collect();
+    assert_eq!(rows.len(), 2, "{csv}");
+    assert!(rows[0].starts_with("40621d,BAW123,"), "{csv}");
+    assert!(rows[1].starts_with("400abc,SIM0001,"), "{csv}");
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 
@@ -396,7 +450,8 @@ fn the_same_icao_is_sent_twice() {
         writeln!(sock, "{PUBLISHED_LINE}").expect("second");
         Session::KeepOpen
     });
-    let mut sender = spawn_net(port);
+    let table = TempTable::new();
+    let mut sender = spawn_net(port, table.path());
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     let got = wait_len(&buf, FRAME_LEN * 2, Duration::from_secs(2));
     assert_eq!(got, [PUBLISHED, PUBLISHED].concat());
@@ -419,7 +474,8 @@ fn a_split_line_is_one_frame() {
         sock.write_all(&tail).expect("tail");
         Session::KeepOpen
     });
-    let mut sender = spawn_net(port);
+    let table = TempTable::new();
+    let mut sender = spawn_net(port, table.path());
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     ready_rx
         .recv_timeout(Duration::from_secs(2))
@@ -447,7 +503,8 @@ fn emergency_and_squawk_are_on_the_wire() {
         writeln!(sock, "{unlawful}").expect("name");
         Session::KeepOpen
     });
-    let mut sender = spawn_net(port);
+    let table = TempTable::new();
+    let mut sender = spawn_net(port, table.path());
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     let got = wait_len(&buf, FRAME_LEN * 2, Duration::from_secs(2));
     assert_eq!(&got[..FRAME_LEN], &EMERGENCY);
@@ -467,7 +524,8 @@ fn a_dead_socket_writes_nothing_until_the_next_line() {
         writeln!(sock, "{PUBLISHED_LINE}").expect("line");
         Session::KeepOpen
     });
-    let mut sender = spawn_net(port);
+    let table = TempTable::new();
+    let mut sender = spawn_net(port, table.path());
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     std::thread::sleep(Duration::from_millis(400));
     assert!(
@@ -484,7 +542,8 @@ fn a_dead_socket_writes_nothing_until_the_next_line() {
 fn a_refused_port_writes_nothing() {
     let (listener, port) = listen();
     drop(listener);
-    let mut sender = spawn_net(port);
+    let table = TempTable::new();
+    let mut sender = spawn_net(port, table.path());
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     std::thread::sleep(Duration::from_millis(700));
     assert!(buf.lock().expect("lock").is_empty());
@@ -518,11 +577,22 @@ fn check_and_net_json_together_are_an_error() {
 #[test]
 fn check_writes_the_published_frames() {
     let expect = [SECOND, PUBLISHED, CHECK_EMERGENCY].concat();
-    let mut sender = spawn_check();
+    let table = TempTable::new();
+    let mut sender = spawn_check(table.path());
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     let got = wait_len(&buf, expect.len(), Duration::from_secs(2));
     assert!(got.len() >= expect.len(), "short output: {}", got.len());
     assert_eq!(&got[..expect.len()], expect.as_slice());
+    let csv = wait_csv_rows(table.path(), 3, Duration::from_secs(2));
+    let rows: Vec<_> = csv.lines().skip(1).collect();
+    assert!(rows.len() >= 3, "{csv}");
+    assert!(rows[0].starts_with("400abc,SIM0001,"), "{csv}");
+    assert!(rows[1].starts_with("40621d,BAW123,"), "{csv}");
+    assert!(rows[2].starts_with("4ca123,EZY456,"), "{csv}");
+    assert!(
+        !rows[0].contains("2023-11-14T22:13:20Z"),
+        "table used line unix, not Pi time: {csv}"
+    );
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 
@@ -654,10 +724,33 @@ fn wait_frames(master: &mut TTYPort, n: usize, timeout: Duration) -> Vec<[u8; FR
 }
 
 #[test]
+fn a_full_tty_still_writes_the_table() {
+    let (listener, port) = listen();
+    let pty = Pty::open();
+    let table = TempTable::new();
+    let mut sender = spawn_uart(port, &pty.path(), table.path());
+    let (mut sock, _) = listener.accept().expect("accept");
+    fill_until_blocked(pty.slave.as_raw_fd());
+    writeln!(sock, "{PUBLISHED_LINE}").expect("line");
+    let csv = wait_csv_rows(table.path(), 1, Duration::from_secs(2));
+    let row = csv.lines().nth(1).expect("row");
+    assert!(row.starts_with("40621d,BAW123,"), "{csv}");
+    assert!(row.contains("38000,"), "{csv}");
+    assert!(row.contains(",450,"), "{csv}");
+    assert!(row.contains(",271,"), "{csv}");
+    assert!(
+        !row.contains("2023-11-14T22:13:20Z"),
+        "table used line unix, not Pi time: {csv}"
+    );
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
 fn a_tty_writes_the_published_frame() {
     let (listener, port) = listen();
     let mut pty = Pty::open();
-    let mut sender = spawn_uart(port, &pty.path());
+    let table = TempTable::new();
+    let mut sender = spawn_uart(port, &pty.path(), table.path());
     let (mut sock, _) = listener.accept().expect("accept");
     writeln!(sock, "{PUBLISHED_LINE}").expect("line");
     let frames = wait_frames(&mut pty.master, 1, Duration::from_secs(2));
@@ -669,7 +762,8 @@ fn a_tty_writes_the_published_frame() {
 fn a_full_tty_drops_ordinary_json_and_keeps_7700() {
     let (listener, port) = listen();
     let mut pty = Pty::open();
-    let mut sender = spawn_uart(port, &pty.path());
+    let table = TempTable::new();
+    let mut sender = spawn_uart(port, &pty.path(), table.path());
     let (mut sock, _) = listener.accept().expect("accept");
     fill_until_blocked(pty.slave.as_raw_fd());
     sock.set_nodelay(true).expect("nodelay");
@@ -698,7 +792,8 @@ fn a_full_tty_drops_ordinary_json_and_keeps_7700() {
 fn a_full_tty_of_emergencies_drops_ordinary_json() {
     let (listener, port) = listen();
     let mut pty = Pty::open();
-    let mut sender = spawn_uart(port, &pty.path());
+    let table = TempTable::new();
+    let mut sender = spawn_uart(port, &pty.path(), table.path());
     let (mut sock, _) = listener.accept().expect("accept");
     fill_until_blocked(pty.slave.as_raw_fd());
     sock.set_nodelay(true).expect("nodelay");
@@ -730,7 +825,8 @@ fn a_full_tty_of_emergencies_drops_ordinary_json() {
 fn queued_tty_frames_survive_run_port_reconnect() {
     let (listener, port) = listen();
     let mut pty = Pty::open();
-    let mut sender = spawn_uart(port, &pty.path());
+    let table = TempTable::new();
+    let mut sender = spawn_uart(port, &pty.path(), table.path());
     {
         let (mut sock, _) = listener.accept().expect("accept");
         fill_until_blocked(pty.slave.as_raw_fd());
