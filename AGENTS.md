@@ -17,3 +17,7 @@ The Pi binaries:
 `cargo build --release --locked --target aarch64-unknown-linux-musl`
 
 Copy `target/<triple>/release/trck`. Release assets are `trck-arm` and `trck-aarch64`.
+
+## Release
+
+Bump the crate version on `main`. Tag `v` plus that version and push the tag. GitHub Actions publishes `trck-arm` and `trck-aarch64`. Do not `workflow_dispatch`; a tag push is enough.
