@@ -43,3 +43,7 @@ readsb --net-json-port 30005
 ## Frame
 
 The layout is in [ESP32 satellite telemetry](docs/esp32-alert.md).
+
+## ESP32 UART ingest
+
+`esp32/trck_uart` is an Arduino-ESP32 3.3.12 sketch for an ESP32-S3. It reads those frames and prints ICAO, lat, lon, alt, and emergency on `Serial`. Flash it, wire Pi GPIO 14 (pin 8) to GPIO 18, 3.3 V, common ground, and run `trck --check`. That firmware is UART ingest, not the OBC radio. Board settings are in [esp32/README.md](esp32/README.md).
