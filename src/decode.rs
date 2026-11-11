@@ -293,6 +293,7 @@ mod tests {
     const IDENT: &str = "8d406b902015a678d4d220aa4bda";
     const IDENT_40058B: &str = "8d40058b205054d4c72ce03f949e";
     const VELOCITY: &str = "8D485020994409940838175B284F";
+    const VELOCITY_40058B: &str = "8d40058b9904027fc00000b14147";
     const STATUS: &str = "8d40058be1200000000000a05f30";
 
     fn frame(hex: &str) -> Vec<u8> {
@@ -346,6 +347,16 @@ mod tests {
         let fix = tracker.ingest(3.0, &frame(ODD)).expect("position");
         assert_eq!(fix.aircraft.emergency, Some(EmergencyKind::General));
         assert_eq!(pack_frame(&fix)[35], 1);
+    }
+
+    #[test]
+    fn track_360_wraps_to_0() {
+        let mut tracker = Tracker::new();
+        assert!(tracker.ingest(1.0, &frame(VELOCITY_40058B)).is_none());
+        assert!(tracker.ingest(2.0, &frame(EVEN)).is_none());
+        let fix = tracker.ingest(3.0, &frame(ODD)).expect("position");
+        assert_eq!(fix.aircraft.track_deg, Some(0));
+        assert_eq!(&pack_frame(&fix)[33..35], &[0, 0]);
     }
 
     #[test]
