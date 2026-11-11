@@ -14,6 +14,12 @@ use trck::{
 
 const EVEN: &str = "8D40058B58C901375147EFD09357";
 const ODD: &str = "8D40058B58C904A87F402D3B8C59";
+const STATUS: &str = "8d40058be1200000000000a05f30";
+const ORDINARY_A: &str = "8d4d224f58bf07c2d41a9a353d70";
+const ORDINARY_B: &str = "8d4d224f58bf003b221b34aa5b8d";
+const ICAO_40058B: u32 = 0x40058B;
+const ICAO_4D224F: u32 = 0x4D224F;
+const QUEUE: usize = 64;
 
 const PUBLISHED: [u8; FRAME_LEN] = [
     0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x1d, 0x62, 0x40, 0x42, 0x41, 0x57, 0x31, 0x32,
@@ -39,6 +45,17 @@ fn decoded_aircraft() -> Aircraft {
     let odd = parse_hex_frame(ODD.as_bytes()).expect("odd");
     assert!(tracker.ingest(1.0, &even).is_none());
     tracker.ingest(2.0, &odd).expect("position").aircraft
+}
+
+fn ordinary_aircraft() -> Aircraft {
+    let mut tracker = Tracker::new();
+    let first = parse_hex_frame(ORDINARY_A.as_bytes()).expect("ordinary a");
+    let second = parse_hex_frame(ORDINARY_B.as_bytes()).expect("ordinary b");
+    assert!(tracker.ingest(1.0, &first).is_none());
+    tracker
+        .ingest(2.0, &second)
+        .expect("ordinary position")
+        .aircraft
 }
 
 fn frame_aircraft(frame: &[u8; FRAME_LEN]) -> Aircraft {
@@ -387,6 +404,37 @@ impl Pty {
     }
 }
 
+fn frame_icao(frame: &[u8]) -> u32 {
+    u32::from_le_bytes([frame[8], frame[9], frame[10], 0])
+}
+
+fn fill_until_blocked(fd: i32) -> usize {
+    let buf = [0xA5u8; 1024];
+    let mut wrote = 0usize;
+    let mut chunk = buf.len();
+    loop {
+        // SAFETY: `fd` is the open pty slave. `buf` is a live slice `write` does not keep.
+        let rc = unsafe { libc::write(fd, buf.as_ptr().cast(), chunk) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
+            if chunk == 1 {
+                break;
+            }
+            chunk = 1;
+            continue;
+        }
+        assert!(rc > 0);
+        wrote += rc as usize;
+        assert!(
+            wrote < 1024 * 1024,
+            "pty accepted a megabyte without blocking"
+        );
+    }
+    assert!(wrote > 0, "pty buffer was already full");
+    wrote
+}
+
 fn complete_frames(raw: &[u8]) -> Vec<[u8; FRAME_LEN]> {
     let Some(pos) = raw.windows(4).position(|window| window == b"TRCK") else {
         return Vec::new();
@@ -480,5 +528,88 @@ fn queued_tty_frames_survive_reconnect() {
     let expect = decoded_aircraft();
     assert_eq!(frame_aircraft(&frames[0]), expect);
     assert_eq!(frame_aircraft(&frames[1]), expect);
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn a_full_tty_drops_ordinary_hex_and_keeps_7700() {
+    assert_eq!(ordinary_aircraft().icao.to_u24(), ICAO_4D224F);
+    let (listener, port) = listen();
+    let mut pty = Pty::open();
+    let mut sender = spawn_uart(port, &pty.path());
+    let (mut sock, _) = listener.accept().expect("accept");
+    fill_until_blocked(pty.slave.as_raw_fd());
+    sock.set_nodelay(true).expect("nodelay");
+    let mut body = String::new();
+    for _ in 0..=QUEUE {
+        body.push_str(ORDINARY_A);
+        body.push('\n');
+        body.push_str(ORDINARY_B);
+        body.push('\n');
+    }
+    body.push_str(STATUS);
+    body.push('\n');
+    body.push_str(EVEN);
+    body.push('\n');
+    body.push_str(ODD);
+    body.push('\n');
+    sock.write_all(body.as_bytes()).expect("lines");
+    let frames = wait_frames_until(&mut pty.master, Duration::from_secs(5), |frames| {
+        frames.iter().any(|frame| frame[35] == 1)
+    });
+    let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
+    let ordinary = icaos
+        .iter()
+        .copied()
+        .filter(|icao| *icao == ICAO_4D224F)
+        .count();
+    assert!(ordinary > 0, "{icaos:?}");
+    assert!(ordinary < QUEUE + 1, "{icaos:?}");
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame_icao(frame) == ICAO_40058B && frame[35] == 1),
+        "{icaos:?}"
+    );
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn a_full_tty_of_emergencies_drops_ordinary() {
+    assert_eq!(ordinary_aircraft().icao.to_u24(), ICAO_4D224F);
+    let (listener, port) = listen();
+    let mut pty = Pty::open();
+    let mut sender = spawn_uart(port, &pty.path());
+    let (mut sock, _) = listener.accept().expect("accept");
+    fill_until_blocked(pty.slave.as_raw_fd());
+    sock.set_nodelay(true).expect("nodelay");
+    let mut body = String::new();
+    body.push_str(STATUS);
+    body.push('\n');
+    for _ in 0..=QUEUE {
+        body.push_str(EVEN);
+        body.push('\n');
+        body.push_str(ODD);
+        body.push('\n');
+    }
+    body.push_str(ORDINARY_A);
+    body.push('\n');
+    body.push_str(ORDINARY_B);
+    body.push('\n');
+    sock.write_all(body.as_bytes()).expect("lines");
+    let frames = wait_frames_until(&mut pty.master, Duration::from_secs(5), |frames| {
+        frames.len() >= QUEUE
+            && frames
+                .iter()
+                .any(|frame| frame_icao(frame) == ICAO_40058B && frame[35] == 1)
+    });
+    let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
+    assert!(!icaos.contains(&ICAO_4D224F), "{icaos:?}");
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame_icao(frame) == ICAO_40058B && frame[35] == 1),
+        "{icaos:?}"
+    );
     assert!(sender.0.try_wait().unwrap().is_none());
 }
