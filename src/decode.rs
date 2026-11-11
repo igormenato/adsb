@@ -25,13 +25,19 @@ struct Cached {
     ground_speed_kt: Option<u16>,
     track_deg: Option<u16>,
     emergency: Option<EmergencyKind>,
+}
+
+/// Recency for trim. Not ident: `decode_position` owns CPR in its own map.
+#[derive(Default)]
+struct Seen {
+    ident: Cached,
     last_seen: f64,
 }
 
 /// Per-aircraft CPR history plus the fields a position frame does not carry.
 pub struct Tracker {
     cpr: BTreeMap<ICAO, AircraftState>,
-    fields: BTreeMap<ICAO, Cached>,
+    fields: BTreeMap<ICAO, Seen>,
     reference: Option<rs1090::decode::cpr::Position>,
 }
 
@@ -95,12 +101,16 @@ impl Tracker {
         fix
     }
 
+    fn ident_mut(&mut self, icao: ICAO) -> &mut Cached {
+        &mut self.fields.entry(icao).or_default().ident
+    }
+
     fn trim(&mut self, now: f64, keep: ICAO) {
         if self.cpr.len() <= TRACKER_CAP && self.fields.len() <= TRACKER_CAP {
             return;
         }
         self.fields
-            .retain(|icao, cached| *icao == keep || now - cached.last_seen <= CPR_LOCAL_MAX_AGE_S);
+            .retain(|icao, seen| *icao == keep || now - seen.last_seen <= CPR_LOCAL_MAX_AGE_S);
         self.cpr.retain(|icao, _| self.fields.contains_key(icao));
         while self.cpr.len() > TRACKER_CAP || self.fields.len() > TRACKER_CAP {
             let Some(icao) = self.oldest(keep) else {
@@ -127,30 +137,29 @@ impl Tracker {
         match me {
             ME::BDS08 { inner, .. } => {
                 if !inner.callsign.contains('#') {
-                    self.fields.entry(icao24).or_default().callsign =
-                        Callsign::pad(&inner.callsign);
+                    self.ident_mut(icao24).callsign = Callsign::pad(&inner.callsign);
                 }
                 None
             }
             ME::BDS09(velocity) => {
                 if let AirborneVelocitySubType::GroundSpeedDecoding(speed) = &velocity.velocity {
-                    let cached = self.fields.entry(icao24).or_default();
-                    cached.ground_speed_kt = knots(speed.groundspeed);
-                    cached.track_deg = track(speed.track);
+                    let ident = self.ident_mut(icao24);
+                    ident.ground_speed_kt = knots(speed.groundspeed);
+                    ident.track_deg = track(speed.track);
                 }
                 None
             }
             ME::BDS61(status) => {
-                let cached = self.fields.entry(icao24).or_default();
+                let ident = self.ident_mut(icao24);
                 match status.subtype {
                     AircraftStatusType::EmergencyPriorityStatus => {
-                        cached.emergency = emergency_kind(status.emergency_state, status.squawk.0);
+                        ident.emergency = emergency_kind(status.emergency_state, status.squawk.0);
                     }
                     AircraftStatusType::NoInformation
                     | AircraftStatusType::ACASRaBroadcast
                     | AircraftStatusType::Reserved => {
-                        if cached.emergency.is_none() {
-                            cached.emergency = kind_from_squawk(status.squawk.0);
+                        if ident.emergency.is_none() {
+                            ident.emergency = kind_from_squawk(status.squawk.0);
                         }
                     }
                 }
@@ -164,18 +173,18 @@ impl Tracker {
                 }
                 let unix_s = unix_seconds(timestamp)?;
                 let icao = Icao::from_u24(icao24.0)?;
-                let cached = self.fields.entry(icao24).or_default().clone();
+                let ident = self.ident_mut(icao24).clone();
                 Some(Fix {
                     unix_s,
                     aircraft: Aircraft {
                         icao,
-                        callsign: cached.callsign,
+                        callsign: ident.callsign,
                         latitude_e7: deg_e7(latitude),
                         longitude_e7: deg_e7(longitude),
                         altitude_ft: inner.alt,
-                        ground_speed_kt: cached.ground_speed_kt,
-                        track_deg: cached.track_deg,
-                        emergency: cached.emergency,
+                        ground_speed_kt: ident.ground_speed_kt,
+                        track_deg: ident.track_deg,
+                        emergency: ident.emergency,
                     },
                 })
             }
@@ -191,13 +200,13 @@ impl Tracker {
     }
 
     fn apply_squawk(&mut self, icao: ICAO, squawk: u16) {
-        let cached = self.fields.entry(icao).or_default();
-        if cached.emergency.is_none() {
-            cached.emergency = kind_from_squawk(squawk);
-        } else if matches!(cached.emergency, Some(EmergencyKind::Reserved))
+        let ident = self.ident_mut(icao);
+        if ident.emergency.is_none() {
+            ident.emergency = kind_from_squawk(squawk);
+        } else if matches!(ident.emergency, Some(EmergencyKind::Reserved))
             && let Some(kind) = kind_from_squawk(squawk)
         {
-            cached.emergency = Some(kind);
+            ident.emergency = Some(kind);
         }
     }
 }
