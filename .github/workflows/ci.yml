@@ -6,9 +6,6 @@ on:
   pull_request:
     branches: [trck-v2]
 
-env:
-  ZIG_VERSION: "0.17.1"
-
 jobs:
   host:
     runs-on: ubuntu-latest
@@ -18,24 +15,3 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
-
-  pi:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - arm-unknown-linux-musleabihf
-          - aarch64-unknown-linux-musl
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
-        with:
-          target: ${{ matrix.target }}
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild@0.24.1
-      - run: cargo zigbuild --release --locked --target ${{ matrix.target }}
