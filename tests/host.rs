@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use serialport::{SerialPort, TTYPort};
 
 use trck::{
-    Aircraft, FRAME_LEN, Tracker, check_positions, crc16_ccitt_false, pack_frame, parse_hex_frame,
-    unpack_frame,
+    Aircraft, EmergencyKind, FRAME_LEN, Tracker, check_positions, crc16_ccitt_false, pack_frame,
+    parse_hex_frame, unpack_frame,
 };
 
 const EVEN: &str = "8D40058B58C901375147EFD09357";
@@ -22,21 +22,27 @@ const ICAO_4D224F: u32 = 0x4D224F;
 const QUEUE: usize = 64;
 
 const PUBLISHED: [u8; FRAME_LEN] = [
-    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x1d, 0x62, 0x40, 0x42, 0x41, 0x57, 0x31, 0x32,
-    0x33, 0x20, 0x20, 0xf5, 0xd0, 0x25, 0x1f, 0x7e, 0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00, 0xc2,
-    0x01, 0x0f, 0x01, 0x00, 0x06, 0xbe,
+    0x54, 0x52, 0x43, 0x4b, 0x1d, 0x62, 0x40, 0x42, 0x41, 0x57, 0x31, 0x32, 0x33, 0x20, 0x20, 0xf5,
+    0xd0, 0x25, 0x1f, 0x7e, 0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00, 0xc2, 0x01, 0x0f, 0x01, 0x00,
+    0x60, 0xef,
 ];
 
 const SECOND: [u8; FRAME_LEN] = [
-    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0xbc, 0x0a, 0x40, 0x53, 0x49, 0x4d, 0x30, 0x30,
-    0x30, 0x31, 0x20, 0x40, 0x2c, 0x42, 0x06, 0x60, 0x18, 0xee, 0xf3, 0xe0, 0x2e, 0x00, 0x00, 0x18,
-    0x01, 0x5a, 0x00, 0x00, 0x58, 0x1d,
+    0x54, 0x52, 0x43, 0x4b, 0xbc, 0x0a, 0x40, 0x53, 0x49, 0x4d, 0x30, 0x30, 0x30, 0x31, 0x20, 0x40,
+    0x2c, 0x42, 0x06, 0x60, 0x18, 0xee, 0xf3, 0xe0, 0x2e, 0x00, 0x00, 0x18, 0x01, 0x5a, 0x00, 0x00,
+    0x3e, 0x4c,
 ];
 
 const CHECK_EMERGENCY: [u8; FRAME_LEN] = [
-    0x54, 0x52, 0x43, 0x4b, 0x00, 0xf1, 0x53, 0x65, 0x23, 0xa1, 0x4c, 0x45, 0x5a, 0x59, 0x34, 0x35,
-    0x36, 0x20, 0x20, 0xe0, 0xb2, 0xad, 0x1e, 0xe0, 0x55, 0xbb, 0xff, 0x40, 0x1f, 0x00, 0x00, 0xdc,
-    0x00, 0xb4, 0x00, 0x01, 0xcc, 0xc9,
+    0x54, 0x52, 0x43, 0x4b, 0x23, 0xa1, 0x4c, 0x45, 0x5a, 0x59, 0x34, 0x35, 0x36, 0x20, 0x20, 0xe0,
+    0xb2, 0xad, 0x1e, 0xe0, 0x55, 0xbb, 0xff, 0x40, 0x1f, 0x00, 0x00, 0xdc, 0x00, 0xb4, 0x00, 0x01,
+    0xaa, 0x98,
+];
+
+const PUBLISHED_GENERAL: [u8; FRAME_LEN] = [
+    0x54, 0x52, 0x43, 0x4b, 0x1d, 0x62, 0x40, 0x42, 0x41, 0x57, 0x31, 0x32, 0x33, 0x20, 0x20, 0xf5,
+    0xd0, 0x25, 0x1f, 0x7e, 0x0c, 0x56, 0x02, 0x70, 0x94, 0x00, 0x00, 0xc2, 0x01, 0x0f, 0x01, 0x01,
+    0x41, 0xff,
 ];
 
 fn decoded_aircraft() -> Aircraft {
@@ -71,7 +77,7 @@ fn pack_and_unpack_are_inverses() {
     }
     assert!(unpack_frame(&PUBLISHED[..FRAME_LEN - 1]).is_none());
     let mut bad_crc = PUBLISHED;
-    bad_crc[36] ^= 0xFF;
+    bad_crc[FRAME_LEN - 2] ^= 0xFF;
     assert!(unpack_frame(&bad_crc).is_none());
     let mut bad_magic = PUBLISHED;
     bad_magic[0] = b'X';
@@ -87,6 +93,10 @@ fn check_positions_match_published_frames() {
     assert_eq!(got[0], SECOND);
     assert_eq!(got[1], PUBLISHED);
     assert_eq!(got[2], CHECK_EMERGENCY);
+    let mut general = check_positions()[1];
+    general.aircraft.emergency = Some(EmergencyKind::General);
+    assert_eq!(pack_frame(&general), PUBLISHED_GENERAL);
+    assert_eq!(unpack_frame(&PUBLISHED_GENERAL), Some(general));
 }
 
 struct StopSender(std::process::Child);
@@ -405,7 +415,11 @@ impl Pty {
 }
 
 fn frame_icao(frame: &[u8]) -> u32 {
-    u32::from_le_bytes([frame[8], frame[9], frame[10], 0])
+    u32::from_le_bytes([frame[4], frame[5], frame[6], 0])
+}
+
+fn frame_is_general(frame: &[u8]) -> bool {
+    unpack_frame(frame).is_some_and(|fix| fix.aircraft.emergency == Some(EmergencyKind::General))
 }
 
 fn fill_until_blocked(fd: i32) -> usize {
@@ -555,7 +569,7 @@ fn a_full_tty_drops_ordinary_hex_and_keeps_7700() {
     body.push('\n');
     sock.write_all(body.as_bytes()).expect("lines");
     let frames = wait_frames_until(&mut pty.master, Duration::from_secs(5), |frames| {
-        frames.iter().any(|frame| frame[35] == 1)
+        frames.iter().any(|frame| frame_is_general(frame))
     });
     let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
     let ordinary = icaos
@@ -568,7 +582,7 @@ fn a_full_tty_drops_ordinary_hex_and_keeps_7700() {
     assert!(
         frames
             .iter()
-            .any(|frame| frame_icao(frame) == ICAO_40058B && frame[35] == 1),
+            .any(|frame| frame_icao(frame) == ICAO_40058B && frame_is_general(frame)),
         "{icaos:?}"
     );
     assert!(sender.0.try_wait().unwrap().is_none());
@@ -601,14 +615,14 @@ fn a_full_tty_of_emergencies_drops_ordinary() {
         frames.len() >= QUEUE
             && frames
                 .iter()
-                .any(|frame| frame_icao(frame) == ICAO_40058B && frame[35] == 1)
+                .any(|frame| frame_icao(frame) == ICAO_40058B && frame_is_general(frame))
     });
     let icaos: Vec<u32> = frames.iter().map(|frame| frame_icao(frame)).collect();
     assert!(!icaos.contains(&ICAO_4D224F), "{icaos:?}");
     assert!(
         frames
             .iter()
-            .any(|frame| frame_icao(frame) == ICAO_40058B && frame[35] == 1),
+            .any(|frame| frame_icao(frame) == ICAO_40058B && frame_is_general(frame)),
         "{icaos:?}"
     );
     assert!(sender.0.try_wait().unwrap().is_none());

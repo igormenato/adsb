@@ -2,7 +2,6 @@ use trck::{Aircraft, Callsign, EmergencyKind, FRAME_LEN, Fix, Icao, Queue, pack_
 
 fn position(addr: u32, emergency: Option<EmergencyKind>) -> Fix {
     Fix {
-        unix_s: 1_700_000_000,
         aircraft: Aircraft {
             icao: Icao::from_u24(addr).expect("icao"),
             callsign: Callsign::pad(""),

@@ -9,7 +9,7 @@ use crc::{CRC_16_IBM_3740, Crc};
 const CCITT_FALSE: Crc<u16> = Crc::<u16>::new(&CRC_16_IBM_3740);
 
 pub const TRACK_MAGIC: &[u8; 4] = b"TRCK";
-pub const FRAME_LEN: usize = 38;
+pub const FRAME_LEN: usize = 34;
 pub const CALLSIGN_LEN: usize = 8;
 pub const SPEED_UNKNOWN: u16 = 0xFFFF;
 pub const TRACK_UNKNOWN: u16 = 0xFFFF;
@@ -135,10 +135,9 @@ pub struct Aircraft {
     pub emergency: Option<EmergencyKind>,
 }
 
-/// One accepted position. `unix_s` is the message time, truncated to seconds.
+/// One accepted airborne position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fix {
-    pub unix_s: u32,
     pub aircraft: Aircraft,
 }
 
@@ -152,30 +151,27 @@ pub fn pack_frame(fix: &Fix) -> [u8; FRAME_LEN] {
     let aircraft = &fix.aircraft;
     let mut raw = [0u8; FRAME_LEN];
     raw[0..4].copy_from_slice(TRACK_MAGIC);
-    raw[4..8].copy_from_slice(&fix.unix_s.to_le_bytes());
-    raw[8..11].copy_from_slice(&aircraft.icao.to_le_bytes());
-    raw[11..19].copy_from_slice(&aircraft.callsign.as_bytes());
-    raw[19..23].copy_from_slice(&aircraft.latitude_e7.to_le_bytes());
-    raw[23..27].copy_from_slice(&aircraft.longitude_e7.to_le_bytes());
-    raw[27..31].copy_from_slice(&aircraft.altitude_ft.unwrap_or(ALT_UNKNOWN).to_le_bytes());
-    raw[31..33].copy_from_slice(
+    raw[4..7].copy_from_slice(&aircraft.icao.to_le_bytes());
+    raw[7..15].copy_from_slice(&aircraft.callsign.as_bytes());
+    raw[15..19].copy_from_slice(&aircraft.latitude_e7.to_le_bytes());
+    raw[19..23].copy_from_slice(&aircraft.longitude_e7.to_le_bytes());
+    raw[23..27].copy_from_slice(&aircraft.altitude_ft.unwrap_or(ALT_UNKNOWN).to_le_bytes());
+    raw[27..29].copy_from_slice(
         &aircraft
             .ground_speed_kt
             .unwrap_or(SPEED_UNKNOWN)
             .to_le_bytes(),
     );
-    raw[33..35].copy_from_slice(&aircraft.track_deg.unwrap_or(TRACK_UNKNOWN).to_le_bytes());
-    raw[35] = aircraft.emergency.map(EmergencyKind::code).unwrap_or(0);
+    raw[29..31].copy_from_slice(&aircraft.track_deg.unwrap_or(TRACK_UNKNOWN).to_le_bytes());
+    raw[31] = aircraft.emergency.map(EmergencyKind::code).unwrap_or(0);
     let crc = crc16_ccitt_false(&raw[..BODY_LEN]);
     raw[BODY_LEN..FRAME_LEN].copy_from_slice(&crc.to_le_bytes());
     raw
 }
 
 pub fn check_positions() -> [Fix; 3] {
-    const UNIX_S: u32 = 1_700_000_000;
     [
         Fix {
-            unix_s: UNIX_S,
             aircraft: Aircraft {
                 icao: icao(0x400ABC),
                 callsign: Callsign::pad("SIM0001"),
@@ -188,7 +184,6 @@ pub fn check_positions() -> [Fix; 3] {
             },
         },
         Fix {
-            unix_s: UNIX_S,
             aircraft: Aircraft {
                 icao: icao(0x40621D),
                 callsign: Callsign::pad("BAW123"),
@@ -201,7 +196,6 @@ pub fn check_positions() -> [Fix; 3] {
             },
         },
         Fix {
-            unix_s: UNIX_S,
             aircraft: Aircraft {
                 icao: icao(0x4CA123),
                 callsign: Callsign::pad("EZY456"),
@@ -225,21 +219,19 @@ pub fn unpack_frame(bytes: &[u8]) -> Option<Fix> {
     if expect != got {
         return None;
     }
-    let unix_s = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-    let altitude_ft = i32::from_le_bytes(bytes[27..31].try_into().ok()?);
-    let ground_speed_kt = u16::from_le_bytes(bytes[31..33].try_into().ok()?);
-    let track_deg = u16::from_le_bytes(bytes[33..35].try_into().ok()?);
+    let altitude_ft = i32::from_le_bytes(bytes[23..27].try_into().ok()?);
+    let ground_speed_kt = u16::from_le_bytes(bytes[27..29].try_into().ok()?);
+    let track_deg = u16::from_le_bytes(bytes[29..31].try_into().ok()?);
     Some(Fix {
-        unix_s,
         aircraft: Aircraft {
-            icao: Icao::from_le_bytes(bytes[8..11].try_into().ok()?),
-            callsign: Callsign::from_bytes(bytes[11..19].try_into().ok()?),
-            latitude_e7: i32::from_le_bytes(bytes[19..23].try_into().ok()?),
-            longitude_e7: i32::from_le_bytes(bytes[23..27].try_into().ok()?),
+            icao: Icao::from_le_bytes(bytes[4..7].try_into().ok()?),
+            callsign: Callsign::from_bytes(bytes[7..15].try_into().ok()?),
+            latitude_e7: i32::from_le_bytes(bytes[15..19].try_into().ok()?),
+            longitude_e7: i32::from_le_bytes(bytes[19..23].try_into().ok()?),
             altitude_ft: (altitude_ft != ALT_UNKNOWN).then_some(altitude_ft),
             ground_speed_kt: (ground_speed_kt != SPEED_UNKNOWN).then_some(ground_speed_kt),
             track_deg: (track_deg != TRACK_UNKNOWN).then_some(track_deg),
-            emergency: match bytes[35] {
+            emergency: match bytes[31] {
                 0 => None,
                 code => Some(EmergencyKind::from_code(code)?),
             },

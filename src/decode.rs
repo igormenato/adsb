@@ -79,7 +79,7 @@ impl Tracker {
                     &mut self.reference,
                     &no_update,
                 );
-                (icao24, self.apply_adsb(timestamp, icao24, &adsb.message))
+                (icao24, self.apply_adsb(icao24, &adsb.message))
             }
             DF::SurveillanceIdentityReply { id, ap, .. } => {
                 let icao = ICAO::from(*ap);
@@ -133,7 +133,7 @@ impl Tracker {
             .map(|(icao, _)| *icao)
     }
 
-    fn apply_adsb(&mut self, timestamp: f64, icao24: ICAO, me: &ME) -> Option<Fix> {
+    fn apply_adsb(&mut self, icao24: ICAO, me: &ME) -> Option<Fix> {
         match me {
             ME::BDS08 { inner, .. } => {
                 if !inner.callsign.contains('#') {
@@ -171,11 +171,9 @@ impl Tracker {
                 if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
                     return None;
                 }
-                let unix_s = unix_seconds(timestamp)?;
                 let icao = Icao::from_u24(icao24.0)?;
                 let ident = self.ident_mut(icao24).clone();
                 Some(Fix {
-                    unix_s,
                     aircraft: Aircraft {
                         icao,
                         callsign: ident.callsign,
@@ -209,13 +207,6 @@ impl Tracker {
             ident.emergency = Some(kind);
         }
     }
-}
-
-fn unix_seconds(timestamp: f64) -> Option<u32> {
-    if !timestamp.is_finite() || timestamp < 0.0 || timestamp > f64::from(u32::MAX) {
-        return None;
-    }
-    Some(timestamp.trunc() as u32)
 }
 
 fn knots(value: f64) -> Option<u16> {
@@ -314,7 +305,6 @@ mod tests {
         let mut tracker = Tracker::new();
         assert!(tracker.ingest(1.0, &frame(EVEN)).is_none());
         let fix = tracker.ingest(2.0, &frame(ODD)).expect("position");
-        assert_eq!(fix.unix_s, 2);
         assert_eq!(fix.aircraft.icao.to_u24(), 0x0040_058B);
         assert!((fix.aircraft.latitude_e7 as f64 / 1e7 - 49.81755).abs() < 0.001);
         assert!((fix.aircraft.longitude_e7 as f64 / 1e7 - 6.08442).abs() < 0.001);
@@ -355,7 +345,7 @@ mod tests {
         assert!(tracker.ingest(2.0, &frame(EVEN)).is_none());
         let fix = tracker.ingest(3.0, &frame(ODD)).expect("position");
         assert_eq!(fix.aircraft.emergency, Some(EmergencyKind::General));
-        assert_eq!(pack_frame(&fix)[35], 1);
+        assert_eq!(pack_frame(&fix)[31], 1);
     }
 
     #[test]
@@ -365,7 +355,7 @@ mod tests {
         assert!(tracker.ingest(2.0, &frame(EVEN)).is_none());
         let fix = tracker.ingest(3.0, &frame(ODD)).expect("position");
         assert_eq!(fix.aircraft.track_deg, Some(0));
-        assert_eq!(&pack_frame(&fix)[33..35], &[0, 0]);
+        assert_eq!(&pack_frame(&fix)[29..31], &[0, 0]);
     }
 
     #[test]

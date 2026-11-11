@@ -172,7 +172,7 @@ fn log_drop(fix: &Fix) {
 }
 
 fn log_fix(fix: &Fix) {
-    eprintln!("fix t={} icao={:06x}", fix.unix_s, fix.aircraft.icao);
+    eprintln!("fix icao={:06x}", fix.aircraft.icao);
 }
 
 fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
