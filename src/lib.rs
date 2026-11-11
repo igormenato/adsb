@@ -19,4 +19,4 @@ pub use lines::Lines;
 #[doc(inline)]
 pub use queue::Queue;
 #[doc(inline)]
-pub use table::{DEFAULT_PATH, ROTATE_AT, Table};
+pub use table::{DEFAULT_PATH, Table};

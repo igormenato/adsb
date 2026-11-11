@@ -43,7 +43,7 @@ That opens RTL-SDR device 0 at 1090 MHz and writes frames to `/dev/serial0`.
 
 `--check` sends known frames instead of reading the radio, to check the UART. It repeats those frames every second.
 
-`--table PATH` appends one CSV row for each position queued for UART. Default is `aircraft.csv` in the working directory. The file rotates onto `PATH.1` at 1 MiB. Timestamp is the Pi clock, not contest reception.
+`--table PATH` appends one CSV row for each position queued for UART. Default is `aircraft.csv` in the working directory. The file stays append-only for the process. Timestamp is the Pi clock, not contest reception.
 
 `doctor` is a host probe. It does not open the radio or the UART.
 

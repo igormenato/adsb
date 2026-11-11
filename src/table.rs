@@ -1,8 +1,8 @@
 //! Local CSV of each position queued for UART.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::frame::{Callsign, Fix};
@@ -10,33 +10,18 @@ use crate::frame::{Callsign, Fix};
 /// Default file in the process working directory.
 pub const DEFAULT_PATH: &str = "aircraft.csv";
 
-/// Live file plus `{path}.1` stay at most this large.
-pub const ROTATE_AT: u64 = 1_048_576;
-
 const HEADER: &str = "icao,callsign,lat,lon,altitude_ft,ground_speed_kt,track_deg,timestamp\n";
 
-/// Append-only aircraft table. Rotates onto `{path}.1` when a row would pass the cap.
+/// Append-only aircraft table. One file for the whole process.
 #[derive(Debug)]
 pub struct Table {
-    path: PathBuf,
-    cap: u64,
     file: File,
-    len: u64,
 }
 
 impl Table {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        Self::with_cap(path, ROTATE_AT)
-    }
-
-    pub fn with_cap(path: impl AsRef<Path>, cap: u64) -> io::Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let (file, len) = open_append(&path)?;
         Ok(Self {
-            path,
-            cap,
-            file,
-            len,
+            file: open_append(path.as_ref())?,
         })
     }
 
@@ -47,37 +32,19 @@ impl Table {
 
     fn append_at(&mut self, fix: &Fix, now: SystemTime) -> io::Result<()> {
         let row = format_row(fix, now);
-        let row_len = row.len() as u64;
-        if self.len > 0 && self.len.saturating_add(row_len) > self.cap {
-            self.rotate()?;
-        }
         self.file.write_all(row.as_bytes())?;
         self.file.flush()?;
-        self.len += row_len;
-        Ok(())
-    }
-
-    fn rotate(&mut self) -> io::Result<()> {
-        let mut rotated = self.path.as_os_str().to_os_string();
-        rotated.push(".1");
-        fs::rename(&self.path, &rotated)?;
-        let (file, len) = open_append(&self.path)?;
-        self.file = file;
-        self.len = len;
         Ok(())
     }
 }
 
-fn open_append(path: &Path) -> io::Result<(File, u64)> {
+fn open_append(path: &Path) -> io::Result<File> {
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    let len = file.metadata()?.len();
-    if len == 0 {
+    if file.metadata()?.len() == 0 {
         file.write_all(HEADER.as_bytes())?;
         file.flush()?;
-        Ok((file, HEADER.len() as u64))
-    } else {
-        Ok((file, len))
     }
+    Ok(file)
 }
 
 fn format_row(fix: &Fix, now: SystemTime) -> String {
@@ -114,6 +81,9 @@ fn display_opt<T: ToString>(value: Option<T>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
     use crate::frame::{Aircraft, Icao};
 
     fn sample(unix_s: u32) -> Fix {
@@ -162,23 +132,17 @@ mod tests {
     }
 
     #[test]
-    fn append_rotates_before_the_file_grows_past_the_cap() {
-        let path = scratch("rotate");
-        let mut table = Table::with_cap(&path, 200).expect("open");
+    fn append_keeps_every_row_in_one_file() {
+        let path = scratch("keep");
+        let mut table = Table::open(&path).expect("open");
         let fix = sample(1);
         table.append_at(&fix, UNIX_EPOCH).expect("first");
         table.append_at(&fix, UNIX_EPOCH).expect("second");
         table.append_at(&fix, UNIX_EPOCH).expect("third");
         let live = fs::read_to_string(&path).expect("live");
-        let rotated = fs::read_to_string(path.with_file_name("aircraft.csv.1")).expect("rotated");
         assert!(live.starts_with(HEADER), "{live}");
-        assert!(rotated.starts_with(HEADER), "{rotated}");
-        assert!(
-            (live.len() as u64) <= 200 + 80,
-            "live grew without bound: {} bytes",
-            live.len()
-        );
-        assert!(rotated.lines().count() >= 2, "rotated lost rows: {rotated}");
+        assert_eq!(live.lines().filter(|line| !line.is_empty()).count(), 4);
+        assert!(!path.with_file_name("aircraft.csv.1").exists());
         let _ = fs::remove_dir_all(path.parent().expect("parent"));
     }
 }
