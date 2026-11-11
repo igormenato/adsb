@@ -1,10 +1,12 @@
-//! Pi sender: one readsb position at a time onto the UART.
+//! Pi sender: one decoded ADS-B position at a time onto the UART.
 
+mod decode;
 mod frame;
 mod lines;
 mod queue;
-mod snapshot;
 
+#[doc(inline)]
+pub use decode::{Tracker, parse_hex_frame};
 #[doc(inline)]
 pub use frame::{
     ALT_UNKNOWN, Aircraft, CALLSIGN_LEN, Callsign, EmergencyKind, FRAME_LEN, Fix, Icao,
@@ -15,5 +17,3 @@ pub use frame::{
 pub use lines::Lines;
 #[doc(inline)]
 pub use queue::Queue;
-#[doc(inline)]
-pub use snapshot::fix_from_json_line;

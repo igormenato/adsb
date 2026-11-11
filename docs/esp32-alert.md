@@ -1,6 +1,6 @@
 # ESP32 satellite telemetry
 
-The Raspberry Pi writes one 38-byte UART frame for each position readsb accepts on `--net-json-port`. One aircraft per frame. Emergency is one byte. The ESP32 copies those fields into the satellite telemetry. It does not overlay a struct on the UART bytes, forward the raw frame as the radio payload, or decode 1090 MHz ADS-B.
+The Raspberry Pi writes one 38-byte UART frame for each airborne position it decodes. One aircraft per frame. Emergency is one byte. The ESP32 copies those fields into the satellite telemetry. It does not overlay a struct on the UART bytes, forward the raw frame as the radio payload, or decode 1090 MHz ADS-B.
 
 `trck --check` writes the same frames as the live sender.
 
@@ -31,9 +31,9 @@ No bytes means the Pi sent nothing. There is no count of 0 and no heartbeat. A q
 | 35 | u8 | emergency |
 | 36 | u16 | CRC over bytes 0..35 |
 
-Callsign is readsb `flight`. Shorter text is padded with spaces on the right. Longer text is cut to eight. Missing `flight` is eight spaces. The position is still sent.
+Callsign is the ADS-B identification (BDS 0,8) last seen for that ICAO. Shorter text is padded with spaces on the right. Longer text is cut to eight. Missing identification is eight spaces. The position is still sent.
 
-Unknown altitude is the minimum signed 32-bit integer. readsb `alt_baro` of `ground` is not 0. The frame uses `alt_geom` when that is present, otherwise unknown. Unknown ground speed is 65535. Unknown track is 65535. Track is whole degrees: `271.4` is `271`. `360` wraps to `0`.
+Unknown altitude is the minimum signed 32-bit integer. Unknown ground speed is 65535. Unknown track is 65535. Ground speed and track are the last airborne velocity (BDS 0,9) for that ICAO. Track is whole degrees: `182.88` is `183`. `360` wraps to `0`.
 
 | Code | Name |
 | --- | --- |
@@ -46,7 +46,7 @@ Unknown altitude is the minimum signed 32-bit integer. readsb `alt_baro` of `gro
 | 6 | downed |
 | 7 | reserved |
 
-A known readsb emergency name is the byte that is sent. Squawk 7700, 7600, and 7500 become `general`, `nordo`, and `unlawful` when the name is missing, empty, `none`, or any word outside the eight in the table. `reserved` with one of those squawks uses the squawk. `reserved` with no emergency squawk is 7.
+Emergency is the ADS-B status (BDS 6,1) last seen for that ICAO. Squawk 7700, 7600, and 7500 become `general`, `nordo`, and `unlawful` when the status is none or reserved. `reserved` with no emergency squawk is 7.
 
 One position, callsign `BAW123`, no emergency, Unix time `1700000000`:
 

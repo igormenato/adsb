@@ -1,6 +1,6 @@
 # trck
 
-`trck` writes one UART frame for each position readsb accepts on `--net-json-port`.
+`trck` writes one UART frame for each airborne position decoded from 1090 MHz ADS-B.
 
 ## Build
 
@@ -10,7 +10,7 @@ Run the host checks in this order.
 2. `cargo clippy --locked --all-targets -- -D warnings`
 3. `cargo test --locked`
 
-Build the Pi binaries.
+Build the Pi binaries. Those targets compile C (zstd, from rs1090). CI uses Zig as `zig cc`.
 
 ```
 cargo build --release --locked --target arm-unknown-linux-musleabihf
@@ -24,21 +24,22 @@ Copy `target/<triple>/release/trck`. `arm-unknown-linux-musleabihf` is the Zero 
 Disable the serial login shell and leave the UART enabled. The console shares the port if you do not.
 
 ```
-readsb --net-json-port 30005
-./trck --net-json 127.0.0.1:30005
+./trck
 ```
 
-`30005` is an example. Pass the same host and port readsb is listening on.
+That opens RTL-SDR device 0 at 1090 MHz and writes frames to `/dev/serial0`.
 
 ## Flags
 
-`--net-json HOST:PORT` is the live input. Required unless `--check`.
+`--rtlsdr N` selects the dongle. Default is `0`.
+
+`--hex HOST:PORT` reads newline hex Mode S frames instead of the dongle.
 
 `--uart` defaults to `/dev/serial0`. Pass `--uart -` to write frames to stdout.
 
 `--baud` defaults to 115200.
 
-`--check` sends known frames instead of reading readsb, to check the UART. It repeats those frames every second.
+`--check` sends known frames instead of reading the radio, to check the UART. It repeats those frames every second.
 
 ## Frame
 

@@ -116,6 +116,12 @@ impl Callsign {
     }
 }
 
+impl Default for Callsign {
+    fn default() -> Self {
+        Self([b' '; CALLSIGN_LEN])
+    }
+}
+
 /// One aircraft that already has a position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Aircraft {
@@ -129,7 +135,7 @@ pub struct Aircraft {
     pub emergency: Option<EmergencyKind>,
 }
 
-/// One accepted position. `unix_s` is the line's `now`, truncated to seconds.
+/// One accepted position. `unix_s` is the message time, truncated to seconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fix {
     pub unix_s: u32,

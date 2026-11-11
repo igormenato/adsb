@@ -1,4 +1,4 @@
-//! Reassembles one readsb socket into JSON lines.
+//! Reassembles one socket into lines.
 //!
 //! Append every read from one socket burst, then drain once.
 //! A finished line is returned even when it is longer than the cap.

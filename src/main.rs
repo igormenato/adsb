@@ -1,4 +1,4 @@
-//! Read readsb `--net-json-port` and write one UART frame per position.
+//! Decode 1090 MHz ADS-B and write one UART frame per airborne position.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -6,22 +6,22 @@ use std::os::fd::AsRawFd;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{EmergencyKind, Fix, Lines, Queue, check_positions, fix_from_json_line};
+use trck::{EmergencyKind, Fix, Lines, Queue, Tracker, check_positions, parse_hex_frame};
 
+mod radio;
 mod sys;
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
 const CHECK_PAUSE: Duration = Duration::from_secs(1);
-/// Quiet-link upper bound so Ctrl-C is noticed without a UART or socket event.
 const POLL_SLICE: Duration = Duration::from_millis(200);
-/// Connect wait slice so Ctrl-C is noticed during `CONNECT_TIMEOUT`.
 const CONNECT_SLICE: Duration = Duration::from_millis(50);
 const QUEUE_CAP: usize = 64;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -30,27 +30,24 @@ const RETRY_MAX: Duration = Duration::from_secs(30);
 const KEEPALIVE_IDLE_S: u32 = 30;
 const KEEPALIVE_INTERVAL_S: u32 = 10;
 const KEEPALIVE_PROBES: u32 = 3;
-/// readsb builds one JSON line in an 8192-byte buffer and drops what does not fit.
 const MAX_LINE: usize = 8192;
 
 #[derive(Parser, Debug)]
-#[command(about = "Send each readsb position to a UART as it arrives.")]
+#[command(about = "Send each decoded ADS-B position to a UART as it arrives.")]
 struct Args {
-    /// Host and port of readsb `--net-json-port`. Required unless `--check`.
-    #[arg(
-        long,
-        required_unless_present = "check",
-        conflicts_with = "check",
-        value_name = "HOST:PORT"
-    )]
-    net_json: Option<String>,
+    /// RTL-SDR device index. Used when --check and --hex are off.
+    #[arg(long, default_value_t = 0)]
+    rtlsdr: usize,
+    /// Newline hex Mode S frames. For tests and a Beast-less feed.
+    #[arg(long, conflicts_with = "check", value_name = "HOST:PORT")]
+    hex: Option<String>,
     /// UART device, or - for stdout.
     #[arg(long, default_value = DEFAULT_UART)]
     uart: String,
     #[arg(long, default_value_t = DEFAULT_BAUD)]
     baud: u32,
-    /// Send the known frames instead of reading readsb, to check the UART.
-    #[arg(long, conflicts_with = "net_json")]
+    /// Send the known frames instead of reading the radio, to check the UART.
+    #[arg(long)]
     check: bool,
 }
 
@@ -129,6 +126,10 @@ fn log_drop(fix: &Fix) {
     );
 }
 
+fn log_fix(fix: &Fix) {
+    eprintln!("fix t={} icao={:06x}", fix.unix_s, fix.aircraft.icao);
+}
+
 fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
     match sink {
         Sink::Uart(port) => sys::write(port.as_raw_fd(), bytes),
@@ -141,9 +142,10 @@ fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
     }
 }
 
-struct JsonLines {
+struct HexLines {
     reader: TcpStream,
     buf: Lines,
+    tracker: Tracker,
 }
 
 enum Pull {
@@ -151,8 +153,7 @@ enum Pull {
     Eof,
 }
 
-impl JsonLines {
-    /// Read what the kernel has. The socket is non-blocking, so this returns on `WouldBlock`.
+impl HexLines {
     fn pull(&mut self) -> Result<Pull, io::Error> {
         let mut tmp = [0u8; 4096];
         loop {
@@ -202,13 +203,20 @@ fn open_output(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, E
     open_uart(path, baud, stop)
 }
 
-fn resolve_net_json(text: &str) -> Option<Vec<SocketAddr>> {
+fn resolve_addr(text: &str) -> Option<Vec<SocketAddr>> {
     let addrs: Vec<_> = text.to_socket_addrs().ok()?.collect();
     if addrs.is_empty() { None } else { Some(addrs) }
 }
 
 fn grow(delay: Duration) -> Duration {
     delay.saturating_mul(2).min(RETRY_MAX)
+}
+
+fn now_unix() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 fn main() -> ExitCode {
@@ -230,25 +238,83 @@ fn main() -> ExitCode {
         return run_check(&mut writer, &stop);
     }
 
-    let Some(text) = args.net_json.as_deref() else {
-        eprintln!("pass --net-json HOST:PORT, or --check");
-        return ExitCode::from(1);
-    };
-    let Some(addrs) = resolve_net_json(text) else {
-        eprintln!("net-json {text}: expected host:port");
-        return ExitCode::from(1);
-    };
-    eprintln!("net-json={text} uart={} baud={}", args.uart, args.baud);
-    run_port(&addrs, text, &mut writer, &stop)
+    if let Some(text) = args.hex.as_deref() {
+        let Some(addrs) = resolve_addr(text) else {
+            eprintln!("hex {text}: expected host:port");
+            return ExitCode::from(1);
+        };
+        eprintln!("hex={text} uart={} baud={}", args.uart, args.baud);
+        return run_hex(&addrs, text, &mut writer, &stop);
+    }
+
+    eprintln!(
+        "rtlsdr={} uart={} baud={}",
+        args.rtlsdr, args.uart, args.baud
+    );
+    run_radio(args.rtlsdr, writer, stop)
+}
+
+fn run_radio(device: usize, writer: Writer, stop: Arc<AtomicBool>) -> ExitCode {
+    let (tx, rx) = mpsc::sync_channel(QUEUE_CAP);
+    let radio_stop = Arc::clone(&stop);
+    let radio = thread::spawn(move || {
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt.block_on(radio::run_rtlsdr(device, tx, &radio_stop)),
+            Err(err) => eprintln!("rtlsdr runtime: {err}"),
+        }
+    });
+    let code = run_writer(writer, rx, &stop);
+    stop.store(true, Ordering::Relaxed);
+    let _ = radio.join();
+    code
+}
+
+fn run_writer(mut writer: Writer, rx: Receiver<Fix>, stop: &AtomicBool) -> ExitCode {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            eprintln!("stopped");
+            return ExitCode::SUCCESS;
+        }
+        match rx.recv_timeout(POLL_SLICE) {
+            Ok(fix) => {
+                log_fix(&fix);
+                writer.enqueue(fix);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return match writer.write_some() {
+                    Ok(()) | Err(ChunkError::Stopped) => {
+                        eprintln!("stopped");
+                        ExitCode::SUCCESS
+                    }
+                    Err(ChunkError::Failed(err)) => write_exit(ChunkError::Failed(err)),
+                };
+            }
+        }
+        if writer.has_pending()
+            && let Err(err) = writer.write_some()
+        {
+            return write_exit(err);
+        }
+        if writer.has_pending()
+            && let Some(fd) = writer.uart_fd()
+        {
+            let mut poll_fd = sys::pollfd(fd, libc::POLLOUT);
+            if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE) {
+                eprintln!("uart poll: {err}");
+                return ExitCode::from(1);
+            }
+        }
+    }
 }
 
 fn run_check(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     while !stop.load(Ordering::Relaxed) {
         for position in check_positions() {
-            eprintln!(
-                "fix t={} icao={:06x}",
-                position.unix_s, position.aircraft.icao
-            );
+            log_fix(&position);
             writer.enqueue(position);
         }
         let deadline = Instant::now() + CHECK_PAUSE;
@@ -279,12 +345,12 @@ fn run_check(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_port(addrs: &[SocketAddr], text: &str, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
+fn run_hex(addrs: &[SocketAddr], text: &str, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     let mut delay = RETRY_MIN;
     while !stop.load(Ordering::Relaxed) {
         match dial_first(addrs, stop, text) {
             Ok(stream) => {
-                eprintln!("net-json {text} connected");
+                eprintln!("hex {text} connected");
                 match pump(stream, writer, stop, text) {
                     Pump::Stopped => return write_exit(ChunkError::Stopped),
                     Pump::Uart(err) => return write_exit(ChunkError::Failed(err)),
@@ -310,10 +376,9 @@ enum DialError {
     Failed(io::Error),
 }
 
-/// Try each resolved address. A refused `::1` must not hide a later `127.0.0.1`.
 fn dial_first(addrs: &[SocketAddr], stop: &AtomicBool, text: &str) -> Result<TcpStream, DialError> {
     if addrs.is_empty() {
-        eprintln!("net-json {text}: expected host:port");
+        eprintln!("hex {text}: expected host:port");
         return Err(DialError::Failed(io::Error::new(
             io::ErrorKind::InvalidInput,
             "expected host:port",
@@ -328,7 +393,7 @@ fn dial_first(addrs: &[SocketAddr], stop: &AtomicBool, text: &str) -> Result<Tcp
             Ok(stream) => return Ok(stream),
             Err(DialError::Stopped) => return Err(DialError::Stopped),
             Err(DialError::Failed(err)) => {
-                eprintln!("net-json {text}: {err}");
+                eprintln!("hex {text}: {err}");
                 last = Some(err);
             }
         }
@@ -367,7 +432,6 @@ fn pending_connect(err: &io::Error) -> bool {
     )
 }
 
-/// Poll until the connect finishes so Ctrl-C is noticed during the wait.
 fn wait_connected(fd: i32, stop: &AtomicBool, timeout: Duration) -> Result<(), DialError> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -401,7 +465,6 @@ fn wait_connected(fd: i32, stop: &AtomicBool, timeout: Duration) -> Result<(), D
     }
 }
 
-/// These probes turn a peer that dies without a FIN into a read error, so the caller reconnects.
 fn enable_keepalive(stream: &TcpStream) -> io::Result<()> {
     let fd = stream.as_raw_fd();
     sys::setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1)?;
@@ -417,12 +480,13 @@ fn enable_keepalive(stream: &TcpStream) -> io::Result<()> {
 
 fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -> Pump {
     if let Err(err) = enable_keepalive(&stream) {
-        eprintln!("net-json {text} keepalive: {err}");
+        eprintln!("hex {text} keepalive: {err}");
         return Pump::Disconnected;
     }
-    let mut lines = JsonLines {
+    let mut lines = HexLines {
         reader: stream,
         buf: Lines::new(MAX_LINE),
+        tracker: Tracker::new(),
     };
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -440,7 +504,7 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
             nfds = 2;
         }
         if let Err(err) = sys::poll(&mut fds[..nfds], POLL_SLICE) {
-            eprintln!("net-json {text}: {err}");
+            eprintln!("hex {text}: {err}");
             return end_socket(writer);
         }
         if stop.load(Ordering::Relaxed) {
@@ -451,21 +515,21 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
         if socket_revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
             match lines.pull() {
                 Ok(Pull::Eof) => {
-                    enqueue_ready(&mut lines, writer);
-                    eprintln!("net-json {text} disconnected");
+                    enqueue_hex(&mut lines, writer);
+                    eprintln!("hex {text} disconnected");
                     return end_socket(writer);
                 }
                 Ok(Pull::Bytes) => {
-                    enqueue_ready(&mut lines, writer);
+                    enqueue_hex(&mut lines, writer);
                     fresh = true;
                     if socket_revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                        eprintln!("net-json {text} disconnected");
+                        eprintln!("hex {text} disconnected");
                         return end_socket(writer);
                     }
                 }
                 Err(err) => {
-                    eprintln!("net-json {text}: {err}");
-                    enqueue_ready(&mut lines, writer);
+                    eprintln!("hex {text}: {err}");
+                    enqueue_hex(&mut lines, writer);
                     return end_socket(writer);
                 }
             }
@@ -484,13 +548,17 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
     }
 }
 
-fn enqueue_ready(lines: &mut JsonLines, writer: &mut Writer) {
+fn enqueue_hex(lines: &mut HexLines, writer: &mut Writer) {
+    let timestamp = now_unix();
     lines.buf.drain(|line| {
-        let Some(fix) = fix_from_json_line(line) else {
+        let Some(frame) = parse_hex_frame(line) else {
             return;
         };
+        let Some(fix) = lines.tracker.ingest(timestamp, &frame) else {
+            return;
+        };
+        log_fix(&fix);
         writer.enqueue(fix);
-        eprintln!("fix t={} icao={:06x}", fix.unix_s, fix.aircraft.icao);
     });
 }
 
