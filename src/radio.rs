@@ -1,7 +1,7 @@
 //! RTL-SDR at 1090 MHz, demodulated by rs1090.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use desperado::IqAsyncSource;
@@ -70,8 +70,10 @@ async fn demodulate(source: &mut IqAsyncSource, tx: &SyncSender<Fix>, stop: &Ato
             let Some(fix) = tracker.ingest(timestamp, &data.msg) else {
                 continue;
             };
-            if tx.send(fix).is_err() {
-                return;
+            match tx.try_send(fix) {
+                Ok(()) => {}
+                Err(TrySendError::Full(dropped)) => super::log_drop(&dropped),
+                Err(TrySendError::Disconnected(_)) => return,
             }
         }
     }
