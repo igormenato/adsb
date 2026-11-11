@@ -14,7 +14,7 @@ The Pi binaries:
 
 `cargo build --release --locked --target arm-unknown-linux-musleabihf`
 
-`cargo build --release --locked --target aarch64-unknown-linux-gnu`
+`cargo build --release --locked --target aarch64-unknown-linux-musl`
 
 Copy `target/<triple>/release/trck`. Release assets are `trck-arm` and `trck-aarch64`.
 

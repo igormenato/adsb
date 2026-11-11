@@ -15,10 +15,14 @@ fi
 
 printf '%s\n' '#!/bin/sh' "exec \"$zig_cc\" arm-linux-musleabihf \"\$@\"" >"$bindir/arm-linux-musleabihf-gcc"
 printf '%s\n' '#!/bin/sh' "exec \"$zigdir/zig\" ar \"\$@\"" >"$bindir/arm-linux-musleabihf-ar"
+printf '%s\n' '#!/bin/sh' "exec \"$zig_cc\" aarch64-linux-musl \"\$@\"" >"$bindir/aarch64-linux-musl-gcc"
+printf '%s\n' '#!/bin/sh' "exec \"$zigdir/zig\" ar \"\$@\"" >"$bindir/aarch64-linux-musl-ar"
 chmod +x \
   "$zig_cc" \
   "$bindir/arm-linux-musleabihf-gcc" \
-  "$bindir/arm-linux-musleabihf-ar"
+  "$bindir/arm-linux-musleabihf-ar" \
+  "$bindir/aarch64-linux-musl-gcc" \
+  "$bindir/aarch64-linux-musl-ar"
 
 if [ -n "${GITHUB_PATH:-}" ]; then
   echo "$zigdir" >>"$GITHUB_PATH"
