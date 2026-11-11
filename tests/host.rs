@@ -823,7 +823,6 @@ fn check_writes_csv_rows() {
     let expect = check_positions();
     for (row, fix) in rows.iter().zip(expect.iter()) {
         assert_csv_row(row, fix, before, after);
-        assert_ne!(row.split(',').nth(7).expect("ts"), fix.unix_s.to_string());
     }
     let got = wait_len(&buf, FRAME_LEN * 3, Duration::from_secs(2));
     assert!(got.len() >= FRAME_LEN * 3);
@@ -844,7 +843,6 @@ fn hex_writes_csv_when_a_position_solves() {
     let rows = wait_csv_rows(&table, 1, Duration::from_secs(2));
     let after = now_secs() + 1;
     let expect = Fix {
-        unix_s: 0,
         aircraft: decoded_aircraft(),
     };
     assert_csv_row(&rows[0], &expect, before, after);
@@ -866,7 +864,6 @@ fn csv_is_written_while_the_tty_is_full() {
     let rows = wait_csv_rows(&table, 1, Duration::from_secs(2));
     let after = now_secs() + 1;
     let expect = Fix {
-        unix_s: 0,
         aircraft: decoded_aircraft(),
     };
     assert_csv_row(&rows[0], &expect, before, after);

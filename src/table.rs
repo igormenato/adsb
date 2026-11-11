@@ -25,7 +25,7 @@ impl Table {
         })
     }
 
-    /// One row for `fix`. Timestamp is the Pi clock, not `fix.unix_s`.
+    /// One row for `fix`. Timestamp is the Pi clock, not contest reception.
     pub fn append(&mut self, fix: &Fix) -> io::Result<()> {
         self.append_at(fix, SystemTime::now())
     }
@@ -86,9 +86,8 @@ mod tests {
 
     use crate::frame::{Aircraft, Icao};
 
-    fn sample(unix_s: u32) -> Fix {
+    fn sample() -> Fix {
         Fix {
-            unix_s,
             aircraft: Aircraft {
                 icao: Icao::from_u24(0x400ABC).expect("icao"),
                 callsign: Callsign::pad("SIM0001"),
@@ -111,7 +110,7 @@ mod tests {
 
     #[test]
     fn row_uses_pi_clock_not_message_time() {
-        let fix = sample(1_700_000_000);
+        let fix = sample();
         let now = UNIX_EPOCH + std::time::Duration::from_secs(1_762_800_000);
         let row = format_row(&fix, now);
         assert_eq!(
@@ -122,7 +121,7 @@ mod tests {
 
     #[test]
     fn unknown_fields_stay_empty() {
-        let mut fix = sample(1);
+        let mut fix = sample();
         fix.aircraft.altitude_ft = None;
         fix.aircraft.ground_speed_kt = None;
         fix.aircraft.track_deg = None;
@@ -135,7 +134,7 @@ mod tests {
     fn append_keeps_every_row_in_one_file() {
         let path = scratch("keep");
         let mut table = Table::open(&path).expect("open");
-        let fix = sample(1);
+        let fix = sample();
         table.append_at(&fix, UNIX_EPOCH).expect("first");
         table.append_at(&fix, UNIX_EPOCH).expect("second");
         table.append_at(&fix, UNIX_EPOCH).expect("third");
