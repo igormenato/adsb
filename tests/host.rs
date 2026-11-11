@@ -1059,3 +1059,68 @@ fn stress_7700_is_on_the_wire() {
     );
     let _ = fs::remove_file(&table);
 }
+
+fn summary_count(stderr: &str, name: &str) -> u64 {
+    let line = stderr
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("stress messages="))
+        .unwrap_or(stderr);
+    let prefix = format!("{name}=");
+    for part in line.split_whitespace() {
+        if let Some(value) = part.strip_prefix(&prefix) {
+            return value
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} in {stderr}"));
+        }
+    }
+    panic!("missing {name}= in {stderr}");
+}
+
+#[test]
+fn stress_drops_on_a_full_tty_and_still_writes_csv() {
+    let table = table_arg();
+    let pty = Pty::open();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .args([
+            "stress",
+            "--uart",
+            &pty.path(),
+            "--table",
+            table.to_str().expect("utf8"),
+            "--messages",
+            "200",
+            "--aircraft",
+            "4",
+            "--rate",
+            "40",
+            "--emergency",
+            "0.5",
+            "--ident",
+            "0",
+            "--velocity",
+            "0",
+            "--junk",
+            "0",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn stress");
+    let stderr_buf = collect_stdout(child.stderr.take().expect("stderr"));
+    std::thread::sleep(Duration::from_millis(300));
+    fill_until_blocked(pty.slave.as_raw_fd());
+    let status = wait_exit(&mut child, Duration::from_secs(15));
+    std::thread::sleep(Duration::from_millis(50));
+    let stderr = String::from_utf8_lossy(&stderr_buf.lock().expect("stderr")).into_owned();
+    assert!(status.success(), "{stderr}");
+    let fixes = summary_count(&stderr, "fixes");
+    let dropped = summary_count(&stderr, "dropped");
+    let csv = summary_count(&stderr, "csv");
+    assert!(fixes > QUEUE as u64, "fixes={fixes} {stderr}");
+    assert!(dropped > 0, "no drops {stderr}");
+    let rows = wait_csv_rows(&table, 1, Duration::from_secs(1));
+    assert_eq!(csv, fixes);
+    assert_eq!(rows.len(), fixes as usize);
+    let _ = fs::remove_file(&table);
+}
