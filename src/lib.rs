@@ -4,6 +4,7 @@ mod decode;
 mod frame;
 mod lines;
 mod queue;
+mod table;
 
 #[doc(inline)]
 pub use decode::{Tracker, parse_hex_frame};
@@ -17,3 +18,5 @@ pub use frame::{
 pub use lines::Lines;
 #[doc(inline)]
 pub use queue::Queue;
+#[doc(inline)]
+pub use table::{DEFAULT_PATH, Table};

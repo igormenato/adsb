@@ -1,15 +1,18 @@
+use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serialport::{SerialPort, TTYPort};
 
 use trck::{
-    Aircraft, EmergencyKind, FRAME_LEN, Tracker, check_positions, crc16_ccitt_false, pack_frame,
-    parse_hex_frame, unpack_frame,
+    Aircraft, DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Tracker, check_positions,
+    crc16_ccitt_false, pack_frame, parse_hex_frame, unpack_frame,
 };
 
 const EVEN: &str = "8D40058B58C901375147EFD09357";
@@ -108,10 +111,22 @@ impl Drop for StopSender {
     }
 }
 
-fn spawn_hex(port: u16) -> StopSender {
-    let addr = format!("127.0.0.1:{port}");
+fn unique_path(name: &str) -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "trck-{}-{}-{name}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+fn table_arg() -> PathBuf {
+    unique_path("aircraft.csv")
+}
+
+fn spawn_trck(args: &[&str]) -> StopSender {
     let child = Command::new(env!("CARGO_BIN_EXE_trck"))
-        .args(["--hex", &addr, "--uart", "-"])
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -119,20 +134,51 @@ fn spawn_hex(port: u16) -> StopSender {
     StopSender(child)
 }
 
+fn spawn_hex(port: u16) -> StopSender {
+    spawn_hex_table(port, &table_arg())
+}
+
+fn spawn_hex_table(port: u16, table: &Path) -> StopSender {
+    let addr = format!("127.0.0.1:{port}");
+    spawn_trck(&[
+        "--hex",
+        &addr,
+        "--uart",
+        "-",
+        "--table",
+        table.to_str().expect("utf8"),
+    ])
+}
+
 fn spawn_check() -> StopSender {
-    let child = Command::new(env!("CARGO_BIN_EXE_trck"))
-        .args(["--check", "--uart", "-"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn check");
-    StopSender(child)
+    spawn_check_table(&table_arg())
+}
+
+fn spawn_check_table(table: &Path) -> StopSender {
+    spawn_trck(&[
+        "--check",
+        "--uart",
+        "-",
+        "--table",
+        table.to_str().expect("utf8"),
+    ])
 }
 
 fn spawn_uart(port: u16, uart: &str) -> StopSender {
+    spawn_uart_table(port, uart, &table_arg())
+}
+
+fn spawn_uart_table(port: u16, uart: &str, table: &Path) -> StopSender {
     let addr = format!("127.0.0.1:{port}");
     let child = Command::new(env!("CARGO_BIN_EXE_trck"))
-        .args(["--hex", &addr, "--uart", uart])
+        .args([
+            "--hex",
+            &addr,
+            "--uart",
+            uart,
+            "--table",
+            table.to_str().expect("utf8"),
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -696,4 +742,180 @@ fn a_full_tty_of_emergencies_drops_ordinary() {
         "{icaos:?}"
     );
     assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+fn wait_csv_rows(path: &Path, n: usize, timeout: Duration) -> Vec<String> {
+    let started = Instant::now();
+    loop {
+        if let Ok(text) = fs::read_to_string(path) {
+            let mut lines: Vec<String> = text
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect();
+            if lines.len() > n {
+                assert_eq!(
+                    lines[0],
+                    "icao,callsign,lat,lon,altitude_ft,ground_speed_kt,track_deg,timestamp"
+                );
+                lines.remove(0);
+                return lines;
+            }
+        }
+        if started.elapsed() > timeout {
+            let got = fs::read_to_string(path).unwrap_or_default();
+            panic!(
+                "table {} missing {n} rows after {:?}: {got:?}",
+                path.display(),
+                timeout
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn assert_csv_row(row: &str, fix: &Fix, before: u64, after: u64) {
+    let cols: Vec<&str> = row.split(',').collect();
+    assert_eq!(cols.len(), 8, "{row}");
+    let aircraft = &fix.aircraft;
+    assert_eq!(cols[0], format!("{:06x}", aircraft.icao));
+    let callsign_bytes = aircraft.callsign.as_bytes();
+    let callsign = String::from_utf8_lossy(&callsign_bytes);
+    assert_eq!(cols[1], callsign.trim_end());
+    let lat: f64 = cols[2].parse().expect("lat");
+    let lon: f64 = cols[3].parse().expect("lon");
+    assert!((lat - f64::from(aircraft.latitude_e7) / 10_000_000.0).abs() < 1e-7);
+    assert!((lon - f64::from(aircraft.longitude_e7) / 10_000_000.0).abs() < 1e-7);
+    match aircraft.altitude_ft {
+        Some(v) => assert_eq!(cols[4], v.to_string()),
+        None => assert_eq!(cols[4], ""),
+    }
+    match aircraft.ground_speed_kt {
+        Some(v) => assert_eq!(cols[5], v.to_string()),
+        None => assert_eq!(cols[5], ""),
+    }
+    match aircraft.track_deg {
+        Some(v) => assert_eq!(cols[6], v.to_string()),
+        None => assert_eq!(cols[6], ""),
+    }
+    let timestamp: u64 = cols[7].parse().expect("timestamp");
+    assert!(
+        timestamp >= before && timestamp <= after,
+        "timestamp {timestamp} not in {before}..={after}"
+    );
+}
+
+#[test]
+fn check_writes_csv_rows() {
+    let table = table_arg();
+    let before = now_secs();
+    let mut sender = spawn_check_table(&table);
+    let buf = collect_stdout(sender.0.stdout.take().unwrap());
+    let rows = wait_csv_rows(&table, 3, Duration::from_secs(2));
+    let after = now_secs() + 1;
+    let expect = check_positions();
+    for (row, fix) in rows.iter().zip(expect.iter()) {
+        assert_csv_row(row, fix, before, after);
+    }
+    let got = wait_len(&buf, FRAME_LEN * 3, Duration::from_secs(2));
+    assert!(got.len() >= FRAME_LEN * 3);
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn hex_writes_csv_when_a_position_solves() {
+    let table = table_arg();
+    let (listener, port) = listen();
+    serve(listener, |sock| {
+        write_pair(sock);
+        Session::KeepOpen
+    });
+    let before = now_secs();
+    let mut sender = spawn_hex_table(port, &table);
+    let buf = collect_stdout(sender.0.stdout.take().unwrap());
+    let rows = wait_csv_rows(&table, 1, Duration::from_secs(2));
+    let after = now_secs() + 1;
+    let expect = Fix {
+        aircraft: decoded_aircraft(),
+    };
+    assert_csv_row(&rows[0], &expect, before, after);
+    let got = wait_len(&buf, FRAME_LEN, Duration::from_secs(2));
+    assert_eq!(got.len(), FRAME_LEN);
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn csv_is_written_while_the_tty_is_full() {
+    let table = table_arg();
+    let (listener, port) = listen();
+    let pty = Pty::open();
+    let mut sender = spawn_uart_table(port, &pty.path(), &table);
+    let (mut sock, _) = listener.accept().expect("accept");
+    fill_until_blocked(pty.slave.as_raw_fd());
+    let before = now_secs();
+    write_pair(&mut sock);
+    let rows = wait_csv_rows(&table, 1, Duration::from_secs(2));
+    let after = now_secs() + 1;
+    let expect = Fix {
+        aircraft: decoded_aircraft(),
+    };
+    assert_csv_row(&rows[0], &expect, before, after);
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn default_table_is_aircraft_csv_in_the_working_directory() {
+    let dir = unique_path("cwd");
+    fs::create_dir_all(&dir).expect("cwd");
+    let mut sender = StopSender(
+        Command::new(env!("CARGO_BIN_EXE_trck"))
+            .current_dir(&dir)
+            .args(["--check", "--uart", "-"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn check"),
+    );
+    let path = dir.join(DEFAULT_PATH);
+    let rows = wait_csv_rows(&path, 3, Duration::from_secs(2));
+    assert_eq!(rows.len(), 3);
+    assert!(sender.0.try_wait().unwrap().is_none());
+    drop(sender);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn table_flag_overrides_the_path() {
+    let dir = unique_path("cwd");
+    fs::create_dir_all(&dir).expect("cwd");
+    let table = unique_path("override.csv");
+    let mut sender = StopSender(
+        Command::new(env!("CARGO_BIN_EXE_trck"))
+            .current_dir(&dir)
+            .args([
+                "--check",
+                "--uart",
+                "-",
+                "--table",
+                table.to_str().expect("utf8"),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn check"),
+    );
+    let rows = wait_csv_rows(&table, 3, Duration::from_secs(2));
+    assert_eq!(rows.len(), 3);
+    assert!(!dir.join(DEFAULT_PATH).exists());
+    assert!(sender.0.try_wait().unwrap().is_none());
+    drop(sender);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_file(&table);
 }
