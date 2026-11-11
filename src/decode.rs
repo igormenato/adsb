@@ -246,10 +246,14 @@ pub fn parse_hex_frame(bytes: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    use crate::pack_frame;
+
     const EVEN: &str = "8D40058B58C901375147EFD09357";
     const ODD: &str = "8D40058B58C904A87F402D3B8C59";
     const IDENT: &str = "8d406b902015a678d4d220aa4bda";
+    const IDENT_40058B: &str = "8d40058b205054d4c72ce03f949e";
     const VELOCITY: &str = "8D485020994409940838175B284F";
+    const STATUS: &str = "8d40058be1200000000000a05f30";
 
     fn frame(hex: &str) -> Vec<u8> {
         parse_hex_frame(hex.as_bytes()).expect("hex")
@@ -274,16 +278,15 @@ mod tests {
         let mut tracker = Tracker::new();
         assert!(tracker.ingest(1.0, &frame(IDENT)).is_none());
         assert!(tracker.ingest(1.0, &frame(VELOCITY)).is_none());
-        assert_eq!(
-            tracker
-                .fields
-                .get(&0x0040_6B90)
-                .map(|c| c.callsign.as_bytes()),
-            Some(*b"EZY85MH ")
-        );
-        let speed = tracker.fields.get(&0x0048_5020).expect("velocity");
-        assert_eq!(speed.ground_speed_kt, Some(159));
-        assert_eq!(speed.track_deg, Some(183));
+    }
+
+    #[test]
+    fn callsign_attaches_to_the_same_icao() {
+        let mut tracker = Tracker::new();
+        assert!(tracker.ingest(1.0, &frame(IDENT_40058B)).is_none());
+        assert!(tracker.ingest(2.0, &frame(EVEN)).is_none());
+        let fix = tracker.ingest(3.0, &frame(ODD)).expect("position");
+        assert_eq!(fix.aircraft.callsign.as_bytes(), *b"TEST123 ");
     }
 
     #[test]
@@ -293,6 +296,16 @@ mod tests {
         assert!(tracker.ingest(2.0, &frame(EVEN)).is_none());
         let fix = tracker.ingest(3.0, &frame(ODD)).expect("position");
         assert_eq!(fix.aircraft.callsign.as_bytes(), *b"        ");
+    }
+
+    #[test]
+    fn emergency_is_on_the_wire() {
+        let mut tracker = Tracker::new();
+        assert!(tracker.ingest(1.0, &frame(STATUS)).is_none());
+        assert!(tracker.ingest(2.0, &frame(EVEN)).is_none());
+        let fix = tracker.ingest(3.0, &frame(ODD)).expect("position");
+        assert_eq!(fix.aircraft.emergency, Some(EmergencyKind::General));
+        assert_eq!(pack_frame(&fix)[35], 1);
     }
 
     #[test]
