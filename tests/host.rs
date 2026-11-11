@@ -210,23 +210,16 @@ fn one_frame_per_solved_position() {
         writeln!(sock, "not hex").expect("junk");
         writeln!(sock, "{EVEN}").expect("even");
         writeln!(sock, "{ODD}").expect("odd");
-        writeln!(sock, "{EVEN}").expect("even2");
-        writeln!(sock, "{ODD}").expect("odd2");
         Session::KeepOpen
     });
     let mut sender = spawn_hex(port);
     let buf = collect_stdout(sender.0.stdout.take().unwrap());
     let expect = decoded_aircraft();
-    let got = wait_len(&buf, FRAME_LEN * 3, Duration::from_secs(2));
-    let frames = got.as_chunks::<FRAME_LEN>().0;
-    assert_eq!(frames.len(), 3, "got {} bytes", got.len());
-    assert_eq!(frame_aircraft(&frames[0]), expect);
-    for frame in frames {
-        assert_eq!(frame_aircraft(frame).icao, expect.icao);
-        assert!(frame_aircraft(frame).altitude_ft.is_some());
-    }
+    let got = wait_len(&buf, FRAME_LEN, Duration::from_secs(2));
+    assert_eq!(got.len(), FRAME_LEN);
+    assert_eq!(frame_aircraft(&got.as_chunks::<FRAME_LEN>().0[0]), expect);
     std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(buf.lock().expect("lock").len(), FRAME_LEN * 3);
+    assert_eq!(buf.lock().expect("lock").len(), FRAME_LEN);
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 

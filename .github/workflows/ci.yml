@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [trck-v2]
   pull_request:
+    branches: [trck-v2]
 
 jobs:
   check:
