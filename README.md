@@ -29,6 +29,8 @@ Disable the serial login shell and leave the UART enabled. The console shares th
 
 That opens RTL-SDR device 0 at 1090 MHz and writes frames to `/dev/serial0`.
 
+`./trck doctor` probes this machine: RTL-SDR USB (nusb, not readsb), `/dev/serial0`, serial console, `aircraft.csv`, plugdev, and the clock. One line per check. Non-zero exit if a required check fails. It does not send UART frames; `--check` does that.
+
 ## Flags
 
 `--rtlsdr N` selects the dongle. Default is `0`.
@@ -40,6 +42,8 @@ That opens RTL-SDR device 0 at 1090 MHz and writes frames to `/dev/serial0`.
 `--baud` defaults to 115200.
 
 `--check` sends known frames instead of reading the radio, to check the UART. It repeats those frames every second.
+
+`doctor` is a host probe. It does not open the radio or the UART.
 
 ## Frame
 

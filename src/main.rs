@@ -9,13 +9,14 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
 use trck::{
     EmergencyKind, FRAME_LEN, Fix, Lines, Queue, Tracker, check_positions, parse_hex_frame,
 };
 
+mod doctor;
 mod radio;
 mod sys;
 
@@ -34,8 +35,13 @@ const KEEPALIVE_PROBES: u32 = 3;
 const MAX_LINE: usize = 8192;
 
 #[derive(Parser, Debug)]
-#[command(about = "Send each decoded ADS-B position to a UART as it arrives.")]
+#[command(
+    about = "Send each decoded ADS-B position to a UART as it arrives.",
+    args_conflicts_with_subcommands = true
+)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Cmd>,
     /// RTL-SDR device index. Used when --check and --hex are off.
     #[arg(long, default_value_t = 0)]
     rtlsdr: usize,
@@ -50,6 +56,12 @@ struct Args {
     /// Send the known frames instead of reading the radio, to check the UART.
     #[arg(long)]
     check: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Probe this host for RTL-SDR, UART, and CSV setup.
+    Doctor,
 }
 
 #[derive(Debug)]
@@ -266,6 +278,10 @@ fn now_unix() -> f64 {
 
 fn main() -> ExitCode {
     let args = Args::parse();
+    match args.command {
+        Some(Cmd::Doctor) => return doctor::run(),
+        None => {}
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let mut writer = match open_output(&args.uart, args.baud, Arc::clone(&stop)) {
         Ok(writer) => writer,
