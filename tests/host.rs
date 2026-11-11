@@ -224,6 +224,32 @@ fn one_frame_per_solved_position() {
 }
 
 #[test]
+fn the_same_icao_is_sent_twice() {
+    let (listener, port) = listen();
+    serve(listener, |sock| {
+        write_pair(sock);
+        write_pair(sock);
+        Session::KeepOpen
+    });
+    let mut sender = spawn_hex(port);
+    let buf = collect_stdout(sender.0.stdout.take().unwrap());
+    let expect = decoded_aircraft();
+    let got = wait_len(&buf, FRAME_LEN * 2, Duration::from_secs(2));
+    assert!(
+        got.len() >= FRAME_LEN * 2,
+        "short output: {} bytes",
+        got.len()
+    );
+    let frames = got.as_chunks::<FRAME_LEN>().0;
+    assert!(frames.len() >= 2, "frames {}", frames.len());
+    assert_eq!(frame_aircraft(&frames[0]), expect);
+    for frame in frames {
+        assert_eq!(frame_aircraft(frame).icao, expect.icao);
+    }
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
 fn a_split_hex_line_is_one_frame() {
     let (listener, port) = listen();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
