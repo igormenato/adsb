@@ -10,11 +10,11 @@ In this order:
 2. `cargo clippy --locked --all-targets -- -D warnings`
 3. `cargo test --locked`
 
-The Pi binaries:
+The Pi binaries (Zig plus `cargo-zigbuild`):
 
-`cargo build --release --locked --target arm-unknown-linux-musleabihf`
+`cargo zigbuild --release --locked --target arm-unknown-linux-musleabihf`
 
-`cargo build --release --locked --target aarch64-unknown-linux-musl`
+`cargo zigbuild --release --locked --target aarch64-unknown-linux-musl`
 
 Copy `target/<triple>/release/trck`. Release assets are `trck-arm` and `trck-aarch64`.
 

@@ -10,11 +10,11 @@ Run the host checks in this order.
 2. `cargo clippy --locked --all-targets -- -D warnings`
 3. `cargo test --locked`
 
-Build the Pi binaries. Both are static musl so they copy onto Raspberry Pi OS Lite without matching glibc. Those targets compile C (zstd, from rs1090). CI installs Zig with `mlugg/setup-zig` and wraps it as `zig cc`.
+Build the Pi binaries. Both are static musl so they copy onto Raspberry Pi OS Lite without matching glibc. Those targets compile C (zstd, from rs1090). Install Zig and `cargo-zigbuild`. CI uses `mlugg/setup-zig`.
 
 ```
-cargo build --release --locked --target arm-unknown-linux-musleabihf
-cargo build --release --locked --target aarch64-unknown-linux-musl
+cargo zigbuild --release --locked --target arm-unknown-linux-musleabihf
+cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
 ```
 
 Copy `target/<triple>/release/trck`. `arm-unknown-linux-musleabihf` is the Zero W. `aarch64-unknown-linux-musl` is the Pi 3B on 64-bit Lite. Release assets are `trck-arm` and `trck-aarch64`.
