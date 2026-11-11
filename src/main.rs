@@ -272,32 +272,43 @@ fn run_radio(device: usize, writer: Writer, stop: Arc<AtomicBool>) -> ExitCode {
     code
 }
 
+fn enqueue_rx(writer: &mut Writer, rx: &Receiver<Fix>) -> bool {
+    loop {
+        match rx.try_recv() {
+            Ok(fix) => {
+                log_fix(&fix);
+                writer.enqueue(fix);
+            }
+            Err(mpsc::TryRecvError::Empty) => return true,
+            Err(mpsc::TryRecvError::Disconnected) => return false,
+        }
+    }
+}
+
+fn finish_writer(writer: &mut Writer) -> ExitCode {
+    match writer.write_some() {
+        Ok(()) | Err(ChunkError::Stopped) => {
+            eprintln!("stopped");
+            ExitCode::SUCCESS
+        }
+        Err(ChunkError::Failed(err)) => write_exit(ChunkError::Failed(err)),
+    }
+}
+
 fn run_writer(mut writer: Writer, rx: Receiver<Fix>, stop: &AtomicBool) -> ExitCode {
     loop {
         if stop.load(Ordering::Relaxed) {
             eprintln!("stopped");
             return ExitCode::SUCCESS;
         }
-        match rx.recv_timeout(POLL_SLICE) {
-            Ok(fix) => {
-                log_fix(&fix);
-                writer.enqueue(fix);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return match writer.write_some() {
-                    Ok(()) | Err(ChunkError::Stopped) => {
-                        eprintln!("stopped");
-                        ExitCode::SUCCESS
-                    }
-                    Err(ChunkError::Failed(err)) => write_exit(ChunkError::Failed(err)),
-                };
-            }
-        }
+        let connected = enqueue_rx(&mut writer, &rx);
         if writer.has_pending()
             && let Err(err) = writer.write_some()
         {
             return write_exit(err);
+        }
+        if !connected {
+            return finish_writer(&mut writer);
         }
         if writer.has_pending()
             && let Some(fd) = writer.uart_fd()
@@ -307,6 +318,15 @@ fn run_writer(mut writer: Writer, rx: Receiver<Fix>, stop: &AtomicBool) -> ExitC
                 eprintln!("uart poll: {err}");
                 return ExitCode::from(1);
             }
+            continue;
+        }
+        match rx.recv_timeout(POLL_SLICE) {
+            Ok(fix) => {
+                log_fix(&fix);
+                writer.enqueue(fix);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return finish_writer(&mut writer),
         }
     }
 }
