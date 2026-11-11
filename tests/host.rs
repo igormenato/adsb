@@ -4,7 +4,7 @@ use std::net::TcpListener;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -538,6 +538,28 @@ fn frame_is_general(frame: &[u8]) -> bool {
     unpack_frame(frame).is_some_and(|fix| fix.aircraft.emergency == Some(EmergencyKind::General))
 }
 
+fn write_until_would_block(fd: i32) {
+    let buf = [0xA5u8; 1024];
+    let mut chunk = buf.len();
+    loop {
+        // SAFETY: `fd` is the open pty slave. `buf` is a live slice `write` does not keep.
+        let rc = unsafe { libc::write(fd, buf.as_ptr().cast(), chunk) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
+            if chunk == 1 {
+                return;
+            }
+            chunk = 1;
+            continue;
+        }
+        if rc == 0 {
+            return;
+        }
+        chunk = buf.len();
+    }
+}
+
 fn fill_until_blocked(fd: i32) -> usize {
     let buf = [0xA5u8; 1024];
     let mut wrote = 0usize;
@@ -920,6 +942,36 @@ fn table_flag_overrides_the_path() {
     let _ = fs::remove_file(&table);
 }
 
+#[test]
+fn stress_one_over_tracker_cap_still_emits() {
+    let table = table_arg();
+    let (status, stdout, stderr) = run_stress(&[
+        "--uart",
+        "-",
+        "--table",
+        table.to_str().expect("utf8"),
+        "--messages",
+        "514",
+        "--aircraft",
+        "257",
+        "--rate",
+        "0",
+        "--ident",
+        "0",
+        "--velocity",
+        "0",
+        "--junk",
+        "0",
+        "--emergency",
+        "0",
+    ]);
+    assert!(status.success(), "{stderr}");
+    let frames = stdout.len() / FRAME_LEN;
+    assert_eq!(frames, 256, "{stderr} bytes={}", stdout.len());
+    assert_eq!(summary_count(&stderr, "fixes"), 256, "{stderr}");
+    let _ = fs::remove_file(&table);
+}
+
 fn wait_exit(child: &mut std::process::Child, timeout: Duration) -> std::process::ExitStatus {
     let started = Instant::now();
     loop {
@@ -1108,9 +1160,19 @@ fn stress_drops_on_a_full_tty_and_still_writes_csv() {
         .spawn()
         .expect("spawn stress");
     let stderr_buf = collect_stdout(child.stderr.take().expect("stderr"));
-    std::thread::sleep(Duration::from_millis(300));
-    fill_until_blocked(pty.slave.as_raw_fd());
+    std::thread::sleep(Duration::from_millis(200));
+    let fd = pty.slave.as_raw_fd();
+    let filling = Arc::new(AtomicBool::new(true));
+    let fill_flag = Arc::clone(&filling);
+    let filler = std::thread::spawn(move || {
+        while fill_flag.load(Ordering::Relaxed) {
+            write_until_would_block(fd);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
     let status = wait_exit(&mut child, Duration::from_secs(15));
+    filling.store(false, Ordering::Relaxed);
+    let _ = filler.join();
     std::thread::sleep(Duration::from_millis(50));
     let stderr = String::from_utf8_lossy(&stderr_buf.lock().expect("stderr")).into_owned();
     assert!(status.success(), "{stderr}");
