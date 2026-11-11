@@ -11,6 +11,13 @@ use rs1090::decode::{DF, ICAO, Message};
 
 use crate::frame::{Aircraft, Callsign, EmergencyKind, Fix, Icao, deg_e7};
 
+/// ICAOs a contest receiver keeps for CPR and ident.
+/// A Pi contest station sees far fewer. Too small a value drops live pairs.
+const TRACKER_CAP: usize = 256;
+
+/// Local CPR in rs1090 is useful for this many seconds.
+const CPR_LOCAL_MAX_AGE_S: f64 = 180.0;
+
 /// One ICAO's identification, velocity, and emergency between position frames.
 #[derive(Clone, Debug, Default)]
 struct Cached {
@@ -18,6 +25,7 @@ struct Cached {
     ground_speed_kt: Option<u16>,
     track_deg: Option<u16>,
     emergency: Option<EmergencyKind>,
+    last_seen: f64,
 }
 
 /// Per-aircraft CPR history plus the fields a position frame does not carry.
@@ -53,7 +61,7 @@ impl Tracker {
     /// Decode one Mode S frame. A [`Fix`] is the airborne position that just solved.
     pub fn ingest(&mut self, timestamp: f64, frame: &[u8]) -> Option<Fix> {
         let mut message = Message::try_from(frame).ok()?;
-        match &mut message.df {
+        let (icao, fix) = match &mut message.df {
             DF::ExtendedSquitterADSB(adsb) => {
                 let icao24 = adsb.icao24;
                 let no_update = None;
@@ -65,11 +73,12 @@ impl Tracker {
                     &mut self.reference,
                     &no_update,
                 );
-                self.apply_adsb(timestamp, icao24, &adsb.message)
+                (icao24, self.apply_adsb(timestamp, icao24, &adsb.message))
             }
             DF::SurveillanceIdentityReply { id, ap, .. } => {
-                self.apply_squawk(ICAO::from(*ap), id.0);
-                None
+                let icao = ICAO::from(*ap);
+                self.apply_squawk(icao, id.0);
+                (icao, None)
             }
             DF::ShortAirAirSurveillance { .. }
             | DF::SurveillanceAltitudeReply { .. }
@@ -79,8 +88,39 @@ impl Tracker {
             | DF::ExtendedSquitterMilitary { .. }
             | DF::CommBAltitudeReply { .. }
             | DF::CommBIdentityReply { .. }
-            | DF::CommDExtended { .. } => None,
+            | DF::CommDExtended { .. } => return None,
+        };
+        self.fields.entry(icao).or_default().last_seen = timestamp;
+        self.trim(timestamp, icao);
+        fix
+    }
+
+    fn trim(&mut self, now: f64, keep: ICAO) {
+        if self.cpr.len() <= TRACKER_CAP && self.fields.len() <= TRACKER_CAP {
+            return;
         }
+        self.fields
+            .retain(|icao, cached| *icao == keep || now - cached.last_seen <= CPR_LOCAL_MAX_AGE_S);
+        self.cpr.retain(|icao, _| self.fields.contains_key(icao));
+        while self.cpr.len() > TRACKER_CAP || self.fields.len() > TRACKER_CAP {
+            let Some(icao) = self.oldest(keep) else {
+                break;
+            };
+            self.cpr.remove(&icao);
+            self.fields.remove(&icao);
+        }
+    }
+
+    fn oldest(&self, keep: ICAO) -> Option<ICAO> {
+        self.fields
+            .iter()
+            .filter(|(icao, _)| **icao != keep)
+            .min_by(|(left_icao, left), (right_icao, right)| {
+                left.last_seen
+                    .total_cmp(&right.last_seen)
+                    .then(left_icao.cmp(right_icao))
+            })
+            .map(|(icao, _)| *icao)
     }
 
     fn apply_adsb(&mut self, timestamp: f64, icao24: ICAO, me: &ME) -> Option<Fix> {
