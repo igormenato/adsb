@@ -23,7 +23,10 @@ jobs:
       - uses: actions/checkout@v7
       - run: grep -q "^version = \"${TAG#v}\"" Cargo.toml
       - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
-      - name: Install Zig for musl C
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.17.1"
+      - name: musl C wrappers
         run: sh ci/install-zig-musl-cc.sh
       - run: cargo build --release --locked --target arm-unknown-linux-musleabihf
       - run: cargo build --release --locked --target aarch64-unknown-linux-musl

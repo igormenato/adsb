@@ -10,7 +10,7 @@ Run the host checks in this order.
 2. `cargo clippy --locked --all-targets -- -D warnings`
 3. `cargo test --locked`
 
-Build the Pi binaries. Both are static musl so they copy onto Raspberry Pi OS Lite without matching glibc. Those targets compile C (zstd, from rs1090). CI uses Zig as `zig cc`.
+Build the Pi binaries. Both are static musl so they copy onto Raspberry Pi OS Lite without matching glibc. Those targets compile C (zstd, from rs1090). CI installs Zig with `mlugg/setup-zig` and wraps it as `zig cc`.
 
 ```
 cargo build --release --locked --target arm-unknown-linux-musleabihf
