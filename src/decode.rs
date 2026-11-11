@@ -23,7 +23,7 @@ struct Cached {
 /// Per-aircraft CPR history plus the fields a position frame does not carry.
 pub struct Tracker {
     cpr: BTreeMap<ICAO, AircraftState>,
-    fields: BTreeMap<u32, Cached>,
+    fields: BTreeMap<ICAO, Cached>,
     reference: Option<rs1090::decode::cpr::Position>,
 }
 
@@ -68,7 +68,7 @@ impl Tracker {
                 self.apply_adsb(timestamp, icao24, &adsb.message)
             }
             DF::SurveillanceIdentityReply { id, ap, .. } => {
-                self.apply_squawk(ap.0, id.0);
+                self.apply_squawk(ICAO::from(*ap), id.0);
                 None
             }
             DF::ShortAirAirSurveillance { .. }
@@ -84,24 +84,24 @@ impl Tracker {
     }
 
     fn apply_adsb(&mut self, timestamp: f64, icao24: ICAO, me: &ME) -> Option<Fix> {
-        let addr = icao24.0;
         match me {
             ME::BDS08 { inner, .. } => {
                 if !inner.callsign.contains('#') {
-                    self.fields.entry(addr).or_default().callsign = Callsign::pad(&inner.callsign);
+                    self.fields.entry(icao24).or_default().callsign =
+                        Callsign::pad(&inner.callsign);
                 }
                 None
             }
             ME::BDS09(velocity) => {
                 if let AirborneVelocitySubType::GroundSpeedDecoding(speed) = &velocity.velocity {
-                    let cached = self.fields.entry(addr).or_default();
+                    let cached = self.fields.entry(icao24).or_default();
                     cached.ground_speed_kt = knots(speed.groundspeed);
                     cached.track_deg = track(speed.track);
                 }
                 None
             }
             ME::BDS61(status) => {
-                let cached = self.fields.entry(addr).or_default();
+                let cached = self.fields.entry(icao24).or_default();
                 match status.subtype {
                     AircraftStatusType::EmergencyPriorityStatus => {
                         cached.emergency = emergency_kind(status.emergency_state, status.squawk.0);
@@ -123,8 +123,8 @@ impl Tracker {
                     return None;
                 }
                 let unix_s = unix_seconds(timestamp)?;
-                let icao = Icao::from_u24(addr)?;
-                let cached = self.fields.entry(addr).or_default().clone();
+                let icao = Icao::from_u24(icao24.0)?;
+                let cached = self.fields.entry(icao24).or_default().clone();
                 Some(Fix {
                     unix_s,
                     aircraft: Aircraft {
@@ -150,7 +150,7 @@ impl Tracker {
         }
     }
 
-    fn apply_squawk(&mut self, icao: u32, squawk: u16) {
+    fn apply_squawk(&mut self, icao: ICAO, squawk: u16) {
         let cached = self.fields.entry(icao).or_default();
         if cached.emergency.is_none() {
             cached.emergency = kind_from_squawk(squawk);
