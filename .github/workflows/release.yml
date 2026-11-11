@@ -19,7 +19,6 @@ jobs:
       contents: write
     env:
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-      CARGO_ZIGBUILD_VERSION: "0.24.1"
       ZIG_VERSION: "0.17.1"
     steps:
       - uses: actions/checkout@v7
@@ -28,13 +27,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-      - uses: actions/cache@v4
-        id: cargo-zigbuild
+      - uses: taiki-e/install-action@v2
         with:
-          path: ~/.cargo/bin/cargo-zigbuild
-          key: cargo-zigbuild-${{ env.CARGO_ZIGBUILD_VERSION }}-${{ runner.os }}
-      - if: steps.cargo-zigbuild.outputs.cache-hit != 'true'
-        run: cargo install --locked cargo-zigbuild --version ${{ env.CARGO_ZIGBUILD_VERSION }}
+          tool: cargo-zigbuild@0.24.1
       - run: cargo zigbuild --release --locked --target arm-unknown-linux-musleabihf
       - run: cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
       - run: |
