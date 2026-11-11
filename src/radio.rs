@@ -1,7 +1,6 @@
 //! RTL-SDR at 1090 MHz, demodulated by rs1090.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use desperado::IqAsyncSource;
@@ -18,14 +17,14 @@ const SAMPLE_RATE: f64 = 2.4e6;
 const GAIN_TENTHS_DB: i32 = 496;
 const OPEN_RETRY: Duration = Duration::from_secs(2);
 
-pub async fn run_rtlsdr(device: usize, tx: SyncSender<Fix>, stop: &AtomicBool) {
+pub async fn run_rtlsdr(device: usize, enqueue: impl Fn(Fix), stop: &AtomicBool) {
     let mut delay = OPEN_RETRY;
     while !stop.load(Ordering::Relaxed) {
         match IqAsyncSource::from_rtlsdr(device, CENTER_HZ, SAMPLE_HZ, Some(GAIN_TENTHS_DB)).await {
             Ok(mut source) => {
                 eprintln!("rtlsdr {device} open");
                 delay = OPEN_RETRY;
-                demodulate(&mut source, &tx, stop).await;
+                demodulate(&mut source, &enqueue, stop).await;
                 if let Err(err) = source.stop().await {
                     eprintln!("rtlsdr {device} stop: {err}");
                 }
@@ -42,7 +41,7 @@ pub async fn run_rtlsdr(device: usize, tx: SyncSender<Fix>, stop: &AtomicBool) {
     }
 }
 
-async fn demodulate(source: &mut IqAsyncSource, tx: &SyncSender<Fix>, stop: &AtomicBool) {
+async fn demodulate(source: &mut IqAsyncSource, enqueue: &impl Fn(Fix), stop: &AtomicBool) {
     let mut tracker = Tracker::new();
     while !stop.load(Ordering::Relaxed) {
         let chunk = tokio::select! {
@@ -70,11 +69,7 @@ async fn demodulate(source: &mut IqAsyncSource, tx: &SyncSender<Fix>, stop: &Ato
             let Some(fix) = tracker.ingest(timestamp, &data.msg) else {
                 continue;
             };
-            match tx.try_send(fix) {
-                Ok(()) => {}
-                Err(TrySendError::Full(dropped)) => super::log_drop(&dropped),
-                Err(TrySendError::Disconnected(_)) => return,
-            }
+            enqueue(fix);
         }
     }
 }

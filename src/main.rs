@@ -4,16 +4,17 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{EmergencyKind, Fix, Lines, Queue, Tracker, check_positions, parse_hex_frame};
+use trck::{
+    EmergencyKind, FRAME_LEN, Fix, Lines, Queue, Tracker, check_positions, parse_hex_frame,
+};
 
 mod radio;
 mod sys;
@@ -69,15 +70,39 @@ enum Sink {
     Stdout,
 }
 
+struct Shared {
+    queue: Mutex<Queue>,
+    ready: Condvar,
+}
+
+impl Shared {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            queue: Mutex::new(Queue::new(QUEUE_CAP)),
+            ready: Condvar::new(),
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn push(&self, fix: Fix) -> Option<Fix> {
+        let dropped = self.lock().push(fix);
+        self.ready.notify_one();
+        dropped
+    }
+}
+
 struct Writer {
     sink: Sink,
     stop: Arc<AtomicBool>,
-    queue: Queue,
+    shared: Arc<Shared>,
 }
 
 impl Writer {
     fn has_pending(&self) -> bool {
-        self.queue.has_pending()
+        self.shared.lock().has_pending()
     }
 
     fn uart_fd(&self) -> Option<i32> {
@@ -88,7 +113,7 @@ impl Writer {
     }
 
     fn enqueue(&mut self, fix: Fix) {
-        if let Some(dropped) = self.queue.push(fix) {
+        if let Some(dropped) = self.shared.push(fix) {
             log_drop(&dropped);
         }
     }
@@ -98,10 +123,17 @@ impl Writer {
             if self.stop.load(Ordering::Relaxed) {
                 return Err(ChunkError::Stopped);
             }
-            if !self.queue.begin() {
-                return Ok(());
-            }
-            let wrote = match write_sink(&mut self.sink, self.queue.unsent()) {
+            let mut buf = [0u8; FRAME_LEN];
+            let n = {
+                let mut q = self.shared.lock();
+                if !q.begin() {
+                    return Ok(());
+                }
+                let rest = q.unsent();
+                buf[..rest.len()].copy_from_slice(rest);
+                rest.len()
+            };
+            let wrote = match write_sink(&mut self.sink, &buf[..n]) {
                 Ok(0) => {
                     return Err(ChunkError::Failed(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -113,7 +145,20 @@ impl Writer {
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => return Err(ChunkError::Failed(err)),
             };
-            self.queue.advance(wrote);
+            self.shared.lock().advance(wrote);
+        }
+    }
+
+    fn wait_idle(&self, timeout: Duration) {
+        let q = self.shared.lock();
+        if q.has_pending() {
+            return;
+        }
+        match self.shared.ready.wait_timeout(q, timeout) {
+            Ok(_) => {}
+            Err(poison) => {
+                let _ = poison.into_inner();
+            }
         }
     }
 }
@@ -188,7 +233,7 @@ fn open_uart(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, Exi
     Ok(Writer {
         sink: Sink::Uart(port),
         stop,
-        queue: Queue::new(QUEUE_CAP),
+        shared: Shared::new(),
     })
 }
 
@@ -197,7 +242,7 @@ fn open_output(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, E
         return Ok(Writer {
             sink: Sink::Stdout,
             stop,
-            queue: Queue::new(QUEUE_CAP),
+            shared: Shared::new(),
         });
     }
     open_uart(path, baud, stop)
@@ -255,79 +300,55 @@ fn main() -> ExitCode {
 }
 
 fn run_radio(device: usize, writer: Writer, stop: Arc<AtomicBool>) -> ExitCode {
-    let (tx, rx) = mpsc::sync_channel(QUEUE_CAP);
+    let shared = Arc::clone(&writer.shared);
     let radio_stop = Arc::clone(&stop);
     let radio = thread::spawn(move || {
+        let enqueue_shared = Arc::clone(&shared);
         match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
         {
-            Ok(rt) => rt.block_on(radio::run_rtlsdr(device, tx, &radio_stop)),
+            Ok(rt) => rt.block_on(radio::run_rtlsdr(
+                device,
+                move |fix| {
+                    log_fix(&fix);
+                    if let Some(dropped) = enqueue_shared.push(fix) {
+                        log_drop(&dropped);
+                    }
+                },
+                &radio_stop,
+            )),
             Err(err) => eprintln!("rtlsdr runtime: {err}"),
         }
+        radio_stop.store(true, Ordering::Relaxed);
+        shared.ready.notify_one();
     });
-    let code = run_writer(writer, rx, &stop);
+    let code = run_writer(writer, &stop);
     stop.store(true, Ordering::Relaxed);
     let _ = radio.join();
     code
 }
 
-fn enqueue_rx(writer: &mut Writer, rx: &Receiver<Fix>) -> bool {
-    loop {
-        match rx.try_recv() {
-            Ok(fix) => {
-                log_fix(&fix);
-                writer.enqueue(fix);
-            }
-            Err(mpsc::TryRecvError::Empty) => return true,
-            Err(mpsc::TryRecvError::Disconnected) => return false,
-        }
-    }
-}
-
-fn finish_writer(writer: &mut Writer) -> ExitCode {
-    match writer.write_some() {
-        Ok(()) | Err(ChunkError::Stopped) => {
-            eprintln!("stopped");
-            ExitCode::SUCCESS
-        }
-        Err(ChunkError::Failed(err)) => write_exit(ChunkError::Failed(err)),
-    }
-}
-
-fn run_writer(mut writer: Writer, rx: Receiver<Fix>, stop: &AtomicBool) -> ExitCode {
+fn run_writer(mut writer: Writer, stop: &AtomicBool) -> ExitCode {
     loop {
         if stop.load(Ordering::Relaxed) {
             eprintln!("stopped");
             return ExitCode::SUCCESS;
         }
-        let connected = enqueue_rx(&mut writer, &rx);
-        if writer.has_pending()
-            && let Err(err) = writer.write_some()
-        {
+        if let Err(err) = writer.write_some() {
             return write_exit(err);
         }
-        if !connected {
-            return finish_writer(&mut writer);
-        }
-        if writer.has_pending()
-            && let Some(fd) = writer.uart_fd()
-        {
-            let mut poll_fd = sys::pollfd(fd, libc::POLLOUT);
-            if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE) {
-                eprintln!("uart poll: {err}");
-                return ExitCode::from(1);
+        if writer.has_pending() {
+            if let Some(fd) = writer.uart_fd() {
+                let mut poll_fd = sys::pollfd(fd, libc::POLLOUT);
+                if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE) {
+                    eprintln!("uart poll: {err}");
+                    return ExitCode::from(1);
+                }
             }
             continue;
         }
-        match rx.recv_timeout(POLL_SLICE) {
-            Ok(fix) => {
-                log_fix(&fix);
-                writer.enqueue(fix);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return finish_writer(&mut writer),
-        }
+        writer.wait_idle(POLL_SLICE);
     }
 }
 
