@@ -919,3 +919,143 @@ fn table_flag_overrides_the_path() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_file(&table);
 }
+
+fn wait_exit(child: &mut std::process::Child, timeout: Duration) -> std::process::ExitStatus {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().expect("wait") {
+            return status;
+        }
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("stress did not exit after {timeout:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn run_stress(args: &[&str]) -> (std::process::ExitStatus, Vec<u8>, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .arg("stress")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn stress");
+    let stdout = collect_stdout(child.stdout.take().expect("stdout"));
+    let stderr = collect_stdout(child.stderr.take().expect("stderr"));
+    let status = wait_exit(&mut child, Duration::from_secs(8));
+    std::thread::sleep(Duration::from_millis(50));
+    let out = stdout.lock().expect("stdout").clone();
+    let err = String::from_utf8_lossy(&stderr.lock().expect("stderr")).into_owned();
+    (status, out, err)
+}
+
+#[test]
+fn stress_help_lists_the_knobs() {
+    let out = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .args(["stress", "--help"])
+        .output()
+        .expect("help");
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--aircraft",
+        "--rate",
+        "--seconds",
+        "--messages",
+        "--emergency",
+        "--ident",
+        "--velocity",
+        "--junk",
+        "--uart",
+        "--table",
+    ] {
+        assert!(text.contains(flag), "{text}");
+    }
+}
+
+#[test]
+fn stress_rejects_a_fraction_outside_0_1() {
+    let out = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .args(["stress", "--emergency", "2", "--uart", "-"])
+        .output()
+        .expect("bad fraction");
+    assert!(!out.status.success(), "{out:?}");
+}
+
+#[test]
+fn stress_writes_frames_csv_and_a_summary() {
+    let table = table_arg();
+    let (status, stdout, stderr) = run_stress(&[
+        "--uart",
+        "-",
+        "--table",
+        table.to_str().expect("utf8"),
+        "--messages",
+        "40",
+        "--aircraft",
+        "4",
+        "--rate",
+        "0",
+        "--ident",
+        "0.1",
+        "--velocity",
+        "0.1",
+        "--junk",
+        "0.1",
+        "--emergency",
+        "0.25",
+    ]);
+    assert!(status.success(), "{stderr}");
+    assert!(
+        stdout.windows(4).any(|window| window == b"TRCK"),
+        "no UART frames: {} bytes",
+        stdout.len()
+    );
+    assert_eq!(stdout.len() % FRAME_LEN, 0);
+    for frame in stdout.as_chunks::<FRAME_LEN>().0 {
+        assert!(unpack_frame(frame).is_some(), "{frame:02x?}");
+    }
+    for token in ["messages=", "fixes=", "dropped=", "csv=", "elapsed="] {
+        assert!(stderr.contains(token), "{stderr}");
+    }
+    let rows = fs::read_to_string(&table).expect("csv");
+    assert!(rows.lines().count() > 1, "{rows}");
+    let _ = fs::remove_file(&table);
+}
+
+#[test]
+fn stress_7700_is_on_the_wire() {
+    let table = table_arg();
+    let (status, stdout, stderr) = run_stress(&[
+        "--uart",
+        "-",
+        "--table",
+        table.to_str().expect("utf8"),
+        "--messages",
+        "8",
+        "--aircraft",
+        "1",
+        "--rate",
+        "0",
+        "--ident",
+        "0",
+        "--velocity",
+        "0",
+        "--junk",
+        "0",
+        "--emergency",
+        "1",
+    ]);
+    assert!(status.success(), "{stderr}");
+    let frames = stdout.as_chunks::<FRAME_LEN>().0;
+    assert!(!frames.is_empty(), "no frames");
+    assert!(
+        frames.iter().any(|frame| frame_is_general(frame)),
+        "no 7700: {} frames",
+        frames.len()
+    );
+    let _ = fs::remove_file(&table);
+}
