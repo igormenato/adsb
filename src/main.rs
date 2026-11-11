@@ -3,6 +3,7 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -13,7 +14,8 @@ use clap::{Parser, Subcommand};
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
 use trck::{
-    EmergencyKind, FRAME_LEN, Fix, Lines, Queue, Tracker, check_positions, parse_hex_frame,
+    DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Lines, Queue, Table, Tracker, check_positions,
+    parse_hex_frame,
 };
 
 mod doctor;
@@ -56,6 +58,9 @@ struct Args {
     /// Send the known frames instead of reading the radio, to check the UART.
     #[arg(long)]
     check: bool,
+    /// Local CSV of each position queued for UART. Default: aircraft.csv in the working directory.
+    #[arg(long, default_value = DEFAULT_PATH, value_name = "PATH")]
+    table: PathBuf,
 }
 
 #[derive(Subcommand, Debug)]
@@ -85,13 +90,15 @@ enum Sink {
 struct Shared {
     queue: Mutex<Queue>,
     ready: Condvar,
+    table: Mutex<Option<Table>>,
 }
 
 impl Shared {
-    fn new() -> Arc<Self> {
+    fn new(table: Option<Table>) -> Arc<Self> {
         Arc::new(Self {
             queue: Mutex::new(Queue::new(QUEUE_CAP)),
             ready: Condvar::new(),
+            table: Mutex::new(table),
         })
     }
 
@@ -102,7 +109,18 @@ impl Shared {
     fn push(&self, fix: Fix) -> Option<Fix> {
         let dropped = self.lock().push(fix);
         self.ready.notify_one();
+        self.append_row(&fix);
         dropped
+    }
+
+    fn append_row(&self, fix: &Fix) {
+        let mut table = self.table.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(table) = table.as_mut() else {
+            return;
+        };
+        if let Err(err) = table.append(fix) {
+            eprintln!("table: {err}");
+        }
     }
 }
 
@@ -230,7 +248,22 @@ fn open_failed(path: &str, err: impl std::fmt::Display) -> ExitCode {
     ExitCode::from(1)
 }
 
-fn open_uart(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, ExitCode> {
+fn open_table(path: &Path) -> Option<Table> {
+    match Table::open(path) {
+        Ok(table) => Some(table),
+        Err(err) => {
+            eprintln!("cannot open {}: {err}", path.display());
+            None
+        }
+    }
+}
+
+fn open_uart(
+    path: &str,
+    baud: u32,
+    stop: Arc<AtomicBool>,
+    shared: Arc<Shared>,
+) -> Result<Writer, ExitCode> {
     let port = serialport::new(path, baud)
         .data_bits(DataBits::Eight)
         .parity(Parity::None)
@@ -245,19 +278,25 @@ fn open_uart(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, Exi
     Ok(Writer {
         sink: Sink::Uart(port),
         stop,
-        shared: Shared::new(),
+        shared,
     })
 }
 
-fn open_output(path: &str, baud: u32, stop: Arc<AtomicBool>) -> Result<Writer, ExitCode> {
+fn open_output(
+    path: &str,
+    baud: u32,
+    stop: Arc<AtomicBool>,
+    table: Option<Table>,
+) -> Result<Writer, ExitCode> {
+    let shared = Shared::new(table);
     if path == "-" {
         return Ok(Writer {
             sink: Sink::Stdout,
             stop,
-            shared: Shared::new(),
+            shared,
         });
     }
-    open_uart(path, baud, stop)
+    open_uart(path, baud, stop, shared)
 }
 
 fn resolve_addr(text: &str) -> Option<Vec<SocketAddr>> {
@@ -283,7 +322,8 @@ fn main() -> ExitCode {
         None => {}
     }
     let stop = Arc::new(AtomicBool::new(false));
-    let mut writer = match open_output(&args.uart, args.baud, Arc::clone(&stop)) {
+    let table = open_table(&args.table);
+    let mut writer = match open_output(&args.uart, args.baud, Arc::clone(&stop), table) {
         Ok(writer) => writer,
         Err(code) => return code,
     };
@@ -295,7 +335,12 @@ fn main() -> ExitCode {
     }
 
     if args.check {
-        eprintln!("check uart={} baud={}", args.uart, args.baud);
+        eprintln!(
+            "check uart={} baud={} table={}",
+            args.uart,
+            args.baud,
+            args.table.display()
+        );
         return run_check(&mut writer, &stop);
     }
 
@@ -304,13 +349,21 @@ fn main() -> ExitCode {
             eprintln!("hex {text}: expected host:port");
             return ExitCode::from(1);
         };
-        eprintln!("hex={text} uart={} baud={}", args.uart, args.baud);
+        eprintln!(
+            "hex={text} uart={} baud={} table={}",
+            args.uart,
+            args.baud,
+            args.table.display()
+        );
         return run_hex(&addrs, text, &mut writer, &stop);
     }
 
     eprintln!(
-        "rtlsdr={} uart={} baud={}",
-        args.rtlsdr, args.uart, args.baud
+        "rtlsdr={} uart={} baud={} table={}",
+        args.rtlsdr,
+        args.uart,
+        args.baud,
+        args.table.display()
     );
     run_radio(args.rtlsdr, writer, stop)
 }

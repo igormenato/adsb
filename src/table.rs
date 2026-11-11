@@ -1,0 +1,184 @@
+//! Local CSV of each position queued for UART.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::frame::{Callsign, Fix};
+
+/// Default file in the process working directory.
+pub const DEFAULT_PATH: &str = "aircraft.csv";
+
+/// Live file plus `{path}.1` stay at most this large.
+pub const ROTATE_AT: u64 = 1_048_576;
+
+const HEADER: &str = "icao,callsign,lat,lon,altitude_ft,ground_speed_kt,track_deg,timestamp\n";
+
+/// Append-only aircraft table. Rotates onto `{path}.1` when a row would pass the cap.
+#[derive(Debug)]
+pub struct Table {
+    path: PathBuf,
+    cap: u64,
+    file: File,
+    len: u64,
+}
+
+impl Table {
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::with_cap(path, ROTATE_AT)
+    }
+
+    pub fn with_cap(path: impl AsRef<Path>, cap: u64) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let (file, len) = open_append(&path)?;
+        Ok(Self {
+            path,
+            cap,
+            file,
+            len,
+        })
+    }
+
+    /// One row for `fix`. Timestamp is the Pi clock, not `fix.unix_s`.
+    pub fn append(&mut self, fix: &Fix) -> io::Result<()> {
+        self.append_at(fix, SystemTime::now())
+    }
+
+    fn append_at(&mut self, fix: &Fix, now: SystemTime) -> io::Result<()> {
+        let row = format_row(fix, now);
+        let row_len = row.len() as u64;
+        if self.len > 0 && self.len.saturating_add(row_len) > self.cap {
+            self.rotate()?;
+        }
+        self.file.write_all(row.as_bytes())?;
+        self.file.flush()?;
+        self.len += row_len;
+        Ok(())
+    }
+
+    fn rotate(&mut self) -> io::Result<()> {
+        let mut rotated = self.path.as_os_str().to_os_string();
+        rotated.push(".1");
+        fs::rename(&self.path, &rotated)?;
+        let (file, len) = open_append(&self.path)?;
+        self.file = file;
+        self.len = len;
+        Ok(())
+    }
+}
+
+fn open_append(path: &Path) -> io::Result<(File, u64)> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        file.write_all(HEADER.as_bytes())?;
+        file.flush()?;
+        Ok((file, HEADER.len() as u64))
+    } else {
+        Ok((file, len))
+    }
+}
+
+fn format_row(fix: &Fix, now: SystemTime) -> String {
+    let aircraft = &fix.aircraft;
+    let lat = f64::from(aircraft.latitude_e7) / 10_000_000.0;
+    let lon = f64::from(aircraft.longitude_e7) / 10_000_000.0;
+    let timestamp = now
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!(
+        "{:06x},{},{:.7},{:.7},{},{},{},{}\n",
+        aircraft.icao,
+        callsign_text(aircraft.callsign),
+        lat,
+        lon,
+        display_opt(aircraft.altitude_ft),
+        display_opt(aircraft.ground_speed_kt),
+        display_opt(aircraft.track_deg),
+        timestamp,
+    )
+}
+
+fn callsign_text(callsign: Callsign) -> String {
+    let bytes = callsign.as_bytes();
+    let n = bytes.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
+    String::from_utf8_lossy(&bytes[..n]).into_owned()
+}
+
+fn display_opt<T: ToString>(value: Option<T>) -> String {
+    value.map(|v| v.to_string()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame::{Aircraft, Icao};
+
+    fn sample(unix_s: u32) -> Fix {
+        Fix {
+            unix_s,
+            aircraft: Aircraft {
+                icao: Icao::from_u24(0x400ABC).expect("icao"),
+                callsign: Callsign::pad("SIM0001"),
+                latitude_e7: 105_000_000,
+                longitude_e7: -202_500_000,
+                altitude_ft: Some(12_000),
+                ground_speed_kt: Some(280),
+                track_deg: Some(90),
+                emergency: None,
+            },
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("trck-table-{}-{}", std::process::id(), name));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("dir");
+        dir.join("aircraft.csv")
+    }
+
+    #[test]
+    fn row_uses_pi_clock_not_message_time() {
+        let fix = sample(1_700_000_000);
+        let now = UNIX_EPOCH + std::time::Duration::from_secs(1_762_800_000);
+        let row = format_row(&fix, now);
+        assert_eq!(
+            row,
+            "400abc,SIM0001,10.5000000,-20.2500000,12000,280,90,1762800000\n"
+        );
+    }
+
+    #[test]
+    fn unknown_fields_stay_empty() {
+        let mut fix = sample(1);
+        fix.aircraft.altitude_ft = None;
+        fix.aircraft.ground_speed_kt = None;
+        fix.aircraft.track_deg = None;
+        fix.aircraft.callsign = Callsign::default();
+        let row = format_row(&fix, UNIX_EPOCH);
+        assert_eq!(row, "400abc,,10.5000000,-20.2500000,,,,0\n");
+    }
+
+    #[test]
+    fn append_rotates_before_the_file_grows_past_the_cap() {
+        let path = scratch("rotate");
+        let mut table = Table::with_cap(&path, 200).expect("open");
+        let fix = sample(1);
+        table.append_at(&fix, UNIX_EPOCH).expect("first");
+        table.append_at(&fix, UNIX_EPOCH).expect("second");
+        table.append_at(&fix, UNIX_EPOCH).expect("third");
+        let live = fs::read_to_string(&path).expect("live");
+        let rotated = fs::read_to_string(path.with_file_name("aircraft.csv.1")).expect("rotated");
+        assert!(live.starts_with(HEADER), "{live}");
+        assert!(rotated.starts_with(HEADER), "{rotated}");
+        assert!(
+            (live.len() as u64) <= 200 + 80,
+            "live grew without bound: {} bytes",
+            live.len()
+        );
+        assert!(rotated.lines().count() >= 2, "rotated lost rows: {rotated}");
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
+    }
+}
