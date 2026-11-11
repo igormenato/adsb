@@ -1,6 +1,6 @@
 # trck
 
-Follow docs/rust-guidelines.md
+Follow @docs/rust-guidelines.md
 
 ## Cargo
 
