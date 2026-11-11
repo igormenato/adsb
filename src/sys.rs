@@ -1,6 +1,9 @@
+use std::ffi::CString;
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::time::Duration;
 
 pub(super) fn write(fd: RawFd, bytes: &[u8]) -> io::Result<usize> {
@@ -169,4 +172,45 @@ pub(super) fn setsockopt_int(
     } else {
         Ok(())
     }
+}
+
+fn path_cstr(path: &Path) -> Option<CString> {
+    CString::new(path.as_os_str().as_bytes()).ok()
+}
+
+fn access(path: &Path, mode: libc::c_int) -> bool {
+    let Some(c_path) = path_cstr(path) else {
+        return false;
+    };
+    // SAFETY: `c_path` is a live CStr. `access` does not keep the pointer.
+    unsafe { libc::access(c_path.as_ptr(), mode) == 0 }
+}
+
+pub(super) fn present(path: &Path) -> bool {
+    access(path, libc::F_OK)
+}
+
+pub(super) fn writable(path: &Path) -> bool {
+    access(path, libc::W_OK)
+}
+
+pub(super) fn groups() -> Vec<u32> {
+    // SAFETY: `getegid` has no pointer arguments.
+    let egid = unsafe { libc::getegid() };
+    // SAFETY: `n` is 0 and the pointer is null. POSIX `getgroups(0, null)` returns the count.
+    let n = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    if n < 0 {
+        return vec![egid];
+    }
+    let mut buf = vec![0; n as usize];
+    // SAFETY: `buf` has `n` `gid_t` slots. `getgroups` writes at most that many.
+    let filled = unsafe { libc::getgroups(buf.len() as libc::c_int, buf.as_mut_ptr()) };
+    if filled < 0 {
+        return vec![egid];
+    }
+    let mut out = buf[..filled as usize].to_vec();
+    if !out.contains(&egid) {
+        out.push(egid);
+    }
+    out
 }
