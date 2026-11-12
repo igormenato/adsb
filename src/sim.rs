@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use trck::modes::{airborne_position, hex14, identification, status, velocity};
@@ -554,29 +554,31 @@ fn render(tracks: &[Track]) -> (String, String) {
         out.push_str(&hex);
         out.push('\n');
     }
-    let mut truth_buf = Vec::new();
-    {
-        let mut truth_wtr = csv::WriterBuilder::new()
-            .terminator(csv::Terminator::Any(b'\n'))
-            .from_writer(&mut truth_buf);
+    let mut truth_wtr = csv::WriterBuilder::new()
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_writer(Vec::new());
+    for (ms, icao, lat, lon, alt_ft) in truth_rows {
         truth_wtr
-            .write_record(["ts", "icao", "lat", "lon", "alt_ft"])
-            .expect("truth header");
-        for (ms, icao, lat, lon, alt_ft) in truth_rows {
-            truth_wtr
-                .write_record([
-                    format_ts(ms),
-                    format!("{icao:06x}"),
-                    format!("{lat:.8}"),
-                    format!("{lon:.8}"),
-                    alt_ft.to_string(),
-                ])
-                .expect("truth row");
-        }
-        truth_wtr.flush().expect("truth flush");
+            .serialize(TruthRow {
+                ts: format_ts(ms),
+                icao: format!("{icao:06x}"),
+                lat: format!("{lat:.8}"),
+                lon: format!("{lon:.8}"),
+                alt_ft,
+            })
+            .expect("truth row");
     }
-    let truth = String::from_utf8(truth_buf).expect("truth utf8");
+    let truth = String::from_utf8(truth_wtr.into_inner().expect("truth buf")).expect("truth utf8");
     (out, truth)
+}
+
+#[derive(Serialize)]
+struct TruthRow {
+    ts: String,
+    icao: String,
+    lat: String,
+    lon: String,
+    alt_ft: i32,
 }
 
 fn event(n: u32, has_squawk: bool) -> Event {

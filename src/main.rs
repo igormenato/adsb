@@ -1,7 +1,7 @@
 //! Decode 1090 MHz ADS-B and write one UART frame per airborne position.
 
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -15,8 +15,8 @@ use clap::{Parser, Subcommand};
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
 use trck::{
-    DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Lines, Queue, ReplayLine, Table, Tracker,
-    check_positions, is_mode_s, parse_hex_frame, parse_replay_line,
+    DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Lines, Queue, Replay, ReplayLine, Table, Tracker,
+    check_positions, is_mode_s, parse_hex_frame,
 };
 
 mod doctor;
@@ -562,19 +562,21 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
     let mut decoded = 0usize;
     let mut malformed = 0usize;
     let mut fixes = 0usize;
-    for line in BufReader::new(input).lines() {
+    let mut replay = Replay::new(input);
+    loop {
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        let line = match line {
-            Ok(line) => line,
+        let line = match replay.next_record() {
+            Ok(None) => break,
+            Ok(Some(line)) => line,
             Err(err) => {
                 eprintln!("{}: {err}", file.display());
                 print_replay_summary(read, decoded, malformed, fixes, writer.frames_written);
                 return ExitCode::from(1);
             }
         };
-        match parse_replay_line(&line) {
+        match line {
             ReplayLine::Skip => {}
             ReplayLine::Malformed => malformed += 1,
             ReplayLine::Frame { timestamp, frame } => {
