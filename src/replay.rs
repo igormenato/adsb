@@ -1,37 +1,43 @@
-//! Recorded `ts,hex` lines for [`crate::Tracker::ingest`].
-
 use crate::decode::parse_hex_frame;
 
-/// One CSV line from a recording.
 #[derive(Debug, PartialEq)]
 pub enum ReplayLine {
-    /// Blank or `#` comment.
     Skip,
-    /// A Mode S frame with the recording timestamp.
     Frame { timestamp: f64, frame: Vec<u8> },
-    /// Missing comma, bad time, or hex that is not a Mode S frame.
     Malformed,
 }
 
 /// Parse one `ts,hex` line. Blank and comment lines are [`ReplayLine::Skip`].
+/// Extra columns after hex are ignored. Quotes around a field are stripped.
 pub fn parse_replay_line(line: &str) -> ReplayLine {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return ReplayLine::Skip;
     }
-    let Some((time, hex)) = line.split_once(',') else {
+    let mut fields = line.split(',');
+    let Some(time) = fields.next() else {
         return ReplayLine::Malformed;
     };
-    let Ok(timestamp) = time.trim().parse::<f64>() else {
+    let Some(hex) = fields.next() else {
+        return ReplayLine::Malformed;
+    };
+    let Ok(timestamp) = csv_field(time).parse::<f64>() else {
         return ReplayLine::Malformed;
     };
     if !timestamp.is_finite() {
         return ReplayLine::Malformed;
     }
-    let Some(frame) = parse_hex_frame(hex.trim().as_bytes()) else {
+    let Some(frame) = parse_hex_frame(csv_field(hex).as_bytes()) else {
         return ReplayLine::Malformed;
     };
     ReplayLine::Frame { timestamp, frame }
+}
+
+fn csv_field(text: &str) -> &str {
+    let text = text.trim();
+    text.strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+        .unwrap_or(text)
 }
 
 #[cfg(test)]
@@ -52,6 +58,18 @@ mod tests {
         match parse_replay_line(line) {
             ReplayLine::Frame { timestamp, frame } => {
                 assert_eq!(timestamp, 1.5);
+                assert_eq!(frame.len(), 14);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn pymodes_quoted_hex_and_extra_columns() {
+        let line = r#"1457996400,"8D406B909945DE10000405999BE4","406B90",19"#;
+        match parse_replay_line(line) {
+            ReplayLine::Frame { timestamp, frame } => {
+                assert_eq!(timestamp, 1_457_996_400.0);
                 assert_eq!(frame.len(), 14);
             }
             other => panic!("{other:?}"),
