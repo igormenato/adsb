@@ -1,8 +1,9 @@
 //! RTL-SDR at 1090 MHz, demodulated by rs1090.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use anyhow::{Context as _, Result, bail};
 
 use desperado::{IqAsyncSource, IqFormat, IqSource};
 use futures_util::StreamExt;
@@ -11,6 +12,8 @@ use rs1090::source::demod::demod2400::demodulate2400;
 use rs1090::source::demod::magnitude_u16;
 
 use trck::{Fix, Tracker};
+
+use super::Stop;
 
 const CENTER_HZ: u32 = 1_090_000_000;
 pub const SAMPLE_HZ: u32 = 2_400_000;
@@ -84,9 +87,9 @@ impl Demod {
     }
 }
 
-pub async fn run_rtlsdr(device: usize, enqueue: impl Fn(Fix), stop: &AtomicBool) {
+pub async fn run_rtlsdr(device: usize, enqueue: impl Fn(Fix), stop: &Stop) {
     let mut delay = OPEN_RETRY;
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.is_set() {
         match IqAsyncSource::from_rtlsdr(device, CENTER_HZ, SAMPLE_HZ, Some(GAIN_TENTHS_DB)).await {
             Ok(mut source) => {
                 eprintln!("rtlsdr {device} open");
@@ -100,20 +103,24 @@ pub async fn run_rtlsdr(device: usize, enqueue: impl Fn(Fix), stop: &AtomicBool)
                 eprintln!("rtlsdr {device}: {err}");
             }
         }
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_set() {
             break;
         }
-        tokio::time::sleep(delay).await;
+        tokio::select! {
+            biased;
+            () = stop.wait() => break,
+            () = tokio::time::sleep(delay) => {}
+        }
         delay = delay.saturating_mul(2).min(Duration::from_secs(30));
     }
 }
 
-async fn demodulate(source: &mut IqAsyncSource, enqueue: &impl Fn(Fix), stop: &AtomicBool) {
+async fn demodulate(source: &mut IqAsyncSource, enqueue: &impl Fn(Fix), stop: &Stop) {
     let mut demod = Demod::new();
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.is_set() {
         let chunk = tokio::select! {
             biased;
-            () = wait_stop(stop) => return,
+            () = stop.wait() => return,
             chunk = source.next() => chunk,
         };
         let Some(chunk) = chunk else {
@@ -132,30 +139,25 @@ async fn demodulate(source: &mut IqAsyncSource, enqueue: &impl Fn(Fix), stop: &A
     }
 }
 
-pub fn run_iq(
-    path: &Path,
-    sample_hz: u32,
-    enqueue: impl Fn(Fix),
-    stop: &AtomicBool,
-) -> Result<IqStats, String> {
+pub fn run_iq(path: &Path, sample_hz: u32, enqueue: impl Fn(Fix), stop: &Stop) -> Result<IqStats> {
     if sample_hz == 0 {
-        return Err("iq-rate must be > 0".into());
+        bail!("iq-rate must be > 0");
     }
     let mut source = IqSource::from_file(path, CENTER_HZ, sample_hz, FILE_CHUNK, IqFormat::Cu8)
-        .map_err(|err| format!("{}: {err}", path.display()))?;
+        .with_context(|| path.display().to_string())?;
     let mut demod = Demod::new();
     let mut resamp = (sample_hz != SAMPLE_HZ).then(|| Resamp::new(sample_hz));
     for chunk in &mut source {
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_set() {
             return Ok(demod.stats);
         }
-        let buf = chunk.map_err(|err| format!("{}: {err}", path.display()))?;
+        let buf = chunk.with_context(|| path.display().to_string())?;
         match resamp.as_mut() {
             Some(resamp) => demod.push(&resamp.push(&buf), &enqueue, true),
             None => demod.push(&buf, &enqueue, true),
         }
     }
-    if !stop.load(Ordering::Relaxed) {
+    if !stop.is_set() {
         demod.finish(&enqueue, true);
     }
     Ok(demod.stats)
@@ -211,11 +213,5 @@ impl Resamp {
         }
         self.seen += chunk.len() as i64;
         out
-    }
-}
-
-async fn wait_stop(stop: &AtomicBool) {
-    while !stop.load(Ordering::Relaxed) {
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

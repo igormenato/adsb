@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -146,42 +147,35 @@ struct Scenario {
 }
 
 pub fn run(opts: Args) -> ExitCode {
-    let (frames, truth) = match generate(&opts) {
-        Ok(out) => out,
+    match run_inner(opts) {
+        Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("sim: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    if let Err(err) = write_out(opts.out.as_deref(), &frames) {
-        eprintln!("sim: {err}");
-        return ExitCode::from(1);
-    }
-    if let Some(path) = opts.truth.as_deref()
-        && let Err(err) = fs::write(path, truth)
-    {
-        eprintln!("sim: {err}");
-        return ExitCode::from(1);
-    }
-    if let Some(path) = opts.iq_out.as_deref() {
-        match write_iq(path, &frames, &opts) {
-            Ok(()) => {}
-            Err(err) => {
-                eprintln!("sim: {err}");
-                return ExitCode::from(1);
-            }
+            eprintln!("sim: {err:#}");
+            ExitCode::from(1)
         }
     }
-    ExitCode::SUCCESS
 }
 
-fn write_iq(path: &Path, text: &str, opts: &Args) -> Result<(), String> {
+fn run_inner(opts: Args) -> Result<()> {
+    let (frames, truth) = generate(&opts)?;
+    write_out(opts.out.as_deref(), &frames)?;
+    if let Some(path) = opts.truth.as_deref() {
+        fs::write(path, truth)?;
+    }
+    if let Some(path) = opts.iq_out.as_deref() {
+        write_iq(path, &frames, &opts)?;
+    }
+    Ok(())
+}
+
+fn write_iq(path: &Path, text: &str, opts: &Args) -> Result<()> {
     let mut frames = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let hex = line.split_once(',').map(|p| p.1).unwrap_or(line);
-        let raw = parse_hex_frame(hex.as_bytes()).ok_or_else(|| format!("iq frame {i}: {hex}"))?;
+        let raw = parse_hex_frame(hex.as_bytes())
+            .ok_or_else(|| anyhow::anyhow!("iq frame {i}: {hex}"))?;
         if raw.len() != 14 {
-            return Err(format!("iq frame {i}: expected 14 bytes"));
+            bail!("iq frame {i}: expected 14 bytes");
         }
         let mut frame = [0u8; 14];
         frame.copy_from_slice(&raw);
@@ -197,7 +191,7 @@ fn write_iq(path: &Path, text: &str, opts: &Args) -> Result<(), String> {
             overlap_us: None,
         },
     )?;
-    fs::write(path, bytes).map_err(|err| format!("{}: {err}", path.display()))
+    fs::write(path, bytes).with_context(|| path.display().to_string())
 }
 
 fn write_out(path: Option<&Path>, text: &str) -> io::Result<()> {
@@ -211,27 +205,30 @@ fn write_out(path: Option<&Path>, text: &str) -> io::Result<()> {
     }
 }
 
-fn generate(opts: &Args) -> Result<(String, String), String> {
+fn generate(opts: &Args) -> Result<(String, String)> {
     if !opts.trace.is_empty() {
         return Ok(render(&load_traces(&opts.trace, opts.from, opts.until)?));
     }
-    let path = opts.scenario.as_deref().ok_or("scenario or --trace")?;
+    let path = opts
+        .scenario
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("scenario or --trace"))?;
     let scenario = load(path)?;
     Ok(render(&scenario_tracks(&scenario)))
 }
 
-fn load(path: &Path) -> Result<Scenario, String> {
-    let text = fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
-    let file: File = toml::from_str(&text).map_err(|err| format!("{}: {err}", path.display()))?;
+fn load(path: &Path) -> Result<Scenario> {
+    let text = fs::read_to_string(path).with_context(|| path.display().to_string())?;
+    let file: File = toml::from_str(&text).with_context(|| path.display().to_string())?;
     check(file)
 }
 
-fn check(file: File) -> Result<Scenario, String> {
+fn check(file: File) -> Result<Scenario> {
     if !file.duration.is_finite() || file.duration <= 0.0 {
-        return Err("duration must be > 0".into());
+        bail!("duration must be > 0");
     }
     if file.aircraft.is_empty() {
-        return Err("scenario needs at least one [[aircraft]]".into());
+        bail!("scenario needs at least one [[aircraft]]");
     }
     let mut aircraft = Vec::with_capacity(file.aircraft.len());
     for (i, raw) in file.aircraft.into_iter().enumerate() {
@@ -243,48 +240,47 @@ fn check(file: File) -> Result<Scenario, String> {
     })
 }
 
-fn parse_aircraft(i: usize, raw: RawAircraft) -> Result<Aircraft, String> {
-    let at = |msg: String| format!("aircraft[{i}]: {msg}");
-    let icao = parse_icao(&raw.icao).map_err(at)?;
-    let callsign = parse_callsign(&raw.callsign).map_err(at)?;
+fn parse_aircraft(i: usize, raw: RawAircraft) -> Result<Aircraft> {
+    let icao = parse_icao(&raw.icao).with_context(|| format!("aircraft[{i}]"))?;
+    let callsign = parse_callsign(&raw.callsign).with_context(|| format!("aircraft[{i}]"))?;
     let squawk = match raw.squawk {
-        Some(text) => Some(parse_squawk(&text).map_err(at)?),
+        Some(text) => Some(parse_squawk(&text).with_context(|| format!("aircraft[{i}]"))?),
         None => None,
     };
     if !raw.lat.is_finite() || !(-90.0..=90.0).contains(&raw.lat) {
-        return Err(at("lat must be finite in -90..=90".into()));
+        bail!("aircraft[{i}]: lat must be finite in -90..=90");
     }
     if !raw.lon.is_finite() || !(-180.0..=180.0).contains(&raw.lon) {
-        return Err(at("lon must be finite in -180..=180".into()));
+        bail!("aircraft[{i}]: lon must be finite in -180..=180");
     }
     if !(-1000..=50_000).contains(&raw.alt_ft) {
-        return Err(at("alt_ft is out of range".into()));
+        bail!("aircraft[{i}]: alt_ft is out of range");
     }
     if !raw.heading_deg.is_finite() {
-        return Err(at("heading_deg must be finite".into()));
+        bail!("aircraft[{i}]: heading_deg must be finite");
     }
     if !raw.speed_kt.is_finite() || raw.speed_kt < 0.0 {
-        return Err(at("speed_kt must be >= 0".into()));
+        bail!("aircraft[{i}]: speed_kt must be >= 0");
     }
     if !raw.rate_hz.is_finite() || raw.rate_hz <= 0.0 {
-        return Err(at("rate_hz must be > 0".into()));
+        bail!("aircraft[{i}]: rate_hz must be > 0");
     }
     match (raw.turn_at, raw.heading_to_deg) {
         (None, None) => {}
         (Some(t), Some(h)) if t.is_finite() && t >= 0.0 && h.is_finite() => {}
         _ => {
-            return Err(at(
-                "turn_at and heading_to_deg must both be set to a finite heading change".into(),
-            ));
+            bail!(
+                "aircraft[{i}]: turn_at and heading_to_deg must both be set to a finite heading change"
+            );
         }
     }
     match (raw.climb_at, raw.alt_to_ft) {
         (None, None) => {}
         (Some(t), Some(alt)) if t.is_finite() && t >= 0.0 && (-1000..=50_000).contains(&alt) => {}
         _ => {
-            return Err(at(
-                "climb_at and alt_to_ft must both be set to a finite altitude change".into(),
-            ));
+            bail!(
+                "aircraft[{i}]: climb_at and alt_to_ft must both be set to a finite altitude change"
+            );
         }
     }
     Ok(Aircraft {
@@ -304,32 +300,32 @@ fn parse_aircraft(i: usize, raw: RawAircraft) -> Result<Aircraft, String> {
     })
 }
 
-fn parse_icao(text: &str) -> Result<u32, String> {
+fn parse_icao(text: &str) -> Result<u32> {
     let text = text.trim();
     if text.len() != 6 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("icao must be 6 hex digits".into());
+        bail!("icao must be 6 hex digits");
     }
-    u32::from_str_radix(text, 16).map_err(|err| err.to_string())
+    Ok(u32::from_str_radix(text, 16)?)
 }
 
-fn parse_callsign(text: &str) -> Result<String, String> {
+fn parse_callsign(text: &str) -> Result<String> {
     let text = text.trim();
     if text.is_empty() || text.len() > 8 {
-        return Err("callsign must be 1..=8 characters".into());
+        bail!("callsign must be 1..=8 characters");
     }
     if !text
         .chars()
         .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == ' ')
     {
-        return Err("callsign must be A-Z, 0-9, or space".into());
+        bail!("callsign must be A-Z, 0-9, or space");
     }
     Ok(text.to_string())
 }
 
-fn parse_squawk(text: &str) -> Result<u16, String> {
+fn parse_squawk(text: &str) -> Result<u16> {
     let text = text.trim();
     if text.len() != 4 || !text.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
-        return Err("squawk must be 4 octal digits".into());
+        bail!("squawk must be 4 octal digits");
     }
     let b = text.as_bytes();
     Ok(u16::from(b[0] - b'0') << 12
@@ -372,34 +368,30 @@ fn scenario_tracks(scenario: &Scenario) -> Vec<Track> {
         .collect()
 }
 
-fn load_traces(
-    paths: &[PathBuf],
-    from: Option<f64>,
-    until: Option<f64>,
-) -> Result<Vec<Track>, String> {
+fn load_traces(paths: &[PathBuf], from: Option<f64>, until: Option<f64>) -> Result<Vec<Track>> {
     if let (Some(from), Some(until)) = (from, until)
         && from.partial_cmp(&until) != Some(std::cmp::Ordering::Less)
     {
-        return Err("--from must be < --until".into());
+        bail!("--from must be < --until");
     }
     let mut tracks = Vec::with_capacity(paths.len());
     for path in paths {
         tracks.push(load_trace(path, from, until)?);
     }
     if tracks.iter().all(|track| track.samples.is_empty()) {
-        return Err("no airborne samples in window".into());
+        bail!("no airborne samples in window");
     }
     Ok(tracks)
 }
 
-fn load_trace(path: &Path, from: Option<f64>, until: Option<f64>) -> Result<Track, String> {
-    let at = |msg: String| format!("{}: {msg}", path.display());
-    let text = fs::read_to_string(path).map_err(|err| at(err.to_string()))?;
-    let file: TraceFile = serde_json::from_str(&text).map_err(|err| at(err.to_string()))?;
+fn load_trace(path: &Path, from: Option<f64>, until: Option<f64>) -> Result<Track> {
+    let text = fs::read_to_string(path).with_context(|| path.display().to_string())?;
+    let file: TraceFile =
+        serde_json::from_str(&text).with_context(|| path.display().to_string())?;
     if !file.timestamp.is_finite() {
-        return Err(at("timestamp must be finite".into()));
+        bail!("{}: timestamp must be finite", path.display());
     }
-    let icao = parse_icao(&file.icao).map_err(at)?;
+    let icao = parse_icao(&file.icao).with_context(|| path.display().to_string())?;
     let mut samples = Vec::new();
     let mut callsign = None;
     let mut squawk = None;
@@ -694,18 +686,18 @@ rate_hz = 2
     #[test]
     fn malformed_scenario_is_an_error() {
         let path = write_tmp("bad.toml", "duration = 1\n");
-        let err = load(&path).unwrap_err();
+        let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("aircraft"), "{err}");
         let path = write_tmp("icao.toml", &sample().replace("ABC001", "zz"));
-        let err = load(&path).unwrap_err();
+        let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("icao"), "{err}");
         let path = write_tmp("not-toml.toml", "[[[");
-        let err = load(&path).unwrap_err();
+        let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("not-toml.toml"), "{err}");
         let _ = fs::remove_file(path);
     }
 
-    fn generate_scenario(path: &Path) -> Result<(String, String), String> {
+    fn generate_scenario(path: &Path) -> Result<(String, String)> {
         generate(&Args {
             scenario: Some(path.to_path_buf()),
             trace: Vec::new(),
