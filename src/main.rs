@@ -1,49 +1,33 @@
 //! Decode 1090 MHz ADS-B and write one UART frame per airborne position.
 
 use std::fs;
-use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
-use nix::errno::Errno;
-use nix::poll::{PollFd, PollFlags};
-use nix::sys::socket::{setsockopt, sockopt};
-use nix::unistd::isatty;
-use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{
-    DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Lines, Queue, Replay, ReplayLine, Table, Tracker,
-    check_positions, is_mode_s, parse_hex_frame,
-};
+use trck::{DEFAULT_PATH, Replay, ReplayLine, Tracker, is_mode_s};
+
+use writer::Writer;
 
 mod doctor;
+mod hex;
 mod iq;
 mod radio;
 mod sim;
 mod stress;
 mod sys;
+mod writer;
 
 const DEFAULT_UART: &str = "/dev/serial0";
 const DEFAULT_BAUD: u32 = 115_200;
 const CHECK_PAUSE: Duration = Duration::from_secs(1);
 const POLL_SLICE: Duration = Duration::from_millis(200);
-const CONNECT_SLICE: Duration = Duration::from_millis(50);
-const QUEUE_CAP: usize = 64;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const RETRY_MIN: Duration = Duration::from_secs(1);
-const RETRY_MAX: Duration = Duration::from_secs(30);
-const KEEPALIVE_IDLE_S: u32 = 30;
-const KEEPALIVE_INTERVAL_S: u32 = 10;
-const KEEPALIVE_PROBES: u32 = 3;
-const MAX_LINE: usize = 8192;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -180,256 +164,9 @@ impl std::fmt::Display for Pace {
     }
 }
 
-#[derive(Debug)]
-enum ChunkError {
-    Stopped,
-    Failed(io::Error),
-}
-
-#[derive(Debug)]
-enum Pump {
-    Stopped,
-    Disconnected,
-    Uart(io::Error),
-}
-
-enum Sink {
-    Uart(TTYPort),
-    Stdout,
-}
-
-struct Shared {
-    queue: Mutex<Queue>,
-    ready: Condvar,
-    table: Mutex<Option<Table>>,
-}
-
-impl Shared {
-    fn new(table: Option<Table>) -> Arc<Self> {
-        Arc::new(Self {
-            queue: Mutex::new(Queue::new(QUEUE_CAP)),
-            ready: Condvar::new(),
-            table: Mutex::new(table),
-        })
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Queue> {
-        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn push(&self, fix: Fix) -> Option<Fix> {
-        self.push_at(fix, SystemTime::now())
-    }
-
-    fn push_at(&self, fix: Fix, now: SystemTime) -> Option<Fix> {
-        let dropped = self.lock().push(fix);
-        self.ready.notify_one();
-        self.append_row_at(&fix, now);
-        dropped
-    }
-
-    fn append_row_at(&self, fix: &Fix, now: SystemTime) {
-        let mut table = self.table.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(table) = table.as_mut() else {
-            return;
-        };
-        if let Err(err) = table.append_at(fix, now) {
-            eprintln!("table: {err}");
-        }
-    }
-}
-
-struct Writer {
-    sink: Sink,
-    stop: Arc<Stop>,
-    shared: Arc<Shared>,
-    frames_written: usize,
-}
-
-impl Writer {
-    fn has_pending(&self) -> bool {
-        self.shared.lock().has_pending()
-    }
-
-    fn uart_fd(&self) -> Option<BorrowedFd<'_>> {
-        match &self.sink {
-            Sink::Uart(port) => Some(sys::as_fd(port)),
-            Sink::Stdout => None,
-        }
-    }
-
-    fn enqueue(&mut self, fix: Fix) {
-        self.enqueue_at(fix, SystemTime::now());
-    }
-
-    fn enqueue_at(&mut self, fix: Fix, now: SystemTime) {
-        if let Some(dropped) = self.shared.push_at(fix, now) {
-            log_drop(&dropped);
-        }
-    }
-
-    fn write_some(&mut self) -> Result<(), ChunkError> {
-        loop {
-            if self.stop.is_set() {
-                return Err(ChunkError::Stopped);
-            }
-            let mut buf = [0u8; FRAME_LEN];
-            let n = {
-                let mut q = self.shared.lock();
-                if !q.begin() {
-                    return Ok(());
-                }
-                let rest = q.unsent();
-                buf[..rest.len()].copy_from_slice(rest);
-                rest.len()
-            };
-            let wrote = match write_sink(&mut self.sink, &buf[..n]) {
-                Ok(0) => {
-                    return Err(ChunkError::Failed(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "uart write wrote nothing",
-                    )));
-                }
-                Ok(n) => n,
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) => return Err(ChunkError::Failed(err)),
-            };
-            if self.shared.lock().advance(wrote) {
-                self.frames_written += 1;
-            }
-        }
-    }
-
-    fn wait_idle(&self, timeout: Duration) {
-        let q = self.shared.lock();
-        if q.has_pending() {
-            return;
-        }
-        match self.shared.ready.wait_timeout(q, timeout) {
-            Ok(_) => {}
-            Err(poison) => {
-                let _ = poison.into_inner();
-            }
-        }
-    }
-}
-
-fn log_drop(fix: &Fix) {
-    let emergency = fix.aircraft.emergency.map(EmergencyKind::code).unwrap_or(0);
-    eprintln!(
-        "dropped frame icao={:06x} emergency={emergency}",
-        fix.aircraft.icao
-    );
-}
-
-fn log_fix(fix: &Fix) {
-    eprintln!("fix icao={:06x}", fix.aircraft.icao);
-}
-
-fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
-    match sink {
-        Sink::Uart(port) => sys::write(sys::as_fd(port), bytes),
-        Sink::Stdout => {
-            let mut out = io::stdout().lock();
-            out.write_all(bytes)?;
-            out.flush()?;
-            Ok(bytes.len())
-        }
-    }
-}
-
-struct HexLines<R> {
-    reader: R,
-    buf: Lines,
-    tracker: Tracker,
-}
-
-enum Pull {
-    Bytes,
-    Eof,
-}
-
-impl<R: Read> HexLines<R> {
-    fn pull(&mut self) -> Result<Pull, io::Error> {
-        let mut tmp = [0u8; 4096];
-        loop {
-            match self.reader.read(&mut tmp) {
-                Ok(0) => return Ok(Pull::Eof),
-                Ok(n) => self.buf.append(&tmp[..n]),
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(Pull::Bytes),
-                Err(err) => return Err(err),
-            }
-        }
-    }
-}
-
 fn fail(err: impl std::fmt::Display) -> ExitCode {
     eprintln!("{err}");
     ExitCode::from(1)
-}
-
-fn open_table(path: &Path) -> Option<Table> {
-    match Table::open(path) {
-        Ok(table) => Some(table),
-        Err(err) => {
-            eprintln!("cannot open {}: {err}", path.display());
-            None
-        }
-    }
-}
-
-fn open_uart(
-    path: &str,
-    baud: u32,
-    stop: Arc<Stop>,
-    shared: Arc<Shared>,
-) -> anyhow::Result<Writer> {
-    let port = serialport::new(path, baud)
-        .data_bits(DataBits::Eight)
-        .parity(Parity::None)
-        .stop_bits(StopBits::One)
-        .flow_control(FlowControl::None)
-        .timeout(Duration::ZERO)
-        .open_native()
-        .with_context(|| format!("cannot open {path}"))?;
-    port.clear(ClearBuffer::All)
-        .with_context(|| format!("cannot open {path}"))?;
-    sys::set_nonblocking(sys::as_fd(&port)).with_context(|| format!("cannot open {path}"))?;
-    Ok(Writer {
-        sink: Sink::Uart(port),
-        stop,
-        shared,
-        frames_written: 0,
-    })
-}
-
-fn open_output(
-    path: &str,
-    baud: u32,
-    stop: Arc<Stop>,
-    table: Option<Table>,
-) -> anyhow::Result<Writer> {
-    let shared = Shared::new(table);
-    if path == "-" {
-        return Ok(Writer {
-            sink: Sink::Stdout,
-            stop,
-            shared,
-            frames_written: 0,
-        });
-    }
-    open_uart(path, baud, stop, shared)
-}
-
-fn resolve_addr(text: &str) -> Option<Vec<SocketAddr>> {
-    let addrs: Vec<_> = text.to_socket_addrs().ok()?.collect();
-    if addrs.is_empty() { None } else { Some(addrs) }
-}
-
-fn grow(delay: Duration) -> Duration {
-    delay.saturating_mul(2).min(RETRY_MAX)
 }
 
 fn now_unix() -> f64 {
@@ -453,8 +190,8 @@ fn main() -> ExitCode {
         None => {}
     }
     let stop = Stop::new();
-    let table = open_table(&args.output.table);
-    let mut writer = match open_output(
+    let table = writer::open_table(&args.output.table);
+    let mut writer = match writer::open_output(
         &args.output.uart,
         args.output.baud,
         Arc::clone(&stop),
@@ -476,7 +213,7 @@ fn main() -> ExitCode {
             args.output.baud,
             args.output.table.display()
         );
-        return run_check(&mut writer, &stop);
+        return writer::run_check(&mut writer, &stop);
     }
 
     if let Some(path) = args.iq.as_deref() {
@@ -499,12 +236,12 @@ fn main() -> ExitCode {
             args.output.table.display()
         );
         if text == "-" {
-            return run_hex_stdin(&mut writer, &stop);
+            return hex::run_hex_stdin(&mut writer, &stop);
         }
-        let Some(addrs) = resolve_addr(text) else {
+        let Some(addrs) = hex::resolve_addr(text) else {
             return fail(format!("hex {text}: expected host:port"));
         };
-        return run_hex(&addrs, text, &mut writer, &stop);
+        return hex::run_hex(&addrs, text, &mut writer, &stop);
     }
 
     eprintln!(
@@ -543,13 +280,13 @@ fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<Stop>) -> ExitCode {
                 &path,
                 rate,
                 move |fix| {
-                    log_fix(&fix);
+                    writer::log_fix(&fix);
                     if csv_on {
                         n_csv.fetch_add(1, Ordering::Relaxed);
                     }
                     if let Some(dropped) = enqueue_shared.push(fix) {
                         n_drop.fetch_add(1, Ordering::Relaxed);
-                        log_drop(&dropped);
+                        writer::log_drop(&dropped);
                     }
                 },
                 &radio_stop,
@@ -561,7 +298,7 @@ fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<Stop>) -> ExitCode {
             shared.ready.notify_one();
         })
     };
-    let code = run_writer(writer, &stop, Some(&done));
+    let code = writer::run_writer(writer, &stop, Some(&done));
     stop.request();
     let _ = reader.join();
     let got = *stats.lock().unwrap_or_else(PoisonError::into_inner);
@@ -584,8 +321,8 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
             Ok(input) => input,
             Err(err) => return fail(format!("{err:#}")),
         };
-    let table = open_table(table_path);
-    let mut writer = match open_output(uart, baud, Arc::clone(&stop), table) {
+    let table = writer::open_table(table_path);
+    let mut writer = match writer::open_output(uart, baud, Arc::clone(&stop), table) {
         Ok(writer) => writer,
         Err(err) => return fail(format!("{err:#}")),
     };
@@ -632,17 +369,17 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
                 prev = Some(timestamp);
                 if let Some(fix) = tracker.ingest(timestamp, &frame) {
                     fixes += 1;
-                    log_fix(&fix);
+                    writer::log_fix(&fix);
                     writer.enqueue_at(fix, unix_time(timestamp));
                 }
                 if let Err(err) = writer.write_some() {
                     print_replay_summary(read, decoded, malformed, fixes, writer.frames_written);
-                    return write_exit(err);
+                    return writer::write_exit(err);
                 }
             }
         }
     }
-    let drain = drain_writer(&mut writer, &stop);
+    let drain = writer::drain_writer(&mut writer, &stop);
     print_replay_summary(read, decoded, malformed, fixes, writer.frames_written);
     match drain {
         Ok(()) => {
@@ -651,7 +388,7 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
             }
             ExitCode::SUCCESS
         }
-        Err(err) => write_exit(err),
+        Err(err) => writer::write_exit(err),
     }
 }
 
@@ -659,25 +396,6 @@ fn print_replay_summary(read: usize, decoded: usize, malformed: usize, fixes: us
     eprintln!(
         "frames read={read} decoded={decoded} malformed={malformed} fixes={fixes} UART frames written={uart}"
     );
-}
-
-fn drain_writer(writer: &mut Writer, stop: &Stop) -> Result<(), ChunkError> {
-    loop {
-        writer.write_some()?;
-        if !writer.has_pending() {
-            return Ok(());
-        }
-        if stop.is_set() {
-            return Err(ChunkError::Stopped);
-        }
-        let Some(fd) = writer.uart_fd() else {
-            continue;
-        };
-        let mut poll_fd = PollFd::new(fd, PollFlags::POLLOUT);
-        if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE) {
-            return Err(ChunkError::Failed(err));
-        }
-    }
 }
 
 fn pace_sleep(pace: Pace, dt: f64, stop: &Stop) {
@@ -728,9 +446,9 @@ fn run_radio(device: usize, writer: Writer, stop: Arc<Stop>) -> ExitCode {
             Ok(rt) => rt.block_on(radio::run_rtlsdr(
                 device,
                 move |fix| {
-                    log_fix(&fix);
+                    writer::log_fix(&fix);
                     if let Some(dropped) = enqueue_shared.push(fix) {
-                        log_drop(&dropped);
+                        writer::log_drop(&dropped);
                     }
                 },
                 &radio_stop,
@@ -740,347 +458,10 @@ fn run_radio(device: usize, writer: Writer, stop: Arc<Stop>) -> ExitCode {
         radio_stop.request();
         shared.ready.notify_one();
     });
-    let code = run_writer(writer, &stop, None);
+    let code = writer::run_writer(writer, &stop, None);
     stop.request();
     let _ = radio.join();
     code
-}
-
-fn run_writer(mut writer: Writer, stop: &Stop, done: Option<&AtomicBool>) -> ExitCode {
-    let mut drain_from = None;
-    loop {
-        if stop.is_set() {
-            eprintln!("stopped");
-            return ExitCode::SUCCESS;
-        }
-        if let Err(err) = writer.write_some() {
-            return write_exit(err);
-        }
-        let finished = done.is_some_and(|flag| flag.load(Ordering::Relaxed));
-        if finished && !writer.has_pending() {
-            return ExitCode::SUCCESS;
-        }
-        if finished {
-            let started = drain_from.get_or_insert_with(Instant::now);
-            if started.elapsed() >= Duration::from_secs(2) {
-                return ExitCode::SUCCESS;
-            }
-        }
-        if writer.has_pending() {
-            if let Some(fd) = writer.uart_fd() {
-                let mut poll_fd = PollFd::new(fd, PollFlags::POLLOUT);
-                if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE) {
-                    eprintln!("uart poll: {err}");
-                    return ExitCode::from(1);
-                }
-            }
-            continue;
-        }
-        writer.wait_idle(POLL_SLICE);
-    }
-}
-
-fn run_check(writer: &mut Writer, stop: &Stop) -> ExitCode {
-    while !stop.is_set() {
-        for position in check_positions() {
-            log_fix(&position);
-            writer.enqueue(position);
-        }
-        let deadline = Instant::now() + CHECK_PAUSE;
-        loop {
-            if stop.is_set() {
-                break;
-            }
-            if let Err(err) = writer.write_some() {
-                return write_exit(err);
-            }
-            let now = Instant::now();
-            if now >= deadline || !writer.has_pending() {
-                sleep_until_stop(stop, deadline.saturating_duration_since(now));
-                break;
-            }
-            let Some(fd) = writer.uart_fd() else {
-                break;
-            };
-            let slice = deadline.saturating_duration_since(now).min(POLL_SLICE);
-            let mut poll_fd = PollFd::new(fd, PollFlags::POLLOUT);
-            if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), slice) {
-                eprintln!("uart poll: {err}");
-                return ExitCode::from(1);
-            }
-        }
-    }
-    eprintln!("stopped");
-    ExitCode::SUCCESS
-}
-
-fn run_hex_stdin(writer: &mut Writer, stop: &Stop) -> ExitCode {
-    let stdin = io::stdin();
-    if !isatty(&stdin).unwrap_or(false)
-        && let Err(err) = sys::set_nonblocking(&stdin)
-    {
-        eprintln!("hex -: {err}");
-        return ExitCode::from(1);
-    }
-    let mut lines = HexLines {
-        reader: stdin,
-        buf: Lines::new(MAX_LINE),
-        tracker: Tracker::new(),
-    };
-    match pump_hex(&mut lines, writer, stop, "-") {
-        Pump::Stopped => write_exit(ChunkError::Stopped),
-        Pump::Uart(err) => write_exit(ChunkError::Failed(err)),
-        Pump::Disconnected => {
-            eprintln!("stopped");
-            ExitCode::SUCCESS
-        }
-    }
-}
-
-fn run_hex(addrs: &[SocketAddr], text: &str, writer: &mut Writer, stop: &Stop) -> ExitCode {
-    let mut delay = RETRY_MIN;
-    while !stop.is_set() {
-        match dial_first(addrs, stop, text) {
-            Ok(stream) => {
-                eprintln!("hex {text} connected");
-                match pump(stream, writer, stop, text) {
-                    Pump::Stopped => return write_exit(ChunkError::Stopped),
-                    Pump::Uart(err) => return write_exit(ChunkError::Failed(err)),
-                    Pump::Disconnected => delay = RETRY_MIN,
-                }
-            }
-            Err(DialError::Stopped) => break,
-            Err(DialError::Failed(_)) => {}
-        }
-        if stop.is_set() {
-            break;
-        }
-        sleep_until_stop(stop, delay);
-        delay = grow(delay);
-    }
-    eprintln!("stopped");
-    ExitCode::SUCCESS
-}
-
-#[derive(Debug)]
-enum DialError {
-    Stopped,
-    Failed(io::Error),
-}
-
-fn dial_first(addrs: &[SocketAddr], stop: &Stop, text: &str) -> Result<TcpStream, DialError> {
-    if addrs.is_empty() {
-        eprintln!("hex {text}: expected host:port");
-        return Err(DialError::Failed(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "expected host:port",
-        )));
-    }
-    let mut last = None;
-    for addr in addrs {
-        if stop.is_set() {
-            return Err(DialError::Stopped);
-        }
-        match dial(addr, stop, CONNECT_TIMEOUT) {
-            Ok(stream) => return Ok(stream),
-            Err(DialError::Stopped) => return Err(DialError::Stopped),
-            Err(DialError::Failed(err)) => {
-                eprintln!("hex {text}: {err}");
-                last = Some(err);
-            }
-        }
-    }
-    Err(DialError::Failed(last.unwrap_or_else(|| {
-        io::Error::new(io::ErrorKind::NotConnected, "connection failed")
-    })))
-}
-
-fn dial(addr: &SocketAddr, stop: &Stop, timeout: Duration) -> Result<TcpStream, DialError> {
-    if stop.is_set() {
-        return Err(DialError::Stopped);
-    }
-    let sock = sys::tcp_socket(addr).map_err(DialError::Failed)?;
-    match sys::connect(&sock, addr) {
-        Ok(()) => {}
-        Err(err) if pending_connect(&err) => wait_connected(sock.as_fd(), stop, timeout)?,
-        Err(err) => return Err(DialError::Failed(err)),
-    }
-    Ok(TcpStream::from(sock))
-}
-
-fn pending_connect(err: &io::Error) -> bool {
-    err.raw_os_error().is_some_and(|code| {
-        let err = Errno::from_raw(code);
-        err == Errno::EINPROGRESS
-            || err == Errno::EAGAIN
-            || err == Errno::EWOULDBLOCK
-            || err == Errno::EINTR
-    })
-}
-
-fn wait_connected(fd: BorrowedFd<'_>, stop: &Stop, timeout: Duration) -> Result<(), DialError> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if stop.is_set() {
-            return Err(DialError::Stopped);
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(DialError::Failed(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "connection timed out",
-            )));
-        }
-        let slice = deadline.saturating_duration_since(now).min(CONNECT_SLICE);
-        let mut poll_fd = PollFd::new(fd, PollFlags::POLLOUT);
-        let rc = match sys::poll(std::slice::from_mut(&mut poll_fd), slice) {
-            Ok(rc) => rc,
-            Err(err) => return Err(DialError::Failed(err)),
-        };
-        if rc == 0 {
-            continue;
-        }
-        let revents = poll_fd.revents().unwrap_or_else(PollFlags::empty);
-        if !revents.intersects(PollFlags::POLLOUT | PollFlags::POLLERR | PollFlags::POLLHUP) {
-            continue;
-        }
-        let so_error = sys::so_error(fd).map_err(DialError::Failed)?;
-        if so_error != 0 {
-            return Err(DialError::Failed(io::Error::from_raw_os_error(so_error)));
-        }
-        return Ok(());
-    }
-}
-
-fn enable_keepalive(stream: &TcpStream) -> io::Result<()> {
-    setsockopt(stream, sockopt::KeepAlive, &true)?;
-    setsockopt(stream, sockopt::TcpKeepIdle, &KEEPALIVE_IDLE_S)?;
-    setsockopt(stream, sockopt::TcpKeepInterval, &KEEPALIVE_INTERVAL_S)?;
-    setsockopt(stream, sockopt::TcpKeepCount, &KEEPALIVE_PROBES)?;
-    Ok(())
-}
-
-fn pump(stream: TcpStream, writer: &mut Writer, stop: &Stop, text: &str) -> Pump {
-    if let Err(err) = enable_keepalive(&stream) {
-        eprintln!("hex {text} keepalive: {err}");
-        return Pump::Disconnected;
-    }
-    let mut lines = HexLines {
-        reader: stream,
-        buf: Lines::new(MAX_LINE),
-        tracker: Tracker::new(),
-    };
-    pump_hex(&mut lines, writer, stop, text)
-}
-
-fn pump_hex<R: Read + AsRawFd>(
-    lines: &mut HexLines<R>,
-    writer: &mut Writer,
-    stop: &Stop,
-    text: &str,
-) -> Pump {
-    loop {
-        if stop.is_set() {
-            return Pump::Stopped;
-        }
-        let (socket_revents, uart_ready) = {
-            let reader = sys::as_fd(&lines.reader);
-            let uart = writer.has_pending().then(|| writer.uart_fd()).flatten();
-            let mut fds_two;
-            let mut fds_one;
-            let fds: &mut [PollFd<'_>] = if let Some(uart) = uart {
-                fds_two = [
-                    PollFd::new(reader, PollFlags::POLLIN),
-                    PollFd::new(uart, PollFlags::POLLOUT),
-                ];
-                &mut fds_two
-            } else {
-                fds_one = [PollFd::new(reader, PollFlags::POLLIN)];
-                &mut fds_one
-            };
-            if let Err(err) = sys::poll(fds, POLL_SLICE) {
-                eprintln!("hex {text}: {err}");
-                return end_socket(writer);
-            }
-            let socket_revents = fds[0].revents().unwrap_or_else(PollFlags::empty);
-            let uart_ready = fds.get(1).is_some_and(|fd| {
-                fd.revents()
-                    .unwrap_or_else(PollFlags::empty)
-                    .intersects(PollFlags::POLLOUT | PollFlags::POLLERR | PollFlags::POLLHUP)
-            });
-            (socket_revents, uart_ready)
-        };
-        if stop.is_set() {
-            return Pump::Stopped;
-        }
-        let mut fresh = false;
-        if socket_revents.intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR) {
-            match lines.pull() {
-                Ok(Pull::Eof) => {
-                    enqueue_hex(lines, writer);
-                    eprintln!("hex {text} disconnected");
-                    return end_socket(writer);
-                }
-                Ok(Pull::Bytes) => {
-                    enqueue_hex(lines, writer);
-                    fresh = true;
-                    if socket_revents.intersects(PollFlags::POLLHUP | PollFlags::POLLERR) {
-                        eprintln!("hex {text} disconnected");
-                        return end_socket(writer);
-                    }
-                }
-                Err(err) => {
-                    eprintln!("hex {text}: {err}");
-                    enqueue_hex(lines, writer);
-                    return end_socket(writer);
-                }
-            }
-        }
-        if writer.has_pending()
-            && (fresh || uart_ready || writer.uart_fd().is_none())
-            && let Err(err) = writer.write_some()
-        {
-            return match err {
-                ChunkError::Stopped => Pump::Stopped,
-                ChunkError::Failed(err) => Pump::Uart(err),
-            };
-        }
-    }
-}
-
-fn enqueue_hex<R>(lines: &mut HexLines<R>, writer: &mut Writer) {
-    let timestamp = now_unix();
-    lines.buf.drain(|line| {
-        let Some(frame) = parse_hex_frame(line) else {
-            return;
-        };
-        let Some(fix) = lines.tracker.ingest(timestamp, &frame) else {
-            return;
-        };
-        log_fix(&fix);
-        writer.enqueue(fix);
-    });
-}
-
-fn end_socket(writer: &mut Writer) -> Pump {
-    match writer.write_some() {
-        Ok(()) => Pump::Disconnected,
-        Err(ChunkError::Stopped) => Pump::Stopped,
-        Err(ChunkError::Failed(err)) => Pump::Uart(err),
-    }
-}
-
-fn write_exit(err: ChunkError) -> ExitCode {
-    match err {
-        ChunkError::Stopped => {
-            eprintln!("stopped");
-            ExitCode::SUCCESS
-        }
-        ChunkError::Failed(err) => {
-            eprintln!("uart write failed: {err}");
-            ExitCode::from(1)
-        }
-    }
 }
 
 fn sleep_until_stop(stop: &Stop, timeout: Duration) {
