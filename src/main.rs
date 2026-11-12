@@ -20,7 +20,9 @@ use trck::{
 };
 
 mod doctor;
+mod modes;
 mod radio;
+mod sim;
 mod stress;
 mod sys;
 
@@ -71,6 +73,8 @@ enum Cmd {
     Doctor,
     /// Generate Mode S in-process and run the live decode path.
     Stress(stress::Args),
+    /// Write a scripted Mode S scenario as ts,hex lines.
+    Sim(sim::Args),
     /// Replay recorded `ts,hex` frames through the live pipeline.
     Replay {
         /// CSV of `ts,hex` lines.
@@ -384,6 +388,7 @@ fn main() -> ExitCode {
     match args.command {
         Some(Cmd::Doctor) => return doctor::run(),
         Some(Cmd::Stress(opts)) => return stress::run(opts),
+        Some(Cmd::Sim(opts)) => return sim::run(opts),
         Some(Cmd::Replay {
             file,
             uart,

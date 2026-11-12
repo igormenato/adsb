@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
@@ -1256,6 +1256,178 @@ fn stress_7700_is_on_the_wire() {
         frames.len()
     );
     let _ = fs::remove_file(&table);
+}
+
+const CROSSING: &str = "examples/scenarios/crossing.toml";
+const CLIMB: &str = "examples/scenarios/climb.toml";
+const POS_TOL_M: f64 = 10.0;
+
+fn run_sim(args: &[&str]) -> (std::process::ExitStatus, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .arg("sim")
+        .args(args)
+        .output()
+        .expect("sim");
+    (
+        out.status,
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let r = 6_371_000.0;
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let a = (dlat / 2.0).sin().powi(2)
+        + lat1.to_radians().cos() * lat2.to_radians().cos() * (dlon / 2.0).sin().powi(2);
+    2.0 * r * a.sqrt().asin()
+}
+
+fn parse_truth(text: &str) -> BTreeMap<(i64, u32), (f64, f64, i32)> {
+    let mut rows = BTreeMap::new();
+    for line in text.lines().skip(1) {
+        let cols: Vec<&str> = line.split(',').collect();
+        assert_eq!(cols.len(), 5, "{line}");
+        let ts_ms = (cols[0].parse::<f64>().expect("ts") * 1000.0).round() as i64;
+        let icao = u32::from_str_radix(cols[1], 16).expect("icao");
+        let lat: f64 = cols[2].parse().expect("lat");
+        let lon: f64 = cols[3].parse().expect("lon");
+        let alt: i32 = cols[4].parse().expect("alt");
+        rows.insert((ts_ms, icao), (lat, lon, alt));
+    }
+    rows
+}
+
+fn assert_sim_matches_truth(scenario: &str, expect_7700: bool) -> BTreeMap<u32, f64> {
+    let frames_path = unique_path("frames.csv");
+    let truth_path = unique_path("truth.csv");
+    let (status, _, stderr) = run_sim(&[
+        scenario,
+        "--out",
+        frames_path.to_str().expect("utf8"),
+        "--truth",
+        truth_path.to_str().expect("utf8"),
+    ]);
+    assert!(status.success(), "{stderr}");
+    let frames = fs::read_to_string(&frames_path).expect("frames");
+    let truth = parse_truth(&fs::read_to_string(&truth_path).expect("truth"));
+    assert!(!truth.is_empty(), "{scenario} truth empty");
+    let mut tracker = Tracker::new();
+    let mut max_err = BTreeMap::<u32, f64>::new();
+    let mut fixes = BTreeMap::<u32, usize>::new();
+    let mut saw_callsign = BTreeMap::<u32, bool>::new();
+    let mut saw_7700 = false;
+    for line in frames.lines() {
+        let (ts, hex) = line.split_once(',').expect(line);
+        let t: f64 = ts.parse().expect(ts);
+        let frame = parse_hex_frame(hex.as_bytes()).expect(hex);
+        let Some(fix) = tracker.ingest(t, &frame) else {
+            continue;
+        };
+        let icao = fix.aircraft.icao.to_u24();
+        let ts_ms = (t * 1000.0).round() as i64;
+        let &(lat, lon, alt) = truth
+            .get(&(ts_ms, icao))
+            .unwrap_or_else(|| panic!("no truth for {icao:06x} t={t}"));
+        let got_lat = f64::from(fix.aircraft.latitude_e7) / 10_000_000.0;
+        let got_lon = f64::from(fix.aircraft.longitude_e7) / 10_000_000.0;
+        let err = haversine_m(lat, lon, got_lat, got_lon);
+        let slot = max_err.entry(icao).or_insert(0.0);
+        if err > *slot {
+            *slot = err;
+        }
+        assert!(
+            err < POS_TOL_M,
+            "{scenario} icao={icao:06x} t={t} err={err} m truth={lat},{lon} got={got_lat},{got_lon}"
+        );
+        assert_eq!(fix.aircraft.altitude_ft, Some(alt));
+        let callsign_bytes = fix.aircraft.callsign.as_bytes();
+        let callsign = String::from_utf8_lossy(&callsign_bytes);
+        if !callsign.trim().is_empty() {
+            saw_callsign.insert(icao, true);
+        }
+        if fix.aircraft.emergency == Some(EmergencyKind::General) {
+            saw_7700 = true;
+        }
+        *fixes.entry(icao).or_insert(0) += 1;
+    }
+    for icao in truth.keys().map(|(_, icao)| *icao) {
+        assert!(
+            fixes.get(&icao).copied().unwrap_or(0) > 0,
+            "no fixes for {icao:06x}"
+        );
+        assert_eq!(
+            saw_callsign.get(&icao).copied(),
+            Some(true),
+            "no callsign {icao:06x}"
+        );
+    }
+    if expect_7700 {
+        assert!(saw_7700, "{scenario} missing 7700");
+    }
+    let err_txt: Vec<String> = max_err
+        .iter()
+        .map(|(icao, err)| format!("{icao:06x}={err:.2}"))
+        .collect();
+    let fix_txt: Vec<String> = fixes
+        .iter()
+        .map(|(icao, n)| format!("{icao:06x}={n}"))
+        .collect();
+    eprintln!(
+        "sim {scenario} max position error m {} fixes={}",
+        err_txt.join(" "),
+        fix_txt.join(" ")
+    );
+    let _ = fs::remove_file(&frames_path);
+    let _ = fs::remove_file(&truth_path);
+    max_err
+}
+
+#[test]
+fn sim_help_lists_the_knobs() {
+    let out = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .args(["sim", "--help"])
+        .output()
+        .expect("help");
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("--out"), "{text}");
+    assert!(text.contains("--truth"), "{text}");
+    assert!(
+        text.contains("SCENARIO") || text.contains("scenario"),
+        "{text}"
+    );
+}
+
+#[test]
+fn sim_rejects_a_malformed_scenario() {
+    let path = unique_path("bad.toml");
+    fs::write(&path, "duration = 1\n").expect("write");
+    let (status, stdout, stderr) = run_sim(&[path.to_str().expect("utf8")]);
+    assert!(!status.success(), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("sim:"), "{stderr}");
+    assert!(stderr.contains("aircraft"), "{stderr}");
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn sim_output_is_byte_identical() {
+    let (a_status, a, a_err) = run_sim(&[CROSSING]);
+    let (b_status, b, b_err) = run_sim(&[CROSSING]);
+    assert!(a_status.success(), "{a_err}");
+    assert!(b_status.success(), "{b_err}");
+    assert_eq!(a, b);
+    assert!(a.starts_with("0.000,"), "{a}");
+}
+
+#[test]
+fn sim_fixes_match_scenario_ground_truth() {
+    let crossing = assert_sim_matches_truth(CROSSING, true);
+    let climb = assert_sim_matches_truth(CLIMB, false);
+    assert_eq!(crossing.len(), 2, "{crossing:?}");
+    assert_eq!(climb.len(), 1, "{climb:?}");
 }
 
 fn summary_count(stderr: &str, name: &str) -> u64 {

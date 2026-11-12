@@ -10,27 +10,12 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use trck::{Icao, Tracker};
 
+use super::modes::{EVEN, IDENT, ODD, STATUS, VELOCITY, with_icao};
 use super::{
     DEFAULT_BAUD, DEFAULT_PATH, DEFAULT_UART, now_unix, open_output, open_table, run_writer,
     sleep_until_stop,
 };
 
-/// Known DF17 templates from the decode tests. ICAO and CRC are rewritten.
-const EVEN: [u8; 14] = [
-    0x8D, 0x40, 0x05, 0x8B, 0x58, 0xC9, 0x01, 0x37, 0x51, 0x47, 0xEF, 0xD0, 0x93, 0x57,
-];
-const ODD: [u8; 14] = [
-    0x8D, 0x40, 0x05, 0x8B, 0x58, 0xC9, 0x04, 0xA8, 0x7F, 0x40, 0x2D, 0x3B, 0x8C, 0x59,
-];
-const IDENT: [u8; 14] = [
-    0x8D, 0x40, 0x05, 0x8B, 0x20, 0x50, 0x54, 0xD4, 0xC7, 0x2C, 0xE0, 0x3F, 0x94, 0x9E,
-];
-const VELOCITY: [u8; 14] = [
-    0x8D, 0x40, 0x05, 0x8B, 0x99, 0x04, 0x02, 0x7F, 0xC0, 0x00, 0x00, 0xB1, 0x41, 0x47,
-];
-const STATUS: [u8; 14] = [
-    0x8D, 0x40, 0x05, 0x8B, 0xE1, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA0, 0x5F, 0x30,
-];
 const ICAO_BASE: u32 = 0x10_0000;
 const MIX_PARTS: u32 = 10_000;
 
@@ -292,57 +277,10 @@ impl Frame {
     }
 }
 
-fn with_icao(template: &[u8; 14], icao: u32) -> [u8; 14] {
-    let mut frame = *template;
-    frame[1] = (icao >> 16) as u8;
-    frame[2] = (icao >> 8) as u8;
-    frame[3] = icao as u8;
-    let crc = modes_crc(&frame[..11]);
-    frame[11] = (crc >> 16) as u8;
-    frame[12] = (crc >> 8) as u8;
-    frame[13] = crc as u8;
-    frame
-}
-
-/// Mode S CRC-24. Polynomial `0xFFF409`.
-fn modes_crc(data: &[u8]) -> u32 {
-    let mut crc = 0u32;
-    for &byte in data {
-        crc ^= u32::from(byte) << 16;
-        for _ in 0..8 {
-            crc <<= 1;
-            if crc & 0x0100_0000 != 0 {
-                crc ^= 0x01FF_F409;
-            }
-        }
-    }
-    crc & 0x00FF_FFFF
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use trck::EmergencyKind;
-
-    #[test]
-    fn crc_matches_known_df17() {
-        assert_eq!(modes_crc(&EVEN[..11]), 0xD0_9357);
-        assert_eq!(modes_crc(&ODD[..11]), 0x3B_8C59);
-        assert_eq!(modes_crc(&IDENT[..11]), 0x3F_949E);
-        assert_eq!(modes_crc(&VELOCITY[..11]), 0xB1_4147);
-        assert_eq!(modes_crc(&STATUS[..11]), 0xA0_5F30);
-        assert_eq!(modes_crc(&EVEN), 0);
-    }
-
-    #[test]
-    fn rewriting_icao_keeps_a_valid_crc() {
-        let frame = with_icao(&EVEN, 0x40058B);
-        assert_eq!(frame, EVEN);
-        let patched = with_icao(&EVEN, ICAO_BASE);
-        assert_eq!(&patched[1..4], &[0x10, 0x00, 0x00]);
-        assert_eq!(modes_crc(&patched), 0);
-        assert_ne!(patched[11..], EVEN[11..]);
-    }
 
     #[test]
     fn even_then_odd_for_a_new_icao_solves() {

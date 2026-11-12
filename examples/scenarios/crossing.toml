@@ -1,0 +1,24 @@
+duration = 12
+
+[[aircraft]]
+icao = "ABC001"
+callsign = "TAM1234"
+squawk = "7700"
+lat = -23.43
+lon = -46.47
+alt_ft = 35000
+heading_deg = 90
+speed_kt = 420
+rate_hz = 2
+
+[[aircraft]]
+icao = "ABC002"
+callsign = "AZU99"
+lat = -23.55
+lon = -46.20
+alt_ft = 36000
+heading_deg = 0
+speed_kt = 430
+rate_hz = 2
+turn_at = 8
+heading_to_deg = 45
