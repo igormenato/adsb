@@ -21,6 +21,6 @@ pub use lines::Lines;
 #[doc(inline)]
 pub use queue::Queue;
 #[doc(inline)]
-pub use replay::{ReplayLine, parse_replay_line};
+pub use replay::{Replay, ReplayLine};
 #[doc(inline)]
 pub use table::{DEFAULT_PATH, Table};
