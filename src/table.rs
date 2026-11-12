@@ -10,6 +10,18 @@ use crate::frame::{Callsign, Fix};
 /// Default file in the process working directory.
 pub const DEFAULT_PATH: &str = "aircraft.csv";
 
+const HEADER_FIELDS: &[&str] = &[
+    "icao",
+    "callsign",
+    "lat",
+    "lon",
+    "altitude_ft",
+    "ground_speed_kt",
+    "track_deg",
+    "timestamp",
+];
+
+#[cfg(test)]
 const HEADER: &str = "icao,callsign,lat,lon,altitude_ft,ground_speed_kt,track_deg,timestamp\n";
 
 /// Append-only aircraft table. One file for the whole process.
@@ -38,10 +50,16 @@ impl Table {
     }
 }
 
+fn csv_writer<W: Write>(inner: W) -> csv::Writer<W> {
+    csv::WriterBuilder::new()
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_writer(inner)
+}
+
 fn open_append(path: &Path) -> io::Result<File> {
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     if file.metadata()?.len() == 0 {
-        file.write_all(HEADER.as_bytes())?;
+        csv_writer(&mut file).write_record(HEADER_FIELDS)?;
         file.flush()?;
     }
     Ok(file)
@@ -55,17 +73,20 @@ fn format_row(fix: &Fix, now: SystemTime) -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format!(
-        "{:06x},{},{:.7},{:.7},{},{},{},{}\n",
-        aircraft.icao,
-        callsign_text(aircraft.callsign),
-        lat,
-        lon,
-        display_opt(aircraft.altitude_ft),
-        display_opt(aircraft.ground_speed_kt),
-        display_opt(aircraft.track_deg),
-        timestamp,
-    )
+    let mut buf = Vec::new();
+    csv_writer(&mut buf)
+        .write_record([
+            format!("{:06x}", aircraft.icao),
+            callsign_text(aircraft.callsign),
+            format!("{lat:.7}"),
+            format!("{lon:.7}"),
+            display_opt(aircraft.altitude_ft),
+            display_opt(aircraft.ground_speed_kt),
+            display_opt(aircraft.track_deg),
+            timestamp.to_string(),
+        ])
+        .expect("csv row");
+    String::from_utf8(buf).expect("csv utf8")
 }
 
 fn callsign_text(callsign: Callsign) -> String {
@@ -128,6 +149,22 @@ mod tests {
         fix.aircraft.callsign = Callsign::default();
         let row = format_row(&fix, UNIX_EPOCH);
         assert_eq!(row, "400abc,,10.5000000,-20.2500000,,,,0\n");
+    }
+
+    #[test]
+    fn callsign_with_comma_round_trips() {
+        let mut fix = sample();
+        fix.aircraft.callsign = Callsign::pad("AB,CD");
+        let row = format_row(&fix, UNIX_EPOCH);
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .from_reader(row.as_bytes());
+        let record = reader.records().next().expect("row").expect("csv");
+        assert_eq!(record.get(1), Some("AB,CD"));
+        assert_eq!(
+            row,
+            "400abc,\"AB,CD\",10.5000000,-20.2500000,12000,280,90,0\n"
+        );
     }
 
     #[test]

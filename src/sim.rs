@@ -554,11 +554,28 @@ fn render(tracks: &[Track]) -> (String, String) {
         out.push_str(&hex);
         out.push('\n');
     }
-    let mut truth = String::from("ts,icao,lat,lon,alt_ft\n");
-    for (ms, icao, lat, lon, alt_ft) in truth_rows {
-        truth.push_str(&format_ts(ms));
-        truth.push_str(&format!(",{icao:06x},{lat:.8},{lon:.8},{alt_ft}\n"));
+    let mut truth_buf = Vec::new();
+    {
+        let mut truth_wtr = csv::WriterBuilder::new()
+            .terminator(csv::Terminator::Any(b'\n'))
+            .from_writer(&mut truth_buf);
+        truth_wtr
+            .write_record(["ts", "icao", "lat", "lon", "alt_ft"])
+            .expect("truth header");
+        for (ms, icao, lat, lon, alt_ft) in truth_rows {
+            truth_wtr
+                .write_record([
+                    format_ts(ms),
+                    format!("{icao:06x}"),
+                    format!("{lat:.8}"),
+                    format!("{lon:.8}"),
+                    alt_ft.to_string(),
+                ])
+                .expect("truth row");
+        }
+        truth_wtr.flush().expect("truth flush");
     }
+    let truth = String::from_utf8(truth_buf).expect("truth utf8");
     (out, truth)
 }
 

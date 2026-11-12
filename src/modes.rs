@@ -100,15 +100,8 @@ pub fn df17(icao: u32, me: [u8; 7]) -> [u8; 14] {
 }
 
 pub fn hex14(frame: &[u8; 14]) -> String {
-    let mut out = String::with_capacity(28);
-    for byte in frame {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0F) as usize] as char);
-    }
-    out
+    hex::encode_upper(frame)
 }
-
-const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
 pub fn airborne_position(icao: u32, lat: f64, lon: f64, alt_ft: i32, odd: bool) -> [u8; 14] {
     let (yz, xz) = cpr_encode(lat, lon, odd);

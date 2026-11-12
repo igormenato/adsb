@@ -20,30 +20,34 @@ pub fn parse_replay_line(line: &str) -> ReplayLine {
     if line.is_empty() || line.starts_with('#') {
         return ReplayLine::Skip;
     }
-    let mut fields = line.split(',');
-    let Some(time) = fields.next() else {
-        return ReplayLine::Malformed;
-    };
-    let Some(hex) = fields.next() else {
-        return ReplayLine::Malformed;
-    };
-    let Ok(timestamp) = csv_field(time).parse::<f64>() else {
-        return ReplayLine::Malformed;
-    };
-    if !timestamp.is_finite() {
-        return ReplayLine::Malformed;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(line.as_bytes());
+    let mut record = csv::StringRecord::new();
+    match reader.read_record(&mut record) {
+        Ok(false) => ReplayLine::Skip,
+        Err(_) => ReplayLine::Malformed,
+        Ok(true) => {
+            let Some(time) = record.get(0) else {
+                return ReplayLine::Malformed;
+            };
+            let Some(hex) = record.get(1) else {
+                return ReplayLine::Malformed;
+            };
+            let Ok(timestamp) = time.parse::<f64>() else {
+                return ReplayLine::Malformed;
+            };
+            if !timestamp.is_finite() {
+                return ReplayLine::Malformed;
+            }
+            let Some(frame) = parse_hex_frame(hex.as_bytes()) else {
+                return ReplayLine::Malformed;
+            };
+            ReplayLine::Frame { timestamp, frame }
+        }
     }
-    let Some(frame) = parse_hex_frame(csv_field(hex).as_bytes()) else {
-        return ReplayLine::Malformed;
-    };
-    ReplayLine::Frame { timestamp, frame }
-}
-
-fn csv_field(text: &str) -> &str {
-    let text = text.trim();
-    text.strip_prefix('"')
-        .and_then(|text| text.strip_suffix('"'))
-        .unwrap_or(text)
 }
 
 #[cfg(test)]
