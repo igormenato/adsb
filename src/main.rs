@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -13,6 +13,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
+use nix::errno::Errno;
+use nix::poll::{PollFd, PollFlags};
+use nix::sys::socket::{setsockopt, sockopt};
+use nix::unistd::isatty;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
 use trck::{
@@ -247,9 +251,9 @@ impl Writer {
         self.shared.lock().has_pending()
     }
 
-    fn uart_fd(&self) -> Option<i32> {
+    fn uart_fd(&self) -> Option<BorrowedFd<'_>> {
         match &self.sink {
-            Sink::Uart(port) => Some(port.as_raw_fd()),
+            Sink::Uart(port) => Some(sys::as_fd(port)),
             Sink::Stdout => None,
         }
     }
@@ -325,7 +329,7 @@ fn log_fix(fix: &Fix) {
 
 fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
     match sink {
-        Sink::Uart(port) => sys::write(port.as_raw_fd(), bytes),
+        Sink::Uart(port) => sys::write(sys::as_fd(port), bytes),
         Sink::Stdout => {
             let mut out = io::stdout().lock();
             out.write_all(bytes)?;
@@ -392,7 +396,7 @@ fn open_uart(
         .with_context(|| format!("cannot open {path}"))?;
     port.clear(ClearBuffer::All)
         .with_context(|| format!("cannot open {path}"))?;
-    sys::set_nonblocking(port.as_raw_fd()).with_context(|| format!("cannot open {path}"))?;
+    sys::set_nonblocking(sys::as_fd(&port)).with_context(|| format!("cannot open {path}"))?;
     Ok(Writer {
         sink: Sink::Uart(port),
         stop,
@@ -669,7 +673,7 @@ fn drain_writer(writer: &mut Writer, stop: &Stop) -> Result<(), ChunkError> {
         let Some(fd) = writer.uart_fd() else {
             continue;
         };
-        let mut poll_fd = sys::pollfd(fd, libc::POLLOUT);
+        let mut poll_fd = PollFd::new(fd, PollFlags::POLLOUT);
         if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE) {
             return Err(ChunkError::Failed(err));
         }
@@ -764,7 +768,7 @@ fn run_writer(mut writer: Writer, stop: &Stop, done: Option<&AtomicBool>) -> Exi
         }
         if writer.has_pending() {
             if let Some(fd) = writer.uart_fd() {
-                let mut poll_fd = sys::pollfd(fd, libc::POLLOUT);
+                let mut poll_fd = PollFd::new(fd, PollFlags::POLLOUT);
                 if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE) {
                     eprintln!("uart poll: {err}");
                     return ExitCode::from(1);
@@ -799,7 +803,7 @@ fn run_check(writer: &mut Writer, stop: &Stop) -> ExitCode {
                 break;
             };
             let slice = deadline.saturating_duration_since(now).min(POLL_SLICE);
-            let mut poll_fd = sys::pollfd(fd, libc::POLLOUT);
+            let mut poll_fd = PollFd::new(fd, PollFlags::POLLOUT);
             if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), slice) {
                 eprintln!("uart poll: {err}");
                 return ExitCode::from(1);
@@ -812,10 +816,8 @@ fn run_check(writer: &mut Writer, stop: &Stop) -> ExitCode {
 
 fn run_hex_stdin(writer: &mut Writer, stop: &Stop) -> ExitCode {
     let stdin = io::stdin();
-    let fd = stdin.as_raw_fd();
-    // SAFETY: `fd` is stdin. `isatty` only inspects it.
-    if unsafe { libc::isatty(fd) } == 0
-        && let Err(err) = sys::set_nonblocking(fd)
+    if !isatty(&stdin).unwrap_or(false)
+        && let Err(err) = sys::set_nonblocking(&stdin)
     {
         eprintln!("hex -: {err}");
         return ExitCode::from(1);
@@ -825,7 +827,7 @@ fn run_hex_stdin(writer: &mut Writer, stop: &Stop) -> ExitCode {
         buf: Lines::new(MAX_LINE),
         tracker: Tracker::new(),
     };
-    match pump_hex(&mut lines, fd, writer, stop, "-") {
+    match pump_hex(&mut lines, writer, stop, "-") {
         Pump::Stopped => write_exit(ChunkError::Stopped),
         Pump::Uart(err) => write_exit(ChunkError::Failed(err)),
         Pump::Disconnected => {
@@ -897,32 +899,26 @@ fn dial(addr: &SocketAddr, stop: &Stop, timeout: Duration) -> Result<TcpStream, 
     if stop.is_set() {
         return Err(DialError::Stopped);
     }
-    let domain = if addr.is_ipv4() {
-        libc::AF_INET
-    } else {
-        libc::AF_INET6
-    };
-    let sock = sys::SocketFd::new(domain).map_err(DialError::Failed)?;
-    match sys::connect(sock.as_raw_fd(), addr) {
+    let sock = sys::tcp_socket(addr).map_err(DialError::Failed)?;
+    match sys::connect(&sock, addr) {
         Ok(()) => {}
-        Err(err) if pending_connect(&err) => wait_connected(sock.as_raw_fd(), stop, timeout)?,
+        Err(err) if pending_connect(&err) => wait_connected(sock.as_fd(), stop, timeout)?,
         Err(err) => return Err(DialError::Failed(err)),
     }
-    Ok(sock.into_stream())
+    Ok(TcpStream::from(sock))
 }
 
 fn pending_connect(err: &io::Error) -> bool {
-    matches!(
-        err.raw_os_error(),
-        Some(code)
-            if code == libc::EINPROGRESS
-                || code == libc::EAGAIN
-                || code == libc::EWOULDBLOCK
-                || code == libc::EINTR
-    )
+    err.raw_os_error().is_some_and(|code| {
+        let err = Errno::from_raw(code);
+        err == Errno::EINPROGRESS
+            || err == Errno::EAGAIN
+            || err == Errno::EWOULDBLOCK
+            || err == Errno::EINTR
+    })
 }
 
-fn wait_connected(fd: i32, stop: &Stop, timeout: Duration) -> Result<(), DialError> {
+fn wait_connected(fd: BorrowedFd<'_>, stop: &Stop, timeout: Duration) -> Result<(), DialError> {
     let deadline = Instant::now() + timeout;
     loop {
         if stop.is_set() {
@@ -936,7 +932,7 @@ fn wait_connected(fd: i32, stop: &Stop, timeout: Duration) -> Result<(), DialErr
             )));
         }
         let slice = deadline.saturating_duration_since(now).min(CONNECT_SLICE);
-        let mut poll_fd = sys::pollfd(fd, libc::POLLOUT);
+        let mut poll_fd = PollFd::new(fd, PollFlags::POLLOUT);
         let rc = match sys::poll(std::slice::from_mut(&mut poll_fd), slice) {
             Ok(rc) => rc,
             Err(err) => return Err(DialError::Failed(err)),
@@ -944,7 +940,8 @@ fn wait_connected(fd: i32, stop: &Stop, timeout: Duration) -> Result<(), DialErr
         if rc == 0 {
             continue;
         }
-        if poll_fd.revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) == 0 {
+        let revents = poll_fd.revents().unwrap_or_else(PollFlags::empty);
+        if !revents.intersects(PollFlags::POLLOUT | PollFlags::POLLERR | PollFlags::POLLHUP) {
             continue;
         }
         let so_error = sys::so_error(fd).map_err(DialError::Failed)?;
@@ -956,16 +953,11 @@ fn wait_connected(fd: i32, stop: &Stop, timeout: Duration) -> Result<(), DialErr
 }
 
 fn enable_keepalive(stream: &TcpStream) -> io::Result<()> {
-    let fd = stream.as_raw_fd();
-    sys::setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1)?;
-    sys::setsockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, KEEPALIVE_IDLE_S)?;
-    sys::setsockopt_int(
-        fd,
-        libc::IPPROTO_TCP,
-        libc::TCP_KEEPINTVL,
-        KEEPALIVE_INTERVAL_S,
-    )?;
-    sys::setsockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, KEEPALIVE_PROBES)
+    setsockopt(stream, sockopt::KeepAlive, &true)?;
+    setsockopt(stream, sockopt::TcpKeepIdle, &KEEPALIVE_IDLE_S)?;
+    setsockopt(stream, sockopt::TcpKeepInterval, &KEEPALIVE_INTERVAL_S)?;
+    setsockopt(stream, sockopt::TcpKeepCount, &KEEPALIVE_PROBES)?;
+    Ok(())
 }
 
 fn pump(stream: TcpStream, writer: &mut Writer, stop: &Stop, text: &str) -> Pump {
@@ -973,18 +965,16 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &Stop, text: &str) -> Pump
         eprintln!("hex {text} keepalive: {err}");
         return Pump::Disconnected;
     }
-    let fd = stream.as_raw_fd();
     let mut lines = HexLines {
         reader: stream,
         buf: Lines::new(MAX_LINE),
         tracker: Tracker::new(),
     };
-    pump_hex(&mut lines, fd, writer, stop, text)
+    pump_hex(&mut lines, writer, stop, text)
 }
 
-fn pump_hex<R: Read>(
+fn pump_hex<R: Read + AsRawFd>(
     lines: &mut HexLines<R>,
-    reader_fd: i32,
     writer: &mut Writer,
     stop: &Stop,
     text: &str,
@@ -993,24 +983,38 @@ fn pump_hex<R: Read>(
         if stop.is_set() {
             return Pump::Stopped;
         }
-        let mut fds = [sys::pollfd(reader_fd, libc::POLLIN), sys::pollfd(-1, 0)];
-        let mut nfds = 1usize;
-        if writer.has_pending()
-            && let Some(fd) = writer.uart_fd()
-        {
-            fds[1] = sys::pollfd(fd, libc::POLLOUT);
-            nfds = 2;
-        }
-        if let Err(err) = sys::poll(&mut fds[..nfds], POLL_SLICE) {
-            eprintln!("hex {text}: {err}");
-            return end_socket(writer);
-        }
+        let (socket_revents, uart_ready) = {
+            let reader = sys::as_fd(&lines.reader);
+            let uart = writer.has_pending().then(|| writer.uart_fd()).flatten();
+            let mut fds_two;
+            let mut fds_one;
+            let fds: &mut [PollFd<'_>] = if let Some(uart) = uart {
+                fds_two = [
+                    PollFd::new(reader, PollFlags::POLLIN),
+                    PollFd::new(uart, PollFlags::POLLOUT),
+                ];
+                &mut fds_two
+            } else {
+                fds_one = [PollFd::new(reader, PollFlags::POLLIN)];
+                &mut fds_one
+            };
+            if let Err(err) = sys::poll(fds, POLL_SLICE) {
+                eprintln!("hex {text}: {err}");
+                return end_socket(writer);
+            }
+            let socket_revents = fds[0].revents().unwrap_or_else(PollFlags::empty);
+            let uart_ready = fds.get(1).is_some_and(|fd| {
+                fd.revents()
+                    .unwrap_or_else(PollFlags::empty)
+                    .intersects(PollFlags::POLLOUT | PollFlags::POLLERR | PollFlags::POLLHUP)
+            });
+            (socket_revents, uart_ready)
+        };
         if stop.is_set() {
             return Pump::Stopped;
         }
-        let socket_revents = fds[0].revents;
         let mut fresh = false;
-        if socket_revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+        if socket_revents.intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR) {
             match lines.pull() {
                 Ok(Pull::Eof) => {
                     enqueue_hex(lines, writer);
@@ -1020,7 +1024,7 @@ fn pump_hex<R: Read>(
                 Ok(Pull::Bytes) => {
                     enqueue_hex(lines, writer);
                     fresh = true;
-                    if socket_revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                    if socket_revents.intersects(PollFlags::POLLHUP | PollFlags::POLLERR) {
                         eprintln!("hex {text} disconnected");
                         return end_socket(writer);
                     }
@@ -1032,8 +1036,6 @@ fn pump_hex<R: Read>(
                 }
             }
         }
-        let uart_ready =
-            nfds == 2 && fds[1].revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) != 0;
         if writer.has_pending()
             && (fresh || uart_ready || writer.uart_fd().is_none())
             && let Err(err) = writer.write_some()
