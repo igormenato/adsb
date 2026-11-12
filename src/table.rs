@@ -30,7 +30,7 @@ impl Table {
         self.append_at(fix, SystemTime::now())
     }
 
-    fn append_at(&mut self, fix: &Fix, now: SystemTime) -> io::Result<()> {
+    pub fn append_at(&mut self, fix: &Fix, now: SystemTime) -> io::Result<()> {
         let row = format_row(fix, now);
         self.file.write_all(row.as_bytes())?;
         self.file.flush()?;

@@ -45,6 +45,8 @@ That opens RTL-SDR device 0 at 1090 MHz and writes frames to `/dev/serial0`.
 
 `--table PATH` appends one CSV row for each position queued for UART. Default is `aircraft.csv` in the working directory. The file stays append-only for the process. Timestamp is the Pi clock, not contest reception.
 
+`trck replay FILE` reads a CSV of `ts,hex` lines (unix seconds, raw Mode S) and feeds each frame through the same decoder and UART/CSV path as the radio, using the file timestamps. Blank and `#` comment lines are skipped. Malformed lines are counted and skipped. `--speed N` scales the gap between frames (`1` is recorded timing, `0` or `max` is as fast as possible). `--uart` and `--table` work as they do for the other modes. The table timestamp is the recording time.
+
 `doctor` is a host probe. It does not open the radio or the UART.
 
 ## Frame
