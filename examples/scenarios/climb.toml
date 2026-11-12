@@ -1,0 +1,13 @@
+duration = 8
+
+[[aircraft]]
+icao = "DEF001"
+callsign = "DLH400"
+lat = 51.00
+lon = 7.00
+alt_ft = 28000
+heading_deg = 270
+speed_kt = 380
+rate_hz = 2
+climb_at = 4
+alt_to_ft = 32000

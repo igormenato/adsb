@@ -1112,6 +1112,222 @@ fn stress_7700_is_on_the_wire() {
     let _ = fs::remove_file(&table);
 }
 
+const CROSSING: &str = "examples/scenarios/crossing.toml";
+
+#[derive(Clone, Debug)]
+struct SimPlane {
+    icao: u32,
+    callsign: String,
+    squawk: Option<u16>,
+    lat: f64,
+    lon: f64,
+    alt_ft: i32,
+    heading_deg: f64,
+    speed_kt: f64,
+    turn_at: Option<f64>,
+    heading_to_deg: Option<f64>,
+    climb_at: Option<f64>,
+    alt_to_ft: Option<i32>,
+}
+
+fn run_sim(args: &[&str]) -> (std::process::ExitStatus, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .arg("sim")
+        .args(args)
+        .output()
+        .expect("sim");
+    (
+        out.status,
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn crossing_planes() -> Vec<SimPlane> {
+    vec![
+        SimPlane {
+            icao: 0x00AB_C001,
+            callsign: "TAM1234".into(),
+            squawk: Some(0x7700),
+            lat: 50.0,
+            lon: 8.0,
+            alt_ft: 35_000,
+            heading_deg: 90.0,
+            speed_kt: 420.0,
+            turn_at: None,
+            heading_to_deg: None,
+            climb_at: None,
+            alt_to_ft: None,
+        },
+        SimPlane {
+            icao: 0x00AB_C002,
+            callsign: "BAW99".into(),
+            squawk: None,
+            lat: 49.90,
+            lon: 8.35,
+            alt_ft: 36_000,
+            heading_deg: 0.0,
+            speed_kt: 430.0,
+            turn_at: Some(8.0),
+            heading_to_deg: Some(45.0),
+            climb_at: None,
+            alt_to_ft: None,
+        },
+    ]
+}
+
+fn sim_advance(lat: f64, lon: f64, heading_deg: f64, speed_kt: f64, dt_s: f64) -> (f64, f64) {
+    if dt_s <= 0.0 || speed_kt == 0.0 {
+        return (lat, lon);
+    }
+    let nm = speed_kt * (dt_s / 3600.0);
+    let h = heading_deg.to_radians();
+    let dlat = nm * h.cos() / 60.0;
+    let mean = (lat + dlat / 2.0).to_radians();
+    let dlon = if mean.cos().abs() < 1e-12 {
+        0.0
+    } else {
+        nm * h.sin() / (60.0 * mean.cos())
+    };
+    let lat = (lat + dlat).clamp(-90.0, 90.0);
+    let mut lon = lon + dlon;
+    if lon > 180.0 {
+        lon -= 360.0;
+    } else if lon < -180.0 {
+        lon += 360.0;
+    }
+    (lat, lon)
+}
+
+fn sim_pose(plane: &SimPlane, t: f64) -> (f64, f64, i32) {
+    let heading = match (plane.turn_at, plane.heading_to_deg) {
+        (Some(at), Some(next)) if t >= at => next,
+        _ => plane.heading_deg,
+    };
+    let alt_ft = match (plane.climb_at, plane.alt_to_ft) {
+        (Some(at), Some(next)) if t >= at => next,
+        _ => plane.alt_ft,
+    };
+    let (lat, lon) = match plane.turn_at {
+        Some(at) if t > 0.0 && at > 0.0 => {
+            let first = t.min(at);
+            let (lat, lon) = sim_advance(
+                plane.lat,
+                plane.lon,
+                plane.heading_deg,
+                plane.speed_kt,
+                first,
+            );
+            if t <= at {
+                (lat, lon)
+            } else {
+                sim_advance(lat, lon, heading, plane.speed_kt, t - at)
+            }
+        }
+        _ => sim_advance(plane.lat, plane.lon, heading, plane.speed_kt, t),
+    };
+    (lat, lon, alt_ft)
+}
+
+fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let r = 6_371_000.0;
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let a = (dlat / 2.0).sin().powi(2)
+        + lat1.to_radians().cos() * lat2.to_radians().cos() * (dlon / 2.0).sin().powi(2);
+    2.0 * r * a.sqrt().asin()
+}
+
+#[test]
+fn sim_help_lists_the_knobs() {
+    let out = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .args(["sim", "--help"])
+        .output()
+        .expect("help");
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("--out"), "{text}");
+    assert!(
+        text.contains("SCENARIO") || text.contains("scenario"),
+        "{text}"
+    );
+}
+
+#[test]
+fn sim_rejects_a_malformed_scenario() {
+    let path = unique_path("bad.toml");
+    fs::write(&path, "duration = 1\n").expect("write");
+    let (status, stdout, stderr) = run_sim(&[path.to_str().expect("utf8")]);
+    assert!(!status.success(), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("sim:"), "{stderr}");
+    assert!(stderr.contains("aircraft"), "{stderr}");
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn sim_output_is_byte_identical() {
+    let (a_status, a, a_err) = run_sim(&[CROSSING]);
+    let (b_status, b, b_err) = run_sim(&[CROSSING]);
+    assert!(a_status.success(), "{a_err}");
+    assert!(b_status.success(), "{b_err}");
+    assert_eq!(a, b);
+    assert!(a.starts_with("0.000,"), "{a}");
+}
+
+#[test]
+fn sim_fixes_match_scenario_ground_truth() {
+    let (status, stdout, stderr) = run_sim(&[CROSSING]);
+    assert!(status.success(), "{stderr}");
+    let planes = crossing_planes();
+    let mut tracker = Tracker::new();
+    let mut max_err = [0.0f64; 2];
+    let mut fixes = [0usize; 2];
+    let mut saw_callsign = [false; 2];
+    let mut saw_7700 = false;
+    for line in stdout.lines() {
+        let (ts, hex) = line.split_once(',').expect(line);
+        let t: f64 = ts.parse().expect(ts);
+        let frame = parse_hex_frame(hex.as_bytes()).expect(hex);
+        let Some(fix) = tracker.ingest(t, &frame) else {
+            continue;
+        };
+        let icao = fix.aircraft.icao.to_u24();
+        let idx = planes.iter().position(|p| p.icao == icao).expect("icao");
+        let (lat, lon, alt) = sim_pose(&planes[idx], t);
+        let got_lat = f64::from(fix.aircraft.latitude_e7) / 10_000_000.0;
+        let got_lon = f64::from(fix.aircraft.longitude_e7) / 10_000_000.0;
+        let err = haversine_m(lat, lon, got_lat, got_lon);
+        if err > max_err[idx] {
+            max_err[idx] = err;
+        }
+        assert!(
+            err < 50.0,
+            "icao={icao:06x} t={t} err={err} m truth={lat},{lon} got={got_lat},{got_lon}"
+        );
+        assert_eq!(fix.aircraft.altitude_ft, Some(alt));
+        let callsign_bytes = fix.aircraft.callsign.as_bytes();
+        let callsign = String::from_utf8_lossy(&callsign_bytes);
+        if callsign.trim() == planes[idx].callsign {
+            saw_callsign[idx] = true;
+        }
+        if planes[idx].squawk == Some(0x7700) {
+            assert_eq!(fix.aircraft.emergency, Some(EmergencyKind::General));
+            saw_7700 = true;
+        }
+        fixes[idx] += 1;
+    }
+    assert!(fixes[0] > 0, "no fixes for ABC001");
+    assert!(fixes[1] > 0, "no fixes for ABC002");
+    assert!(saw_callsign[0], "missing TAM1234");
+    assert!(saw_callsign[1], "missing BAW99");
+    assert!(saw_7700, "missing 7700");
+    eprintln!(
+        "sim max position error m ABC001={:.2} ABC002={:.2} fixes={:?}",
+        max_err[0], max_err[1], fixes
+    );
+}
+
 fn summary_count(stderr: &str, name: &str) -> u64 {
     let line = stderr
         .lines()

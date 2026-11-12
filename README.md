@@ -61,6 +61,19 @@ That opens RTL-SDR device 0 at 1090 MHz and writes frames to `/dev/serial0`.
 
 The mix is airborne even/odd CPR, BDS 0,8 callsign (`--ident`), BDS 0,9 velocity (`--velocity`), and a `--junk` fraction of CRC-bad or truncated frames. The rest is position. `--emergency` is the fraction of ICAOs that advertise squawk 7700; ordinary traffic never evicts those from the 64-deep UART queue.
 
+## Sim
+
+`trck sim` writes a scripted Mode S scenario as `ts,hex` lines. Timestamp is seconds. One frame per line. It does not open the RTL-SDR or the UART.
+
+```
+./trck sim examples/scenarios/crossing.toml
+./trck sim examples/scenarios/crossing.toml --out frames.csv
+```
+
+Each aircraft has an ICAO, callsign, start lat/lon/alt, heading, ground speed, and a message rate. Squawk is optional. One optional heading change (`turn_at` + `heading_to_deg`) or altitude change (`climb_at` + `alt_to_ft`) per aircraft. The same file yields the same bytes.
+
+`examples/scenarios/crossing.toml` is a 7700 aircraft and a crossing pair. `examples/scenarios/climb.toml` is a single climb. Feed the lines to `trck replay` when you want the live decode path without live traffic.
+
 ## Frame
 
 The layout is in [ESP32 satellite telemetry](docs/esp32-alert.md).
