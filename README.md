@@ -76,6 +76,8 @@ Each aircraft has an ICAO, callsign, start lat/lon/alt, heading, ground speed, a
 
 `examples/scenarios/crossing.toml` is a 7700 aircraft and a crossing pair near GRU. `examples/scenarios/climb.toml` is a single climb in the northern hemisphere. Feed the lines to `trck replay` when you want the live decode path without live traffic.
 
+`--trace` encodes one or more readsb globe_history JSON files with the same scheduler. Ground altitude and missing fields are skipped. `--from` / `--until` are Unix seconds (`timestamp` + `dt`). A day of traces is `traces/xx/trace_full_<icao>.json` inside an [adsblol/globe_history_YYYY](https://github.com/adsblol/globe_history_2026) release tarball (`gzip -dc` the file, then `./trck sim --trace trace_full_<icao>.json --out frames.csv --truth truth.csv`).
+
 ## Frame
 
 The layout is in [ESP32 satellite telemetry](docs/esp32-alert.md).

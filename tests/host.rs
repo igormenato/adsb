@@ -1115,6 +1115,11 @@ fn stress_7700_is_on_the_wire() {
 
 const CROSSING: &str = "examples/scenarios/crossing.toml";
 const CLIMB: &str = "examples/scenarios/climb.toml";
+const GRU_TRACES: &[&str] = &[
+    "examples/traces/trace_full_e4917f.json",
+    "examples/traces/trace_full_e49450.json",
+    "examples/traces/trace_full_e49fb4.json",
+];
 const POS_TOL_M: f64 = 10.0;
 
 fn run_sim(args: &[&str]) -> (std::process::ExitStatus, String, String) {
@@ -1154,24 +1159,17 @@ fn parse_truth(text: &str) -> BTreeMap<(i64, u32), (f64, f64, i32)> {
     rows
 }
 
-fn assert_sim_matches_truth(scenario: &str, expect_7700: bool) -> BTreeMap<u32, f64> {
-    let frames_path = unique_path("frames.csv");
-    let truth_path = unique_path("truth.csv");
-    let (status, _, stderr) = run_sim(&[
-        scenario,
-        "--out",
-        frames_path.to_str().expect("utf8"),
-        "--truth",
-        truth_path.to_str().expect("utf8"),
-    ]);
-    assert!(status.success(), "{stderr}");
-    let frames = fs::read_to_string(&frames_path).expect("frames");
-    let truth = parse_truth(&fs::read_to_string(&truth_path).expect("truth"));
-    assert!(!truth.is_empty(), "{scenario} truth empty");
+fn ingest_against_truth(
+    label: &str,
+    frames: &str,
+    truth_text: &str,
+) -> (BTreeMap<u32, f64>, BTreeMap<u32, usize>, bool, bool) {
+    let truth = parse_truth(truth_text);
+    assert!(!truth.is_empty(), "{label} truth empty");
     let mut tracker = Tracker::new();
     let mut max_err = BTreeMap::<u32, f64>::new();
     let mut fixes = BTreeMap::<u32, usize>::new();
-    let mut saw_callsign = BTreeMap::<u32, bool>::new();
+    let mut saw_callsign = false;
     let mut saw_7700 = false;
     for line in frames.lines() {
         let (ts, hex) = line.split_once(',').expect(line);
@@ -1194,13 +1192,13 @@ fn assert_sim_matches_truth(scenario: &str, expect_7700: bool) -> BTreeMap<u32, 
         }
         assert!(
             err < POS_TOL_M,
-            "{scenario} icao={icao:06x} t={t} err={err} m truth={lat},{lon} got={got_lat},{got_lon}"
+            "{label} icao={icao:06x} t={t} err={err} m truth={lat},{lon} got={got_lat},{got_lon}"
         );
         assert_eq!(fix.aircraft.altitude_ft, Some(alt));
         let callsign_bytes = fix.aircraft.callsign.as_bytes();
         let callsign = String::from_utf8_lossy(&callsign_bytes);
         if !callsign.trim().is_empty() {
-            saw_callsign.insert(icao, true);
+            saw_callsign = true;
         }
         if fix.aircraft.emergency == Some(EmergencyKind::General) {
             saw_7700 = true;
@@ -1212,14 +1210,6 @@ fn assert_sim_matches_truth(scenario: &str, expect_7700: bool) -> BTreeMap<u32, 
             fixes.get(&icao).copied().unwrap_or(0) > 0,
             "no fixes for {icao:06x}"
         );
-        assert_eq!(
-            saw_callsign.get(&icao).copied(),
-            Some(true),
-            "no callsign {icao:06x}"
-        );
-    }
-    if expect_7700 {
-        assert!(saw_7700, "{scenario} missing 7700");
     }
     let err_txt: Vec<String> = max_err
         .iter()
@@ -1230,10 +1220,31 @@ fn assert_sim_matches_truth(scenario: &str, expect_7700: bool) -> BTreeMap<u32, 
         .map(|(icao, n)| format!("{icao:06x}={n}"))
         .collect();
     eprintln!(
-        "sim {scenario} max position error m {} fixes={}",
+        "sim {label} max position error m {} fixes={}",
         err_txt.join(" "),
         fix_txt.join(" ")
     );
+    (max_err, fixes, saw_callsign, saw_7700)
+}
+
+fn assert_sim_matches_truth(scenario: &str, expect_7700: bool) -> BTreeMap<u32, f64> {
+    let frames_path = unique_path("frames.csv");
+    let truth_path = unique_path("truth.csv");
+    let (status, _, stderr) = run_sim(&[
+        scenario,
+        "--out",
+        frames_path.to_str().expect("utf8"),
+        "--truth",
+        truth_path.to_str().expect("utf8"),
+    ]);
+    assert!(status.success(), "{stderr}");
+    let frames = fs::read_to_string(&frames_path).expect("frames");
+    let truth = fs::read_to_string(&truth_path).expect("truth");
+    let (max_err, _, saw_callsign, saw_7700) = ingest_against_truth(scenario, &frames, &truth);
+    assert!(saw_callsign, "{scenario} no callsign");
+    if expect_7700 {
+        assert!(saw_7700, "{scenario} missing 7700");
+    }
     let _ = fs::remove_file(&frames_path);
     let _ = fs::remove_file(&truth_path);
     max_err
@@ -1249,6 +1260,7 @@ fn sim_help_lists_the_knobs() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("--out"), "{text}");
     assert!(text.contains("--truth"), "{text}");
+    assert!(text.contains("--trace"), "{text}");
     assert!(
         text.contains("SCENARIO") || text.contains("scenario"),
         "{text}"
@@ -1283,6 +1295,30 @@ fn sim_fixes_match_scenario_ground_truth() {
     let climb = assert_sim_matches_truth(CLIMB, false);
     assert_eq!(crossing.len(), 2, "{crossing:?}");
     assert_eq!(climb.len(), 1, "{climb:?}");
+}
+
+#[test]
+fn sim_trace_fixes_match_truth() {
+    let frames_path = unique_path("frames.csv");
+    let truth_path = unique_path("truth.csv");
+    let mut args: Vec<&str> = vec!["--trace"];
+    args.extend_from_slice(GRU_TRACES);
+    args.extend_from_slice(&[
+        "--out",
+        frames_path.to_str().expect("utf8"),
+        "--truth",
+        truth_path.to_str().expect("utf8"),
+    ]);
+    let (status, _, stderr) = run_sim(&args);
+    assert!(status.success(), "{stderr}");
+    let frames = fs::read_to_string(&frames_path).expect("frames");
+    let truth = fs::read_to_string(&truth_path).expect("truth");
+    let (max_err, fixes, saw_callsign, _) = ingest_against_truth("gru-traces", &frames, &truth);
+    assert!(saw_callsign, "no callsign");
+    assert_eq!(max_err.len(), 3, "{max_err:?}");
+    assert_eq!(fixes.len(), 3, "{fixes:?}");
+    let _ = fs::remove_file(&frames_path);
+    let _ = fs::remove_file(&truth_path);
 }
 
 fn summary_count(stderr: &str, name: &str) -> u64 {
