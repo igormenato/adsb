@@ -269,11 +269,26 @@ pub fn is_mode_s(frame: &[u8]) -> bool {
 }
 
 /// One Mode S frame as hex. 7-byte and 14-byte frames are accepted.
+/// AVR `*hex;` and `@` plus a 12-digit hex timestamp are stripped first.
 pub fn parse_hex_frame(bytes: &[u8]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(bytes).ok()?.trim();
     if text.is_empty() || text.starts_with('#') {
         return None;
     }
+    let text = text.strip_suffix(';').unwrap_or(text);
+    let text = match text.as_bytes().first().copied() {
+        Some(b'*') => text.get(1..)?,
+        Some(b'@') => {
+            let rest = text.get(1..)?;
+            const STAMP: usize = 12;
+            let stamp = rest.get(..STAMP)?;
+            if !stamp.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            rest.get(STAMP..)?
+        }
+        _ => text,
+    };
     let text = text
         .strip_prefix("0x")
         .or_else(|| text.strip_prefix("0X"))
@@ -397,6 +412,16 @@ mod tests {
             parse_hex_frame(format!("  {EVEN}  ").as_bytes()),
             parse_hex_frame(EVEN.as_bytes())
         );
+        assert_eq!(
+            parse_hex_frame(format!("*{EVEN};").as_bytes()),
+            parse_hex_frame(EVEN.as_bytes())
+        );
+        assert_eq!(
+            parse_hex_frame(format!("@000000000000{EVEN};").as_bytes()),
+            parse_hex_frame(EVEN.as_bytes())
+        );
+        assert!(parse_hex_frame(b"*zzzz;").is_none());
+        assert!(parse_hex_frame(b"@short;").is_none());
         assert!(parse_hex_frame(b"# comment").is_none());
         assert!(parse_hex_frame(b"").is_none());
     }

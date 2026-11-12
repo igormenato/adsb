@@ -48,8 +48,8 @@ struct Args {
     /// RTL-SDR device index. Used when --check and --hex are off.
     #[arg(long, default_value_t = 0)]
     rtlsdr: usize,
-    /// Newline hex Mode S frames. For tests and a Beast-less feed.
-    #[arg(long, conflicts_with = "check", value_name = "HOST:PORT")]
+    /// Newline hex or AVR Mode S frames. HOST:PORT, or - for stdin.
+    #[arg(long, conflicts_with = "check", value_name = "HOST:PORT|-")]
     hex: Option<String>,
     /// UART device, or - for stdout.
     #[arg(long, default_value = DEFAULT_UART)]
@@ -276,8 +276,8 @@ fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
     }
 }
 
-struct HexLines {
-    reader: TcpStream,
+struct HexLines<R> {
+    reader: R,
     buf: Lines,
     tracker: Tracker,
 }
@@ -287,7 +287,7 @@ enum Pull {
     Eof,
 }
 
-impl HexLines {
+impl<R: Read> HexLines<R> {
     fn pull(&mut self) -> Result<Pull, io::Error> {
         let mut tmp = [0u8; 4096];
         loop {
@@ -413,16 +413,19 @@ fn main() -> ExitCode {
     }
 
     if let Some(text) = args.hex.as_deref() {
-        let Some(addrs) = resolve_addr(text) else {
-            eprintln!("hex {text}: expected host:port");
-            return ExitCode::from(1);
-        };
         eprintln!(
             "hex={text} uart={} baud={} table={}",
             args.uart,
             args.baud,
             args.table.display()
         );
+        if text == "-" {
+            return run_hex_stdin(&mut writer, &stop);
+        }
+        let Some(addrs) = resolve_addr(text) else {
+            eprintln!("hex {text}: expected host:port");
+            return ExitCode::from(1);
+        };
         return run_hex(&addrs, text, &mut writer, &stop);
     }
 
@@ -659,6 +662,31 @@ fn run_check(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn run_hex_stdin(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
+    let stdin = io::stdin();
+    let fd = stdin.as_raw_fd();
+    // SAFETY: `fd` is stdin. `isatty` only inspects it.
+    if unsafe { libc::isatty(fd) } == 0
+        && let Err(err) = sys::set_nonblocking(fd)
+    {
+        eprintln!("hex -: {err}");
+        return ExitCode::from(1);
+    }
+    let mut lines = HexLines {
+        reader: stdin,
+        buf: Lines::new(MAX_LINE),
+        tracker: Tracker::new(),
+    };
+    match pump_hex(&mut lines, fd, writer, stop, "-") {
+        Pump::Stopped => write_exit(ChunkError::Stopped),
+        Pump::Uart(err) => write_exit(ChunkError::Failed(err)),
+        Pump::Disconnected => {
+            eprintln!("stopped");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
 fn run_hex(addrs: &[SocketAddr], text: &str, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     let mut delay = RETRY_MIN;
     while !stop.load(Ordering::Relaxed) {
@@ -797,19 +825,27 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
         eprintln!("hex {text} keepalive: {err}");
         return Pump::Disconnected;
     }
+    let fd = stream.as_raw_fd();
     let mut lines = HexLines {
         reader: stream,
         buf: Lines::new(MAX_LINE),
         tracker: Tracker::new(),
     };
+    pump_hex(&mut lines, fd, writer, stop, text)
+}
+
+fn pump_hex<R: Read>(
+    lines: &mut HexLines<R>,
+    reader_fd: i32,
+    writer: &mut Writer,
+    stop: &AtomicBool,
+    text: &str,
+) -> Pump {
     loop {
         if stop.load(Ordering::Relaxed) {
             return Pump::Stopped;
         }
-        let mut fds = [
-            sys::pollfd(lines.reader.as_raw_fd(), libc::POLLIN),
-            sys::pollfd(-1, 0),
-        ];
+        let mut fds = [sys::pollfd(reader_fd, libc::POLLIN), sys::pollfd(-1, 0)];
         let mut nfds = 1usize;
         if writer.has_pending()
             && let Some(fd) = writer.uart_fd()
@@ -829,12 +865,12 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
         if socket_revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
             match lines.pull() {
                 Ok(Pull::Eof) => {
-                    enqueue_hex(&mut lines, writer);
+                    enqueue_hex(lines, writer);
                     eprintln!("hex {text} disconnected");
                     return end_socket(writer);
                 }
                 Ok(Pull::Bytes) => {
-                    enqueue_hex(&mut lines, writer);
+                    enqueue_hex(lines, writer);
                     fresh = true;
                     if socket_revents & (libc::POLLHUP | libc::POLLERR) != 0 {
                         eprintln!("hex {text} disconnected");
@@ -843,7 +879,7 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
                 }
                 Err(err) => {
                     eprintln!("hex {text}: {err}");
-                    enqueue_hex(&mut lines, writer);
+                    enqueue_hex(lines, writer);
                     return end_socket(writer);
                 }
             }
@@ -862,7 +898,7 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
     }
 }
 
-fn enqueue_hex(lines: &mut HexLines, writer: &mut Writer) {
+fn enqueue_hex<R>(lines: &mut HexLines<R>, writer: &mut Writer) {
     let timestamp = now_unix();
     lines.buf.drain(|line| {
         let Some(frame) = parse_hex_frame(line) else {

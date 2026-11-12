@@ -632,6 +632,52 @@ fn wait_frames(master: &mut TTYPort, n: usize, timeout: Duration) -> Vec<[u8; FR
     frames
 }
 
+fn spawn_hex_stdin(uart: &str) -> StopSender {
+    let table = table_arg();
+    let child = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .args([
+            "--hex",
+            "-",
+            "--uart",
+            uart,
+            "--table",
+            table.to_str().expect("utf8"),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sender");
+    StopSender(child)
+}
+
+fn decoded_7700_aircraft() -> Aircraft {
+    let mut tracker = Tracker::new();
+    let status = parse_hex_frame(STATUS.as_bytes()).expect("status");
+    let even = parse_hex_frame(EVEN.as_bytes()).expect("even");
+    let odd = parse_hex_frame(ODD.as_bytes()).expect("odd");
+    assert!(tracker.ingest(1.0, &status).is_none());
+    assert!(tracker.ingest(2.0, &even).is_none());
+    tracker.ingest(3.0, &odd).expect("position").aircraft
+}
+
+#[test]
+fn avr_hex_writes_a_pty_frame() {
+    let mut pty = Pty::open();
+    let mut sender = spawn_hex_stdin(&pty.path());
+    let mut stdin = sender.0.stdin.take().expect("stdin");
+    writeln!(stdin, "*{STATUS};").expect("status");
+    writeln!(stdin, "*{EVEN};").expect("even");
+    writeln!(stdin, "@000000000000{ODD};").expect("odd");
+    stdin.flush().expect("flush");
+    let frames = wait_frames(&mut pty.master, 1, Duration::from_secs(2));
+    let expect = decoded_7700_aircraft();
+    assert_eq!(frame_aircraft(&frames[0]), expect);
+    assert_eq!(expect.icao.to_u24(), ICAO_40058B);
+    assert_eq!(expect.emergency, Some(EmergencyKind::General));
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
 #[test]
 fn a_tty_writes_a_decoded_frame() {
     let (listener, port) = listen();
