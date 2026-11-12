@@ -35,7 +35,11 @@ That opens RTL-SDR device 0 at 1090 MHz and writes frames to `/dev/serial0`.
 
 `--rtlsdr N` selects the dongle. Default is `0`.
 
-`--hex HOST:PORT` reads newline hex Mode S frames instead of the dongle.
+`--hex HOST:PORT` reads newline hex Mode S frames instead of the dongle. AVR (`*8D...;` and `@` timestamp lines) from dump1090 `--net` port 30002, readsb, and rtl_adsb is accepted. `--hex -` reads the same lines from stdin.
+
+```
+nc localhost 30002 | ./trck --hex - --uart /dev/serial0
+```
 
 `--uart` defaults to `/dev/serial0`. Pass `--uart -` to write frames to stdout.
 
@@ -44,6 +48,8 @@ That opens RTL-SDR device 0 at 1090 MHz and writes frames to `/dev/serial0`.
 `--check` sends known frames instead of reading the radio, to check the UART. It repeats those frames every second.
 
 `--table PATH` appends one CSV row for each position queued for UART. Default is `aircraft.csv` in the working directory. The file stays append-only for the process. Timestamp is the Pi clock, not contest reception.
+
+`trck replay FILE` reads a CSV of `ts,hex` lines (unix seconds, raw Mode S) and feeds each frame through the same decoder and UART/CSV path as the radio, using the file timestamps. Blank and `#` comment lines are skipped. Malformed lines are counted and skipped. `--speed N` scales the gap between frames (`1` is recorded timing, `0` or `max` is as fast as possible). `--uart` and `--table` work as they do for the other modes. The table timestamp is the recording time.
 
 `doctor` is a host probe. It does not open the radio or the UART.
 
