@@ -67,12 +67,14 @@ The mix is airborne even/odd CPR, BDS 0,8 callsign (`--ident`), BDS 0,9 velocity
 
 ```
 ./trck sim examples/scenarios/crossing.toml
-./trck sim examples/scenarios/crossing.toml --out frames.csv
+./trck sim examples/scenarios/crossing.toml --out frames.csv --truth truth.csv
 ```
 
 Each aircraft has an ICAO, callsign, start lat/lon/alt, heading, ground speed, and a message rate. Squawk is optional. One optional heading change (`turn_at` + `heading_to_deg`) or altitude change (`climb_at` + `alt_to_ft`) per aircraft. The same file yields the same bytes.
 
-`examples/scenarios/crossing.toml` is a 7700 aircraft and a crossing pair. `examples/scenarios/climb.toml` is a single climb. Feed the lines to `trck replay` when you want the live decode path without live traffic.
+`--truth` is `ts,icao,lat,lon,alt_ft` for each encoded position pair.
+
+`examples/scenarios/crossing.toml` is a 7700 aircraft and a crossing pair near GRU. `examples/scenarios/climb.toml` is a single climb in the northern hemisphere. Feed the lines to `trck replay` when you want the live decode path without live traffic.
 
 ## Frame
 

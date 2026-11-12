@@ -17,6 +17,9 @@ pub struct Args {
     /// Write frames here instead of stdout.
     #[arg(long, value_name = "FILE")]
     out: Option<PathBuf>,
+    /// Pose encoded into each position pair.
+    #[arg(long, value_name = "FILE")]
+    truth: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,19 +88,24 @@ struct Scenario {
 }
 
 pub fn run(opts: Args) -> ExitCode {
-    match generate_text(&opts.scenario) {
-        Ok(text) => match write_out(opts.out.as_deref(), &text) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => {
-                eprintln!("sim: {err}");
-                ExitCode::from(1)
-            }
-        },
+    let (frames, truth) = match generate(&opts.scenario) {
+        Ok(out) => out,
         Err(err) => {
             eprintln!("sim: {err}");
-            ExitCode::from(1)
+            return ExitCode::from(1);
         }
+    };
+    if let Err(err) = write_out(opts.out.as_deref(), &frames) {
+        eprintln!("sim: {err}");
+        return ExitCode::from(1);
     }
+    if let Some(path) = opts.truth.as_deref()
+        && let Err(err) = fs::write(path, truth)
+    {
+        eprintln!("sim: {err}");
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
 }
 
 fn write_out(path: Option<&Path>, text: &str) -> io::Result<()> {
@@ -111,7 +119,7 @@ fn write_out(path: Option<&Path>, text: &str) -> io::Result<()> {
     }
 }
 
-fn generate_text(path: &Path) -> Result<String, String> {
+fn generate(path: &Path) -> Result<(String, String), String> {
     let scenario = load(path)?;
     Ok(render(&scenario))
 }
@@ -234,8 +242,9 @@ fn parse_squawk(text: &str) -> Result<u16, String> {
         | u16::from(b[3] - b'0'))
 }
 
-fn render(scenario: &Scenario) -> String {
+fn render(scenario: &Scenario) -> (String, String) {
     let mut rows = Vec::new();
+    let mut truth_rows = Vec::new();
     for (index, ac) in scenario.aircraft.iter().enumerate() {
         let dt = 1.0 / ac.rate_hz;
         let mut n = 0u32;
@@ -276,12 +285,14 @@ fn render(scenario: &Scenario) -> String {
                     let odd = airborne_position(ac.icao, pose.lat, pose.lon, pose.alt_ft, true);
                     rows.push((ms(t), index, n, hex14(&even)));
                     rows.push((ms(t), index, n + 1_000_000, hex14(&odd)));
+                    truth_rows.push((ms(t), ac.icao, pose.lat, pose.lon, pose.alt_ft));
                 }
             }
             n += 1;
         }
     }
     rows.sort_by_key(|row| (row.0, row.1, row.2));
+    truth_rows.sort_by_key(|row| (row.0, row.1));
     let mut out = String::new();
     for (ms, _, _, hex) in rows {
         out.push_str(&format_ts(ms));
@@ -289,7 +300,12 @@ fn render(scenario: &Scenario) -> String {
         out.push_str(&hex);
         out.push('\n');
     }
-    out
+    let mut truth = String::from("ts,icao,lat,lon,alt_ft\n");
+    for (ms, icao, lat, lon, alt_ft) in truth_rows {
+        truth.push_str(&format_ts(ms));
+        truth.push_str(&format!(",{icao:06x},{lat:.8},{lon:.8},{alt_ft}\n"));
+    }
+    (out, truth)
 }
 
 fn event(n: u32, has_squawk: bool) -> Event {
@@ -419,8 +435,8 @@ rate_hz = 2
     #[test]
     fn output_is_byte_identical() {
         let path = write_tmp("same.toml", &sample());
-        let a = generate_text(&path).expect("a");
-        let b = generate_text(&path).expect("b");
+        let a = generate(&path).expect("a").0;
+        let b = generate(&path).expect("b").0;
         assert_eq!(a, b);
         assert!(a.starts_with("0.000,"));
         let _ = fs::remove_file(path);

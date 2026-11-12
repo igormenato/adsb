@@ -4,8 +4,8 @@ duration = 12
 icao = "ABC001"
 callsign = "TAM1234"
 squawk = "7700"
-lat = 50.00
-lon = 8.00
+lat = -23.43
+lon = -46.47
 alt_ft = 35000
 heading_deg = 90
 speed_kt = 420
@@ -13,9 +13,9 @@ rate_hz = 2
 
 [[aircraft]]
 icao = "ABC002"
-callsign = "BAW99"
-lat = 49.90
-lon = 8.35
+callsign = "AZU99"
+lat = -23.55
+lon = -46.20
 alt_ft = 36000
 heading_deg = 0
 speed_kt = 430
