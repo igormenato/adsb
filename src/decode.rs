@@ -10,6 +10,7 @@ use rs1090::decode::bds::bds61::{AircraftStatusType, EmergencyState};
 use rs1090::decode::cpr::{AircraftState, decode_position};
 use rs1090::decode::{DF, ICAO, Message};
 
+use crate::correct::correct_extended_squitter;
 use crate::frame::{Aircraft, Callsign, EmergencyKind, Fix, Icao, deg_e7};
 
 /// ICAOs a contest receiver keeps for CPR and ident.
@@ -67,6 +68,8 @@ impl Tracker {
 
     /// Decode one Mode S frame. A [`Fix`] is the airborne position that just solved.
     pub fn ingest(&mut self, timestamp: f64, frame: &[u8]) -> Option<Fix> {
+        let repaired = correct_extended_squitter(frame);
+        let frame = repaired.as_ref().map(|b| b.as_slice()).unwrap_or(frame);
         let mut message = Message::try_from(frame).ok()?;
         let (icao, fix, known) = match &mut message.df {
             DF::ExtendedSquitterADSB(adsb) => {

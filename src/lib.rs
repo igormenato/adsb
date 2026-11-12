@@ -1,5 +1,6 @@
 //! Pi sender: one decoded ADS-B position at a time onto the UART.
 
+mod correct;
 mod decode;
 mod frame;
 mod lines;
