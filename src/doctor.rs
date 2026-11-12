@@ -191,7 +191,7 @@ fn check_uart_console(probe: &ConsoleProbe) -> Check {
                 format!("set enable_uart=1 in {config_path}"),
             );
         }
-        if is_zero_w(probe.model.as_deref().unwrap_or("")) && !parsed.disable_bt {
+        if is_zero_2w(probe.model.as_deref().unwrap_or("")) && !parsed.disable_bt {
             return Check::fail(
                 "uart-console",
                 format!(
@@ -314,7 +314,7 @@ fn stdout_is_serial(path: &str) -> bool {
     lower.contains("serial") || lower.contains("uart")
 }
 
-fn is_zero_w(model: &str) -> bool {
+fn is_zero_2w(model: &str) -> bool {
     model.to_ascii_lowercase().contains("pi zero 2 w")
 }
 
@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn uart_console_fails_when_zero_w_leaves_bluetooth_on_pl011() {
+    fn uart_console_fails_when_zero_2w_leaves_bluetooth_on_pl011() {
         let check = check_uart_console(&ConsoleProbe {
             cmdline: "console=tty1".into(),
             stdout_path: None,
@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn uart_console_passes_a_configured_zero_w() {
+    fn uart_console_passes_a_configured_zero_2w() {
         let check = check_uart_console(&ConsoleProbe {
             cmdline: "console=tty1".into(),
             stdout_path: None,
