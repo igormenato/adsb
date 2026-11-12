@@ -1,16 +1,13 @@
 //! In-process Mode S firehose through the live decode path.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{
-    DEFAULT_BAUD, DEFAULT_PATH, DEFAULT_UART, now_unix, open_output, open_table, run_writer,
-    sleep_until_stop,
-};
+use super::{OutputArgs, Stop, now_unix, open_output, open_table, run_writer, sleep_until_stop};
+use anyhow::{Result, bail};
 use clap::Parser;
 use trck::modes::{EVEN, IDENT, ODD, STATUS, VELOCITY, with_icao};
 use trck::{Icao, Tracker};
@@ -44,14 +41,8 @@ pub struct Args {
     /// Fraction of messages that are CRC-bad or truncated junk.
     #[arg(long, default_value_t = 0.05, value_parser = parse_frac)]
     junk: f64,
-    /// UART device, or - for stdout.
-    #[arg(long, default_value = DEFAULT_UART)]
-    uart: String,
-    #[arg(long, default_value_t = DEFAULT_BAUD)]
-    baud: u32,
-    /// Local CSV of each position queued for UART.
-    #[arg(long, default_value = DEFAULT_PATH, value_name = "PATH")]
-    table: PathBuf,
+    #[command(flatten)]
+    output: OutputArgs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,16 +87,16 @@ fn emergency_count(aircraft: usize, fraction: f64) -> usize {
 }
 
 impl Args {
-    fn check(&self) -> Result<(), String> {
+    fn check(&self) -> Result<()> {
         if self.aircraft == 0 {
-            return Err("stress --aircraft must be at least 1".into());
+            bail!("stress --aircraft must be at least 1");
         }
         let max = (Icao::MAX - ICAO_BASE) as usize;
         if self.aircraft > max {
-            return Err(format!("stress --aircraft must be at most {max}"));
+            bail!("stress --aircraft must be at most {max}");
         }
         if frac_parts(self.ident) + frac_parts(self.velocity) + frac_parts(self.junk) > MIX_PARTS {
-            return Err("stress --ident + --velocity + --junk must be <= 1".into());
+            bail!("stress --ident + --velocity + --junk must be <= 1");
         }
         Ok(())
     }
@@ -116,18 +107,21 @@ pub fn run(opts: Args) -> ExitCode {
         eprintln!("{err}");
         return ExitCode::from(1);
     }
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let stop = Arc::clone(&stop);
-        if ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed)).is_err() {
-            eprintln!("could not install the interrupt handler");
-        }
-    }
-    let table = open_table(&opts.table);
+    let stop = Stop::new();
+    super::install_ctrlc(Arc::clone(&stop));
+    let table = open_table(&opts.output.table);
     let csv_on = table.is_some();
-    let writer = match open_output(&opts.uart, opts.baud, Arc::clone(&stop), table) {
+    let writer = match open_output(
+        &opts.output.uart,
+        opts.output.baud,
+        Arc::clone(&stop),
+        table,
+    ) {
         Ok(writer) => writer,
-        Err(code) => return code,
+        Err(err) => {
+            eprintln!("{}", super::error_chain(&err));
+            return ExitCode::from(1);
+        }
     };
     let rate = if opts.rate == 0 {
         "unlimited".to_string()
@@ -143,8 +137,8 @@ pub fn run(opts: Args) -> ExitCode {
         opts.ident,
         opts.velocity,
         opts.junk,
-        opts.uart,
-        opts.table.display()
+        opts.output.uart,
+        opts.output.table.display()
     );
     let shared = Arc::clone(&writer.shared);
     let stats = Arc::new(Stats::default());
@@ -160,7 +154,7 @@ pub fn run(opts: Args) -> ExitCode {
         shared.ready.notify_one();
     });
     let code = run_writer(writer, &stop, Some(&done));
-    stop.store(true, Ordering::Relaxed);
+    stop.request();
     let _ = handle.join();
     let elapsed = started.elapsed().as_secs_f64();
     eprintln!(
@@ -173,13 +167,7 @@ pub fn run(opts: Args) -> ExitCode {
     code
 }
 
-fn generate(
-    opts: &Args,
-    shared: Arc<super::Shared>,
-    stop: &AtomicBool,
-    stats: &Stats,
-    csv_on: bool,
-) {
+fn generate(opts: &Args, shared: Arc<super::Shared>, stop: &Stop, stats: &Stats, csv_on: bool) {
     let mut tracker = Tracker::new();
     let mut odd = vec![false; opts.aircraft];
     let mut seen = vec![false; opts.aircraft];
@@ -190,7 +178,7 @@ fn generate(
     let start = Instant::now();
     let deadline = (opts.seconds > 0).then(|| start + Duration::from_secs(opts.seconds));
     let mut n = 0u64;
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.is_set() {
         if opts.messages > 0 && n >= opts.messages {
             break;
         }
@@ -204,7 +192,7 @@ fn generate(
             let now = start.elapsed();
             if now < due {
                 sleep_until_stop(stop, due - now);
-                if stop.load(Ordering::Relaxed) {
+                if stop.is_set() {
                     break;
                 }
             }
