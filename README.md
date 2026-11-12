@@ -53,6 +53,20 @@ nc localhost 30002 | ./trck --hex - --uart /dev/serial0
 
 `doctor` is a host probe. It does not open the radio or the UART.
 
+## IQ
+
+`--iq FILE` reads an RTL-SDR cu8 capture (interleaved unsigned 8-bit I/Q) and runs the same `demodulate2400` path as the dongle. `--iq-rate` is the file's sample rate. Default is 2400000. Any other rate is resampled to 2.4 MS/s before demodulation.
+
+```
+rtl_sdr -f 1090e6 -s 2.4e6 capture.cu8
+./trck --iq capture.cu8 --uart -
+./trck --iq capture.cu8 --iq-rate 2000000 --uart -
+```
+
+`trck sim --iq-out FILE` writes a synthetic cu8 file from a scenario. `--iq-snr` adds seeded Gaussian noise.
+
+`scripts/fetch-iq.sh` downloads two public recordings into gitignored `tests/data/`. Then `cargo test -- --ignored` runs them. [antirez/dump1090](https://github.com/antirez/dump1090) `testfiles/modes1.bin` is cu8 at 2 MS/s, packed with `--snip`, BSD-3-Clause, Copyright (c) 2012-present Salvatore Sanfilippo. The Porto AWEC 2026 set ([DOI 10.5281/zenodo.23342597](https://doi.org/10.5281/zenodo.23342597)) is CC BY 4.0 by Conrado Guimarães da Costa, Luís Tiago Paiva, and Fernando Fontes (FEUP).
+
 ## Stress
 
 `trck stress` generates Mode S / ADS-B in-process and runs the same decode → queue → UART/CSV path as live. It does not open the RTL-SDR.
@@ -79,6 +93,8 @@ The mix is airborne even/odd CPR, BDS 0,8 callsign (`--ident`), BDS 0,9 velocity
 Each aircraft has an ICAO, callsign, start lat/lon/alt, heading, ground speed, and a message rate. Squawk is optional. One optional heading change (`turn_at` + `heading_to_deg`) or altitude change (`climb_at` + `alt_to_ft`) per aircraft. The same file yields the same bytes.
 
 `--truth` is `ts,icao,lat,lon,alt_ft` for each encoded position pair.
+
+`--iq-out FILE` writes those frames as RTL-SDR cu8. `--iq-rate` defaults to 2400000. `--iq-snr` is optional Gaussian noise in dB.
 
 `examples/scenarios/crossing.toml` is a 7700 aircraft and a crossing pair near GRU. `examples/scenarios/climb.toml` is a single climb in the northern hemisphere. Feed the lines to `trck replay` when you want the live decode path without live traffic.
 
