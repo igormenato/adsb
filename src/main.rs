@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::task::{Context as TaskContext, Wake, Waker};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -103,34 +102,28 @@ enum Cmd {
 
 #[derive(Debug)]
 struct Stop {
-    flag: AtomicBool,
+    flag: Mutex<bool>,
+    wake: Condvar,
     notify: tokio::sync::Notify,
-}
-
-#[derive(Debug)]
-struct Unpark(thread::Thread);
-
-impl Wake for Unpark {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
 }
 
 impl Stop {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            flag: AtomicBool::new(false),
+            flag: Mutex::new(false),
+            wake: Condvar::new(),
             notify: tokio::sync::Notify::new(),
         })
     }
 
     fn request(&self) {
-        self.flag.store(true, Ordering::Relaxed);
+        *self.flag.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.wake.notify_all();
         self.notify.notify_waiters();
     }
 
     fn is_set(&self) -> bool {
-        self.flag.load(Ordering::Relaxed)
+        *self.flag.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     async fn wait(&self) {
@@ -373,13 +366,6 @@ fn fail(err: impl std::fmt::Display) -> ExitCode {
     ExitCode::from(1)
 }
 
-fn error_chain(err: &anyhow::Error) -> String {
-    err.chain()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(": ")
-}
-
 fn open_table(path: &Path) -> Option<Table> {
     match Table::open(path) {
         Ok(table) => Some(table),
@@ -471,7 +457,7 @@ fn main() -> ExitCode {
         table,
     ) {
         Ok(writer) => writer,
-        Err(err) => return fail(error_chain(&err)),
+        Err(err) => return fail(format!("{err:#}")),
     };
     install_ctrlc(Arc::clone(&stop));
 
@@ -565,7 +551,7 @@ fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<Stop>) -> ExitCode {
                 &radio_stop,
             ) {
                 Ok(got) => *stats.lock().unwrap_or_else(PoisonError::into_inner) = got,
-                Err(err) => eprintln!("iq: {}", error_chain(&err)),
+                Err(err) => eprintln!("iq: {err:#}"),
             }
             done.store(true, Ordering::Relaxed);
             shared.ready.notify_one();
@@ -592,12 +578,12 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
     let input =
         match fs::File::open(&file).with_context(|| format!("cannot open {}", file.display())) {
             Ok(input) => input,
-            Err(err) => return fail(error_chain(&err)),
+            Err(err) => return fail(format!("{err:#}")),
         };
     let table = open_table(table_path);
     let mut writer = match open_output(uart, baud, Arc::clone(&stop), table) {
         Ok(writer) => writer,
-        Err(err) => return fail(error_chain(&err)),
+        Err(err) => return fail(format!("{err:#}")),
     };
     eprintln!(
         "replay file={} uart={uart} baud={baud} speed={speed} table={}",
@@ -1094,25 +1080,9 @@ fn write_exit(err: ChunkError) -> ExitCode {
 }
 
 fn sleep_until_stop(stop: &Stop, timeout: Duration) {
-    if timeout.is_zero() || stop.is_set() {
-        return;
-    }
-    let waker = Waker::from(Arc::new(Unpark(thread::current())));
-    let mut cx = TaskContext::from_waker(&waker);
-    let notified = stop.notify.notified();
-    let mut notified = std::pin::pin!(notified);
-    if notified.as_mut().poll(&mut cx).is_ready() || stop.is_set() {
-        return;
-    }
-    let deadline = Instant::now() + timeout;
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            return;
-        }
-        thread::park_timeout(deadline.saturating_duration_since(now));
-        if notified.as_mut().poll(&mut cx).is_ready() || stop.is_set() {
-            return;
-        }
-    }
+    let flag = stop.flag.lock().unwrap_or_else(PoisonError::into_inner);
+    let _ = stop
+        .wake
+        .wait_timeout_while(flag, timeout, |set| !*set)
+        .unwrap_or_else(PoisonError::into_inner);
 }

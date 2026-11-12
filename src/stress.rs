@@ -104,7 +104,7 @@ impl Args {
 
 pub fn run(opts: Args) -> ExitCode {
     if let Err(err) = opts.check() {
-        eprintln!("{err}");
+        eprintln!("{err:#}");
         return ExitCode::from(1);
     }
     let stop = Stop::new();
@@ -119,7 +119,7 @@ pub fn run(opts: Args) -> ExitCode {
     ) {
         Ok(writer) => writer,
         Err(err) => {
-            eprintln!("{}", super::error_chain(&err));
+            eprintln!("{err:#}");
             return ExitCode::from(1);
         }
     };

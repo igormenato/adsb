@@ -150,7 +150,7 @@ pub fn run(opts: Args) -> ExitCode {
     match run_inner(opts) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("sim: {}", super::error_chain(&err));
+            eprintln!("sim: {err:#}");
             ExitCode::from(1)
         }
     }
@@ -667,13 +667,13 @@ rate_hz = 2
     #[test]
     fn malformed_scenario_is_an_error() {
         let path = write_tmp("bad.toml", "duration = 1\n");
-        let err = super::super::error_chain(&load(&path).unwrap_err());
+        let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("aircraft"), "{err}");
         let path = write_tmp("icao.toml", &sample().replace("ABC001", "zz"));
-        let err = super::super::error_chain(&load(&path).unwrap_err());
+        let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("icao"), "{err}");
         let path = write_tmp("not-toml.toml", "[[[");
-        let err = super::super::error_chain(&load(&path).unwrap_err());
+        let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("not-toml.toml"), "{err}");
         let _ = fs::remove_file(path);
     }
