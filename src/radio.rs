@@ -63,15 +63,15 @@ impl Demod {
         }
         for data in demodulate2400(&self.mag) {
             self.stats.messages += 1;
+            let timestamp =
+                (self.offset + data.sample_position as u64) as f64 / f64::from(SAMPLE_HZ);
             if log_msg {
                 eprint!("msg ");
                 for byte in data.msg {
                     eprint!("{byte:02X}");
                 }
-                eprintln!();
+                eprintln!(" t={timestamp:.6}");
             }
-            let timestamp =
-                (self.offset + data.sample_position as u64) as f64 / f64::from(SAMPLE_HZ);
             let Some(fix) = self.tracker.ingest(timestamp, &data.msg) else {
                 continue;
             };

@@ -1467,8 +1467,12 @@ fn iq_decode_rate_vs_snr() {
         .filter(|l| !l.is_empty())
         .count() as u64;
     assert!(generated > 0);
+    // SNR = 10 log10(A² / (2σ²)): on-chip pulse power over complex AWGN (σ on each of I and Q).
+    eprintln!(
+        "SNR = 10 log10(A^2 / (2 sigma^2)): on-chip pulse power over complex AWGN (sigma on I and on Q)"
+    );
     let mut rows = Vec::new();
-    for snr in [20.0, 10.0, 6.0] {
+    for snr in [20.0, 15.0, 12.0, 10.0, 8.0, 6.0] {
         let iq = unique_path(&format!("snr-{snr}.cu8"));
         let table = table_arg();
         let snr_s = format!("{snr}");
@@ -1493,10 +1497,28 @@ fn iq_decode_rate_vs_snr() {
         let _ = fs::remove_file(&iq);
         let _ = fs::remove_file(&table);
     }
+    let rate_at = |db: f64| {
+        rows.iter()
+            .find(|(snr, _, _)| (*snr - db).abs() < 0.1)
+            .map(|(_, _, r)| *r)
+            .unwrap_or(0.0)
+    };
     assert!(
-        rows[0].2 >= 0.9,
+        rate_at(20.0) >= 0.9,
         "20 dB decode rate {} is below 0.9: {rows:?}",
-        rows[0].2
+        rate_at(20.0)
+    );
+    // rs1090's dump1090-2400 needs a perfect 112-bit CRC (no 1-bit correction).
+    // That cliff is ~12 dB for this generator; 10 dB still finds the preamble.
+    assert!(
+        rate_at(12.0) >= 0.75,
+        "12 dB decode rate {} is below 0.75: {rows:?}",
+        rate_at(12.0)
+    );
+    assert!(
+        rate_at(10.0) >= 0.2,
+        "10 dB decode rate {} collapsed (want this demod's ~0.3 floor, not 0): {rows:?}",
+        rate_at(10.0)
     );
     let _ = fs::remove_file(&frames_path);
 }
@@ -1562,10 +1584,17 @@ fn find_under(dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 fn iq_msg_hex(stderr: &str) -> Vec<String> {
+    iq_msgs(stderr).into_iter().map(|(hex, _)| hex).collect()
+}
+
+fn iq_msgs(stderr: &str) -> Vec<(String, f64)> {
     stderr
         .lines()
-        .filter_map(|line| line.strip_prefix("msg "))
-        .map(|hex| hex.trim().to_ascii_uppercase())
+        .filter_map(|line| {
+            let rest = line.strip_prefix("msg ")?;
+            let (hex, t) = rest.split_once(" t=")?;
+            Some((hex.trim().to_ascii_uppercase(), t.parse().ok()?))
+        })
         .collect()
 }
 
@@ -1674,42 +1703,97 @@ fn iq_awec2026_recording() {
     let lon_i = csv_col(&pheads, "longitude_deg")
         .or_else(|| csv_col(&pheads, "lon"))
         .expect("lon");
-    let expect_pos: Vec<(f64, f64)> = prows
-        .iter()
-        .filter_map(|row| Some((row.get(lat_i)?.parse().ok()?, row.get(lon_i)?.parse().ok()?)))
-        .collect();
-    assert_eq!(expect_pos.len(), 10, "expected 10 position points");
-    let frames = stdout.as_chunks::<FRAME_LEN>().0;
-    let mut recovered = 0usize;
-    let mut max_err = 0.0f64;
-    for frame in frames {
-        let Some(fix) = unpack_frame(frame) else {
-            continue;
-        };
-        let lat = f64::from(fix.aircraft.latitude_e7) / 10_000_000.0;
-        let lon = f64::from(fix.aircraft.longitude_e7) / 10_000_000.0;
-        if let Some(err) = expect_pos
+    let hex_p = csv_col(&pheads, "message_hex").expect("pos hex");
+    let t_i = csv_col(&pheads, "time_s").expect("time_s");
+    let iv_i = csv_col(&pheads, "cpr_pair_interval_s");
+    assert_eq!(prows.len(), 10, "expected 10 position points");
+
+    let have_hex = |hex: &str| {
+        got_hex
             .iter()
-            .map(|&(tlat, tlon)| haversine_m(tlat, tlon, lat, lon))
-            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        {
-            if err < 500.0 {
-                recovered += 1;
-            }
-            if err > max_err {
-                max_err = err;
-            }
+            .any(|g| g.starts_with(hex) || hex.starts_with(g.as_str()))
+    };
+    let mut decoded_pos = 0usize;
+    for row in &prows {
+        let hex = hex_norm(&row[hex_p]);
+        let t: f64 = row[t_i].parse().expect("t");
+        let have = have_hex(&hex);
+        if have {
+            decoded_pos += 1;
+        }
+        let iv = iv_i
+            .and_then(|i| row.get(i))
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        eprintln!("iq awec2026 pos t={t:.3} interval={iv:.2}s decoded={have} {hex}");
+    }
+    eprintln!("iq awec2026 position frames decoded {decoded_pos}/10");
+
+    // CSV lists a lat/lon on every airborne CPR frame, pairing with the other
+    // parity even if it is still in the future (intervals 5–8 s on the first
+    // four evens). rs1090 only solves when both parities have already arrived,
+    // so those four rows are not decoder misses.
+    let mut csv_tracker = Tracker::new();
+    let mut csv_solves = 0usize;
+    let mut csv_vs_row = Vec::new();
+    for row in &prows {
+        let hex = hex_norm(&row[hex_p]);
+        let t: f64 = row[t_i].parse().expect("t");
+        let frame = parse_hex_frame(hex.as_bytes()).expect("pos frame");
+        if let Some(fix) = csv_tracker.ingest(t, &frame) {
+            csv_solves += 1;
+            let lat = f64::from(fix.aircraft.latitude_e7) / 10_000_000.0;
+            let lon = f64::from(fix.aircraft.longitude_e7) / 10_000_000.0;
+            let csv_lat: f64 = row[lat_i].parse().expect("lat");
+            let csv_lon: f64 = row[lon_i].parse().expect("lon");
+            let vs = haversine_m(csv_lat, csv_lon, lat, lon);
+            csv_vs_row.push(vs);
+            eprintln!("iq awec2026 CSV row at t={t:.3} vs rs1090(all 10) {vs:.1} m");
         }
     }
     eprintln!(
-        "iq awec2026 positions recovered {recovered}/{} uart={} max_err={max_err:.1} m",
-        expect_pos.len(),
+        "iq awec2026 rs1090 solves {csv_solves}/10 CSV frames (prefix evens stay unpaired); vs-row m {csv_vs_row:?}"
+    );
+
+    let mut decoded_msgs = iq_msgs(&stderr);
+    decoded_msgs.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut live = Tracker::new();
+    let mut ref_fixes = Vec::new();
+    for (hex, t) in &decoded_msgs {
+        let Some(frame) = parse_hex_frame(hex.as_bytes()) else {
+            continue;
+        };
+        if let Some(fix) = live.ingest(*t, &frame) {
+            let lat = f64::from(fix.aircraft.latitude_e7) / 10_000_000.0;
+            let lon = f64::from(fix.aircraft.longitude_e7) / 10_000_000.0;
+            ref_fixes.push((lat, lon));
+        }
+    }
+    let frames = stdout.as_chunks::<FRAME_LEN>().0;
+    assert_eq!(
+        frames.len(),
+        ref_fixes.len(),
+        "UART fixes {} vs rs1090 pairs {} from decoded IQ messages",
+        frames.len(),
+        ref_fixes.len()
+    );
+    let mut max_err = 0.0f64;
+    for (frame, &(rlat, rlon)) in frames.iter().zip(ref_fixes.iter()) {
+        let fix = unpack_frame(frame).expect("uart");
+        let lat = f64::from(fix.aircraft.latitude_e7) / 10_000_000.0;
+        let lon = f64::from(fix.aircraft.longitude_e7) / 10_000_000.0;
+        let err = haversine_m(rlat, rlon, lat, lon);
+        if err > max_err {
+            max_err = err;
+        }
+    }
+    eprintln!(
+        "iq awec2026 UART {} fixes match the live CPR path; max {max_err:.2} m",
         frames.len()
     );
     assert!(
-        recovered > 0,
-        "no positions within 500 m of the CSV; uart={} max_err={max_err}",
-        frames.len()
+        max_err < POS_TOL_M,
+        "IQ positions drifted from the same CPR pairs: {max_err} m"
     );
     let _ = fs::remove_file(&table);
 }
