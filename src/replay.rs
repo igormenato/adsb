@@ -1,9 +1,15 @@
+//! Recorded `ts,hex` lines for [`crate::Tracker::ingest`].
+
 use crate::decode::parse_hex_frame;
 
+/// One CSV line from a recording.
 #[derive(Debug, PartialEq)]
 pub enum ReplayLine {
+    /// Blank or `#` comment.
     Skip,
+    /// A Mode S frame with the recording timestamp.
     Frame { timestamp: f64, frame: Vec<u8> },
+    /// Missing time or hex, bad time, or hex that is not a Mode S frame.
     Malformed,
 }
 
