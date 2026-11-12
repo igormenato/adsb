@@ -1295,11 +1295,12 @@ fn distance_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 
 fn parse_truth(text: &str) -> BTreeMap<(i64, u32), (f64, f64, i32)> {
     let mut rows = BTreeMap::new();
-    for line in text.lines().skip(1) {
-        let cols: Vec<&str> = line.split(',').collect();
-        assert_eq!(cols.len(), 5, "{line}");
+    let mut reader = csv::Reader::from_reader(text.as_bytes());
+    for result in reader.records() {
+        let cols = result.expect("truth csv");
+        assert_eq!(cols.len(), 5, "{cols:?}");
         let ts_ms = (cols[0].parse::<f64>().expect("ts") * 1000.0).round() as i64;
-        let icao = u32::from_str_radix(cols[1], 16).expect("icao");
+        let icao = u32::from_str_radix(&cols[1], 16).expect("icao");
         let lat: f64 = cols[2].parse().expect("lat");
         let lon: f64 = cols[3].parse().expect("lon");
         let alt: i32 = cols[4].parse().expect("alt");

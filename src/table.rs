@@ -5,23 +5,40 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
+
 use crate::frame::{Callsign, Fix};
 
 /// Default file in the process working directory.
 pub const DEFAULT_PATH: &str = "aircraft.csv";
 
-const HEADER: &str = "icao,callsign,lat,lon,altitude_ft,ground_speed_kt,track_deg,timestamp\n";
+#[derive(Serialize)]
+struct Row {
+    icao: String,
+    callsign: String,
+    lat: String,
+    lon: String,
+    altitude_ft: Option<i32>,
+    ground_speed_kt: Option<u16>,
+    track_deg: Option<u16>,
+    timestamp: u64,
+}
 
 /// Append-only aircraft table. One file for the whole process.
 #[derive(Debug)]
 pub struct Table {
-    file: File,
+    wtr: csv::Writer<File>,
 }
 
 impl Table {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.as_ref())?;
+        let headers = file.metadata()?.len() == 0;
         Ok(Self {
-            file: open_append(path.as_ref())?,
+            wtr: writer(file, headers),
         })
     }
 
@@ -31,51 +48,40 @@ impl Table {
     }
 
     pub fn append_at(&mut self, fix: &Fix, now: SystemTime) -> io::Result<()> {
-        let row = format_row(fix, now);
-        self.file.write_all(row.as_bytes())?;
-        self.file.flush()?;
+        self.wtr.serialize(row(fix, now))?;
+        self.wtr.flush()?;
         Ok(())
     }
 }
 
-fn open_append(path: &Path) -> io::Result<File> {
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    if file.metadata()?.len() == 0 {
-        file.write_all(HEADER.as_bytes())?;
-        file.flush()?;
-    }
-    Ok(file)
+fn writer<W: Write>(inner: W, headers: bool) -> csv::Writer<W> {
+    csv::WriterBuilder::new()
+        .has_headers(headers)
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_writer(inner)
 }
 
-fn format_row(fix: &Fix, now: SystemTime) -> String {
+fn row(fix: &Fix, now: SystemTime) -> Row {
     let aircraft = &fix.aircraft;
-    let lat = f64::from(aircraft.latitude_e7) / 10_000_000.0;
-    let lon = f64::from(aircraft.longitude_e7) / 10_000_000.0;
-    let timestamp = now
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!(
-        "{:06x},{},{:.7},{:.7},{},{},{},{}\n",
-        aircraft.icao,
-        callsign_text(aircraft.callsign),
-        lat,
-        lon,
-        display_opt(aircraft.altitude_ft),
-        display_opt(aircraft.ground_speed_kt),
-        display_opt(aircraft.track_deg),
-        timestamp,
-    )
+    Row {
+        icao: format!("{:06x}", aircraft.icao),
+        callsign: callsign_text(aircraft.callsign),
+        lat: format!("{:.7}", f64::from(aircraft.latitude_e7) / 10_000_000.0),
+        lon: format!("{:.7}", f64::from(aircraft.longitude_e7) / 10_000_000.0),
+        altitude_ft: aircraft.altitude_ft,
+        ground_speed_kt: aircraft.ground_speed_kt,
+        track_deg: aircraft.track_deg,
+        timestamp: now
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    }
 }
 
 fn callsign_text(callsign: Callsign) -> String {
     let bytes = callsign.as_bytes();
     let n = bytes.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
     String::from_utf8_lossy(&bytes[..n]).into_owned()
-}
-
-fn display_opt<T: ToString>(value: Option<T>) -> String {
-    value.map(|v| v.to_string()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -108,13 +114,17 @@ mod tests {
         dir.join("aircraft.csv")
     }
 
+    fn format_row(fix: &Fix, now: SystemTime) -> String {
+        let mut wtr = writer(Vec::new(), false);
+        wtr.serialize(row(fix, now)).expect("csv");
+        String::from_utf8(wtr.into_inner().expect("buf")).expect("utf8")
+    }
+
     #[test]
     fn row_uses_pi_clock_not_message_time() {
-        let fix = sample();
         let now = UNIX_EPOCH + std::time::Duration::from_secs(1_762_800_000);
-        let row = format_row(&fix, now);
         assert_eq!(
-            row,
+            format_row(&sample(), now),
             "400abc,SIM0001,10.5000000,-20.2500000,12000,280,90,1762800000\n"
         );
     }
@@ -126,8 +136,26 @@ mod tests {
         fix.aircraft.ground_speed_kt = None;
         fix.aircraft.track_deg = None;
         fix.aircraft.callsign = Callsign::default();
+        assert_eq!(
+            format_row(&fix, UNIX_EPOCH),
+            "400abc,,10.5000000,-20.2500000,,,,0\n"
+        );
+    }
+
+    #[test]
+    fn callsign_with_comma_round_trips() {
+        let mut fix = sample();
+        fix.aircraft.callsign = Callsign::pad("AB,CD");
         let row = format_row(&fix, UNIX_EPOCH);
-        assert_eq!(row, "400abc,,10.5000000,-20.2500000,,,,0\n");
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .from_reader(row.as_bytes());
+        let record = reader.records().next().expect("row").expect("csv");
+        assert_eq!(record.get(1), Some("AB,CD"));
+        assert_eq!(
+            row,
+            "400abc,\"AB,CD\",10.5000000,-20.2500000,12000,280,90,0\n"
+        );
     }
 
     #[test]
@@ -138,8 +166,8 @@ mod tests {
         table.append_at(&fix, UNIX_EPOCH).expect("first");
         table.append_at(&fix, UNIX_EPOCH).expect("second");
         table.append_at(&fix, UNIX_EPOCH).expect("third");
+        drop(table);
         let live = fs::read_to_string(&path).expect("live");
-        assert!(live.starts_with(HEADER), "{live}");
         assert_eq!(live.lines().filter(|line| !line.is_empty()).count(), 4);
         assert!(!path.with_file_name("aircraft.csv.1").exists());
         let _ = fs::remove_dir_all(path.parent().expect("parent"));

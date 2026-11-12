@@ -2,6 +2,8 @@
 
 use std::f64::consts::{PI, SQRT_2};
 
+use anyhow::{Result, bail};
+
 const PREAMBLE_US: f64 = 8.0;
 const BIT_US: f64 = 1.0;
 const HALF_US: f64 = 0.5;
@@ -38,20 +40,20 @@ impl Default for Synth {
     }
 }
 
-pub fn encode_cu8(frames: &[[u8; 14]], synth: Synth) -> Result<Vec<u8>, String> {
+pub fn encode_cu8(frames: &[[u8; 14]], synth: Synth) -> Result<Vec<u8>> {
     if frames.is_empty() {
-        return Err("iq: no frames".into());
+        bail!("iq: no frames");
     }
     if synth.sample_hz == 0 {
-        return Err("iq: sample rate must be > 0".into());
+        bail!("iq: sample rate must be > 0");
     }
     if !(synth.amplitude.is_finite() && synth.amplitude >= 0.0 && synth.amplitude <= 1.0) {
-        return Err("iq: amplitude must be in 0..=1".into());
+        bail!("iq: amplitude must be in 0..=1");
     }
     if let Some(snr) = synth.snr_db
         && !snr.is_finite()
     {
-        return Err("iq: snr must be finite".into());
+        bail!("iq: snr must be finite");
     }
     let starts = frame_starts(frames.len(), synth.overlap_us);
     let last = starts.last().copied().unwrap_or(0.0);

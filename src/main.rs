@@ -1,7 +1,7 @@
 //! Decode 1090 MHz ADS-B and write one UART frame per airborne position.
 
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
@@ -11,6 +11,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags};
@@ -19,8 +20,8 @@ use nix::unistd::isatty;
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
 use trck::{
-    DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Lines, Queue, ReplayLine, Table, Tracker,
-    check_positions, is_mode_s, parse_hex_frame, parse_replay_line,
+    DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Lines, Queue, Replay, ReplayLine, Table, Tracker,
+    check_positions, is_mode_s, parse_hex_frame,
 };
 
 mod doctor;
@@ -64,15 +65,21 @@ struct Args {
     /// Sample rate of --iq. Other rates are resampled to 2.4 MS/s.
     #[arg(long, value_name = "HZ")]
     iq_rate: Option<u32>,
+    #[command(flatten)]
+    output: OutputArgs,
+    /// Send the known frames instead of reading the radio, to check the UART.
+    #[arg(long)]
+    check: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct OutputArgs {
     /// UART device, or - for stdout.
     #[arg(long, default_value = DEFAULT_UART)]
     uart: String,
     #[arg(long, default_value_t = DEFAULT_BAUD)]
     baud: u32,
-    /// Send the known frames instead of reading the radio, to check the UART.
-    #[arg(long)]
-    check: bool,
-    /// Local CSV of each position queued for UART. Default: aircraft.csv in the working directory.
+    /// Local CSV of each position queued for UART.
     #[arg(long, default_value = DEFAULT_PATH, value_name = "PATH")]
     table: PathBuf,
 }
@@ -89,18 +96,57 @@ enum Cmd {
     Replay {
         /// CSV of `ts,hex` lines.
         file: PathBuf,
-        /// UART device, or - for stdout.
-        #[arg(long, default_value = DEFAULT_UART)]
-        uart: String,
-        #[arg(long, default_value_t = DEFAULT_BAUD)]
-        baud: u32,
-        /// Local CSV of each position queued for UART.
-        #[arg(long, default_value = DEFAULT_PATH, value_name = "PATH")]
-        table: PathBuf,
+        #[command(flatten)]
+        output: OutputArgs,
         /// Playback rate. `0` or `max` runs as fast as possible.
         #[arg(long, default_value = "1", value_parser = parse_pace)]
         speed: Pace,
     },
+}
+
+#[derive(Debug)]
+struct Stop {
+    flag: Mutex<bool>,
+    wake: Condvar,
+    notify: tokio::sync::Notify,
+}
+
+impl Stop {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            flag: Mutex::new(false),
+            wake: Condvar::new(),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn request(&self) {
+        *self.flag.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.wake.notify_all();
+        self.notify.notify_waiters();
+    }
+
+    fn is_set(&self) -> bool {
+        *self.flag.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    async fn wait(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_set() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+fn install_ctrlc(stop: Arc<Stop>) {
+    if ctrlc::set_handler(move || stop.request()).is_err() {
+        eprintln!("could not install the interrupt handler");
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -195,7 +241,7 @@ impl Shared {
 
 struct Writer {
     sink: Sink,
-    stop: Arc<AtomicBool>,
+    stop: Arc<Stop>,
     shared: Arc<Shared>,
     frames_written: usize,
 }
@@ -224,7 +270,7 @@ impl Writer {
 
     fn write_some(&mut self) -> Result<(), ChunkError> {
         loop {
-            if self.stop.load(Ordering::Relaxed) {
+            if self.stop.is_set() {
                 return Err(ChunkError::Stopped);
             }
             let mut buf = [0u8; FRAME_LEN];
@@ -319,8 +365,8 @@ impl<R: Read> HexLines<R> {
     }
 }
 
-fn open_failed(path: &str, err: impl std::fmt::Display) -> ExitCode {
-    eprintln!("cannot open {path}: {err}");
+fn fail(err: impl std::fmt::Display) -> ExitCode {
+    eprintln!("{err}");
     ExitCode::from(1)
 }
 
@@ -337,9 +383,9 @@ fn open_table(path: &Path) -> Option<Table> {
 fn open_uart(
     path: &str,
     baud: u32,
-    stop: Arc<AtomicBool>,
+    stop: Arc<Stop>,
     shared: Arc<Shared>,
-) -> Result<Writer, ExitCode> {
+) -> anyhow::Result<Writer> {
     let port = serialport::new(path, baud)
         .data_bits(DataBits::Eight)
         .parity(Parity::None)
@@ -347,10 +393,10 @@ fn open_uart(
         .flow_control(FlowControl::None)
         .timeout(Duration::ZERO)
         .open_native()
-        .map_err(|err| open_failed(path, err))?;
+        .with_context(|| format!("cannot open {path}"))?;
     port.clear(ClearBuffer::All)
-        .map_err(|err| open_failed(path, err))?;
-    sys::set_nonblocking(sys::as_fd(&port)).map_err(|err| open_failed(path, err))?;
+        .with_context(|| format!("cannot open {path}"))?;
+    sys::set_nonblocking(sys::as_fd(&port)).with_context(|| format!("cannot open {path}"))?;
     Ok(Writer {
         sink: Sink::Uart(port),
         stop,
@@ -362,9 +408,9 @@ fn open_uart(
 fn open_output(
     path: &str,
     baud: u32,
-    stop: Arc<AtomicBool>,
+    stop: Arc<Stop>,
     table: Option<Table>,
-) -> Result<Writer, ExitCode> {
+) -> anyhow::Result<Writer> {
     let shared = Shared::new(table);
     if path == "-" {
         return Ok(Writer {
@@ -401,37 +447,34 @@ fn main() -> ExitCode {
         Some(Cmd::Sim(opts)) => return sim::run(opts),
         Some(Cmd::Replay {
             file,
-            uart,
-            baud,
-            table,
+            output,
             speed,
-        }) => return run_replay(file, &uart, baud, &table, speed),
+        }) => return run_replay(file, &output.uart, output.baud, &output.table, speed),
         None => {}
     }
-    let stop = Arc::new(AtomicBool::new(false));
-    let table = open_table(&args.table);
-    let mut writer = match open_output(&args.uart, args.baud, Arc::clone(&stop), table) {
+    let stop = Stop::new();
+    let table = open_table(&args.output.table);
+    let mut writer = match open_output(
+        &args.output.uart,
+        args.output.baud,
+        Arc::clone(&stop),
+        table,
+    ) {
         Ok(writer) => writer,
-        Err(code) => return code,
+        Err(err) => return fail(format!("{err:#}")),
     };
-    {
-        let stop = Arc::clone(&stop);
-        if ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed)).is_err() {
-            eprintln!("could not install the interrupt handler");
-        }
-    }
+    install_ctrlc(Arc::clone(&stop));
 
     if args.iq_rate.is_some() && args.iq.is_none() {
-        eprintln!("--iq-rate requires --iq");
-        return ExitCode::from(1);
+        return fail("--iq-rate requires --iq");
     }
 
     if args.check {
         eprintln!(
             "check uart={} baud={} table={}",
-            args.uart,
-            args.baud,
-            args.table.display()
+            args.output.uart,
+            args.output.baud,
+            args.output.table.display()
         );
         return run_check(&mut writer, &stop);
     }
@@ -441,9 +484,9 @@ fn main() -> ExitCode {
         eprintln!(
             "iq={} rate={rate} uart={} baud={} table={}",
             path.display(),
-            args.uart,
-            args.baud,
-            args.table.display()
+            args.output.uart,
+            args.output.baud,
+            args.output.table.display()
         );
         return run_iq(path, rate, writer, stop);
     }
@@ -451,16 +494,15 @@ fn main() -> ExitCode {
     if let Some(text) = args.hex.as_deref() {
         eprintln!(
             "hex={text} uart={} baud={} table={}",
-            args.uart,
-            args.baud,
-            args.table.display()
+            args.output.uart,
+            args.output.baud,
+            args.output.table.display()
         );
         if text == "-" {
             return run_hex_stdin(&mut writer, &stop);
         }
         let Some(addrs) = resolve_addr(text) else {
-            eprintln!("hex {text}: expected host:port");
-            return ExitCode::from(1);
+            return fail(format!("hex {text}: expected host:port"));
         };
         return run_hex(&addrs, text, &mut writer, &stop);
     }
@@ -468,14 +510,14 @@ fn main() -> ExitCode {
     eprintln!(
         "rtlsdr={} uart={} baud={} table={}",
         args.rtlsdr,
-        args.uart,
-        args.baud,
-        args.table.display()
+        args.output.uart,
+        args.output.baud,
+        args.output.table.display()
     );
     run_radio(args.rtlsdr, writer, stop)
 }
 
-fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<AtomicBool>) -> ExitCode {
+fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<Stop>) -> ExitCode {
     let shared = Arc::clone(&writer.shared);
     let csv_on = shared
         .table
@@ -513,14 +555,14 @@ fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<AtomicBool>) -> Exit
                 &radio_stop,
             ) {
                 Ok(got) => *stats.lock().unwrap_or_else(PoisonError::into_inner) = got,
-                Err(err) => eprintln!("iq: {err}"),
+                Err(err) => eprintln!("iq: {err:#}"),
             }
             done.store(true, Ordering::Relaxed);
             shared.ready.notify_one();
         })
     };
     let code = run_writer(writer, &stop, Some(&done));
-    stop.store(true, Ordering::Relaxed);
+    stop.request();
     let _ = reader.join();
     let got = *stats.lock().unwrap_or_else(PoisonError::into_inner);
     let elapsed = started.elapsed().as_secs_f64();
@@ -535,24 +577,17 @@ fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<AtomicBool>) -> Exit
 }
 
 fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pace) -> ExitCode {
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let stop = Arc::clone(&stop);
-        if ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed)).is_err() {
-            eprintln!("could not install the interrupt handler");
-        }
-    }
-    let input = match fs::File::open(&file) {
-        Ok(input) => input,
-        Err(err) => {
-            eprintln!("cannot open {}: {err}", file.display());
-            return ExitCode::from(1);
-        }
-    };
+    let stop = Stop::new();
+    install_ctrlc(Arc::clone(&stop));
+    let input =
+        match fs::File::open(&file).with_context(|| format!("cannot open {}", file.display())) {
+            Ok(input) => input,
+            Err(err) => return fail(format!("{err:#}")),
+        };
     let table = open_table(table_path);
     let mut writer = match open_output(uart, baud, Arc::clone(&stop), table) {
         Ok(writer) => writer,
-        Err(code) => return code,
+        Err(err) => return fail(format!("{err:#}")),
     };
     eprintln!(
         "replay file={} uart={uart} baud={baud} speed={speed} table={}",
@@ -566,19 +601,21 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
     let mut decoded = 0usize;
     let mut malformed = 0usize;
     let mut fixes = 0usize;
-    for line in BufReader::new(input).lines() {
-        if stop.load(Ordering::Relaxed) {
+    let mut replay = Replay::new(input);
+    loop {
+        if stop.is_set() {
             break;
         }
-        let line = match line {
-            Ok(line) => line,
+        let line = match replay.next_record() {
+            Ok(None) => break,
+            Ok(Some(line)) => line,
             Err(err) => {
                 eprintln!("{}: {err}", file.display());
                 print_replay_summary(read, decoded, malformed, fixes, writer.frames_written);
                 return ExitCode::from(1);
             }
         };
-        match parse_replay_line(&line) {
+        match line {
             ReplayLine::Skip => {}
             ReplayLine::Malformed => malformed += 1,
             ReplayLine::Frame { timestamp, frame } => {
@@ -589,7 +626,7 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
                 if let Some(prev_ts) = prev {
                     pace_sleep(speed, timestamp - prev_ts, &stop);
                 }
-                if stop.load(Ordering::Relaxed) {
+                if stop.is_set() {
                     break;
                 }
                 prev = Some(timestamp);
@@ -609,7 +646,7 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
     print_replay_summary(read, decoded, malformed, fixes, writer.frames_written);
     match drain {
         Ok(()) => {
-            if stop.load(Ordering::Relaxed) {
+            if stop.is_set() {
                 eprintln!("stopped");
             }
             ExitCode::SUCCESS
@@ -624,13 +661,13 @@ fn print_replay_summary(read: usize, decoded: usize, malformed: usize, fixes: us
     );
 }
 
-fn drain_writer(writer: &mut Writer, stop: &AtomicBool) -> Result<(), ChunkError> {
+fn drain_writer(writer: &mut Writer, stop: &Stop) -> Result<(), ChunkError> {
     loop {
         writer.write_some()?;
         if !writer.has_pending() {
             return Ok(());
         }
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_set() {
             return Err(ChunkError::Stopped);
         }
         let Some(fd) = writer.uart_fd() else {
@@ -643,7 +680,7 @@ fn drain_writer(writer: &mut Writer, stop: &AtomicBool) -> Result<(), ChunkError
     }
 }
 
-fn pace_sleep(pace: Pace, dt: f64, stop: &AtomicBool) {
+fn pace_sleep(pace: Pace, dt: f64, stop: &Stop) {
     match pace {
         Pace::Max => {}
         Pace::Rate(n) => {
@@ -654,7 +691,16 @@ fn pace_sleep(pace: Pace, dt: f64, stop: &AtomicBool) {
             if !secs.is_finite() || secs <= 0.0 {
                 return;
             }
-            sleep_until_stop(stop, Duration::from_secs_f64(secs));
+            let mut left = Duration::from_secs_f64(secs);
+            let step = Duration::from_millis(50);
+            while left > Duration::ZERO {
+                if stop.is_set() {
+                    return;
+                }
+                let slice = left.min(step);
+                thread::sleep(slice);
+                left = left.saturating_sub(slice);
+            }
         }
     }
 }
@@ -670,7 +716,7 @@ fn unix_time(ts: f64) -> SystemTime {
     UNIX_EPOCH + Duration::new(secs as u64, nanos)
 }
 
-fn run_radio(device: usize, writer: Writer, stop: Arc<AtomicBool>) -> ExitCode {
+fn run_radio(device: usize, writer: Writer, stop: Arc<Stop>) -> ExitCode {
     let shared = Arc::clone(&writer.shared);
     let radio_stop = Arc::clone(&stop);
     let radio = thread::spawn(move || {
@@ -691,19 +737,19 @@ fn run_radio(device: usize, writer: Writer, stop: Arc<AtomicBool>) -> ExitCode {
             )),
             Err(err) => eprintln!("rtlsdr runtime: {err}"),
         }
-        radio_stop.store(true, Ordering::Relaxed);
+        radio_stop.request();
         shared.ready.notify_one();
     });
     let code = run_writer(writer, &stop, None);
-    stop.store(true, Ordering::Relaxed);
+    stop.request();
     let _ = radio.join();
     code
 }
 
-fn run_writer(mut writer: Writer, stop: &AtomicBool, done: Option<&AtomicBool>) -> ExitCode {
+fn run_writer(mut writer: Writer, stop: &Stop, done: Option<&AtomicBool>) -> ExitCode {
     let mut drain_from = None;
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_set() {
             eprintln!("stopped");
             return ExitCode::SUCCESS;
         }
@@ -734,15 +780,15 @@ fn run_writer(mut writer: Writer, stop: &AtomicBool, done: Option<&AtomicBool>) 
     }
 }
 
-fn run_check(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
-    while !stop.load(Ordering::Relaxed) {
+fn run_check(writer: &mut Writer, stop: &Stop) -> ExitCode {
+    while !stop.is_set() {
         for position in check_positions() {
             log_fix(&position);
             writer.enqueue(position);
         }
         let deadline = Instant::now() + CHECK_PAUSE;
         loop {
-            if stop.load(Ordering::Relaxed) {
+            if stop.is_set() {
                 break;
             }
             if let Err(err) = writer.write_some() {
@@ -768,7 +814,7 @@ fn run_check(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_hex_stdin(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
+fn run_hex_stdin(writer: &mut Writer, stop: &Stop) -> ExitCode {
     let stdin = io::stdin();
     if !isatty(&stdin).unwrap_or(false)
         && let Err(err) = sys::set_nonblocking(&stdin)
@@ -791,9 +837,9 @@ fn run_hex_stdin(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     }
 }
 
-fn run_hex(addrs: &[SocketAddr], text: &str, writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
+fn run_hex(addrs: &[SocketAddr], text: &str, writer: &mut Writer, stop: &Stop) -> ExitCode {
     let mut delay = RETRY_MIN;
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.is_set() {
         match dial_first(addrs, stop, text) {
             Ok(stream) => {
                 eprintln!("hex {text} connected");
@@ -806,7 +852,7 @@ fn run_hex(addrs: &[SocketAddr], text: &str, writer: &mut Writer, stop: &AtomicB
             Err(DialError::Stopped) => break,
             Err(DialError::Failed(_)) => {}
         }
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_set() {
             break;
         }
         sleep_until_stop(stop, delay);
@@ -822,7 +868,7 @@ enum DialError {
     Failed(io::Error),
 }
 
-fn dial_first(addrs: &[SocketAddr], stop: &AtomicBool, text: &str) -> Result<TcpStream, DialError> {
+fn dial_first(addrs: &[SocketAddr], stop: &Stop, text: &str) -> Result<TcpStream, DialError> {
     if addrs.is_empty() {
         eprintln!("hex {text}: expected host:port");
         return Err(DialError::Failed(io::Error::new(
@@ -832,7 +878,7 @@ fn dial_first(addrs: &[SocketAddr], stop: &AtomicBool, text: &str) -> Result<Tcp
     }
     let mut last = None;
     for addr in addrs {
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_set() {
             return Err(DialError::Stopped);
         }
         match dial(addr, stop, CONNECT_TIMEOUT) {
@@ -849,8 +895,8 @@ fn dial_first(addrs: &[SocketAddr], stop: &AtomicBool, text: &str) -> Result<Tcp
     })))
 }
 
-fn dial(addr: &SocketAddr, stop: &AtomicBool, timeout: Duration) -> Result<TcpStream, DialError> {
-    if stop.load(Ordering::Relaxed) {
+fn dial(addr: &SocketAddr, stop: &Stop, timeout: Duration) -> Result<TcpStream, DialError> {
+    if stop.is_set() {
         return Err(DialError::Stopped);
     }
     let sock = sys::tcp_socket(addr).map_err(DialError::Failed)?;
@@ -872,14 +918,10 @@ fn pending_connect(err: &io::Error) -> bool {
     })
 }
 
-fn wait_connected(
-    fd: BorrowedFd<'_>,
-    stop: &AtomicBool,
-    timeout: Duration,
-) -> Result<(), DialError> {
+fn wait_connected(fd: BorrowedFd<'_>, stop: &Stop, timeout: Duration) -> Result<(), DialError> {
     let deadline = Instant::now() + timeout;
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_set() {
             return Err(DialError::Stopped);
         }
         let now = Instant::now();
@@ -918,7 +960,7 @@ fn enable_keepalive(stream: &TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -> Pump {
+fn pump(stream: TcpStream, writer: &mut Writer, stop: &Stop, text: &str) -> Pump {
     if let Err(err) = enable_keepalive(&stream) {
         eprintln!("hex {text} keepalive: {err}");
         return Pump::Disconnected;
@@ -934,11 +976,11 @@ fn pump(stream: TcpStream, writer: &mut Writer, stop: &AtomicBool, text: &str) -
 fn pump_hex<R: Read + AsRawFd>(
     lines: &mut HexLines<R>,
     writer: &mut Writer,
-    stop: &AtomicBool,
+    stop: &Stop,
     text: &str,
 ) -> Pump {
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_set() {
             return Pump::Stopped;
         }
         let (socket_revents, uart_ready) = {
@@ -968,7 +1010,7 @@ fn pump_hex<R: Read + AsRawFd>(
             });
             (socket_revents, uart_ready)
         };
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_set() {
             return Pump::Stopped;
         }
         let mut fresh = false;
@@ -1041,14 +1083,10 @@ fn write_exit(err: ChunkError) -> ExitCode {
     }
 }
 
-fn sleep_until_stop(stop: &AtomicBool, mut left: Duration) {
-    let step = Duration::from_millis(50);
-    while left > Duration::ZERO {
-        if stop.load(Ordering::Relaxed) {
-            return;
-        }
-        let slice = left.min(step);
-        thread::sleep(slice);
-        left = left.saturating_sub(slice);
-    }
+fn sleep_until_stop(stop: &Stop, timeout: Duration) {
+    let flag = stop.flag.lock().unwrap_or_else(PoisonError::into_inner);
+    let _ = stop
+        .wake
+        .wait_timeout_while(flag, timeout, |set| !*set)
+        .unwrap_or_else(PoisonError::into_inner);
 }
