@@ -578,14 +578,7 @@ fn wait_frames_until(
     timeout: Duration,
     ready: impl Fn(&[[u8; FRAME_LEN]]) -> bool,
 ) -> Vec<[u8; FRAME_LEN]> {
-    wait_frames_until_fd(master.as_raw_fd(), timeout, ready)
-}
-
-fn wait_frames_until_fd(
-    fd: i32,
-    timeout: Duration,
-    ready: impl Fn(&[[u8; FRAME_LEN]]) -> bool,
-) -> Vec<[u8; FRAME_LEN]> {
+    let fd = master.as_raw_fd();
     // SAFETY: `fd` is the open pty master this test owns.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -633,85 +626,11 @@ fn wait_frames_until_fd(
 }
 
 fn wait_frames(master: &mut TTYPort, n: usize, timeout: Duration) -> Vec<[u8; FRAME_LEN]> {
-    wait_frames_fd(master.as_raw_fd(), n, timeout)
-}
-
-fn wait_frames_fd(fd: i32, n: usize, timeout: Duration) -> Vec<[u8; FRAME_LEN]> {
-    let mut frames = wait_frames_until_fd(fd, timeout, |frames| frames.len() >= n);
+    let mut frames = wait_frames_until(master, timeout, |frames| frames.len() >= n);
     frames.truncate(n);
     frames
 }
 
-#[cfg(target_os = "linux")]
-struct OpenPty {
-    master: i32,
-    slave: i32,
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for OpenPty {
-    fn drop(&mut self) {
-        // SAFETY: both fds come from `openpty` and this owner uniquely closes them.
-        unsafe {
-            libc::close(self.master);
-            libc::close(self.slave);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn openpty_pair() -> (OpenPty, String) {
-    let mut master = 0;
-    let mut slave = 0;
-    // SAFETY: `openpty` writes two new fds. Null name/termios/winsize uses defaults.
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    };
-    assert_eq!(rc, 0, "{}", io::Error::last_os_error());
-    let mut name = [0u8; 64];
-    // SAFETY: `master` is an open pty. `name` is a live buffer `ptsname_r` does not keep.
-    let nrc = unsafe { libc::ptsname_r(master, name.as_mut_ptr().cast(), name.len()) };
-    assert_eq!(nrc, 0, "{}", io::Error::last_os_error());
-    let path = std::ffi::CStr::from_bytes_until_nul(&name)
-        .expect("pty name")
-        .to_str()
-        .expect("utf8")
-        .to_owned();
-    // SAFETY: both fds are the open pty this pair owns.
-    unsafe {
-        for fd in [master, slave] {
-            let mut term = std::mem::zeroed();
-            assert_eq!(
-                libc::tcgetattr(fd, &mut term),
-                0,
-                "{}",
-                io::Error::last_os_error()
-            );
-            libc::cfmakeraw(&mut term);
-            assert_eq!(
-                libc::tcsetattr(fd, libc::TCSANOW, &term),
-                0,
-                "{}",
-                io::Error::last_os_error()
-            );
-        }
-        let _ = libc::ioctl(slave, libc::TIOCNXCL);
-        let _ = libc::flock(slave, libc::LOCK_UN);
-        let flags = libc::fcntl(slave, libc::F_GETFL);
-        assert!(flags >= 0, "{}", io::Error::last_os_error());
-        let rc = libc::fcntl(slave, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        assert_eq!(rc, 0, "{}", io::Error::last_os_error());
-    }
-    (OpenPty { master, slave }, path)
-}
-
-#[cfg(target_os = "linux")]
 fn spawn_hex_stdin(uart: &str) -> StopSender {
     let table = table_arg();
     let child = Command::new(env!("CARGO_BIN_EXE_trck"))
@@ -731,7 +650,6 @@ fn spawn_hex_stdin(uart: &str) -> StopSender {
     StopSender(child)
 }
 
-#[cfg(target_os = "linux")]
 fn decoded_7700_aircraft() -> Aircraft {
     let mut tracker = Tracker::new();
     let status = parse_hex_frame(STATUS.as_bytes()).expect("status");
@@ -742,17 +660,16 @@ fn decoded_7700_aircraft() -> Aircraft {
     tracker.ingest(3.0, &odd).expect("position").aircraft
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn avr_hex_writes_a_pty_frame() {
-    let (pty, path) = openpty_pair();
-    let mut sender = spawn_hex_stdin(&path);
+    let mut pty = Pty::open();
+    let mut sender = spawn_hex_stdin(&pty.path());
     let mut stdin = sender.0.stdin.take().expect("stdin");
     writeln!(stdin, "*{STATUS};").expect("status");
     writeln!(stdin, "*{EVEN};").expect("even");
     writeln!(stdin, "@000000000000{ODD};").expect("odd");
     stdin.flush().expect("flush");
-    let frames = wait_frames_fd(pty.master, 1, Duration::from_secs(2));
+    let frames = wait_frames(&mut pty.master, 1, Duration::from_secs(2));
     let expect = decoded_7700_aircraft();
     assert_eq!(frame_aircraft(&frames[0]), expect);
     assert_eq!(expect.icao.to_u24(), ICAO_40058B);

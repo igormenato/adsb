@@ -461,7 +461,10 @@ fn run_check(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
 fn run_hex_stdin(writer: &mut Writer, stop: &AtomicBool) -> ExitCode {
     let stdin = io::stdin();
     let fd = stdin.as_raw_fd();
-    if let Err(err) = sys::set_nonblocking(fd) {
+    // SAFETY: `fd` is stdin. `isatty` only inspects it.
+    if unsafe { libc::isatty(fd) } == 0
+        && let Err(err) = sys::set_nonblocking(fd)
+    {
         eprintln!("hex -: {err}");
         return ExitCode::from(1);
     }
