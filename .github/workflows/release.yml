@@ -30,16 +30,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild@0.24.1
-      - run: cargo zigbuild --release --locked --target arm-unknown-linux-musleabihf
       - run: cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
-      - run: |
-          cp target/arm-unknown-linux-musleabihf/release/trck trck-arm
-          cp target/aarch64-unknown-linux-musl/release/trck trck-aarch64
+      - run: cp target/aarch64-unknown-linux-musl/release/trck trck-aarch64
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
           gh release create "${TAG}"
-          trck-arm
           trck-aarch64
           --title "${TAG}"
           --generate-notes

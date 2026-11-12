@@ -10,14 +10,13 @@ Run the host checks in this order.
 2. `cargo clippy --locked --all-targets -- -D warnings`
 3. `cargo test --locked`
 
-Build the Pi binaries. Both are static musl so they copy onto Raspberry Pi OS Lite without matching glibc. Those targets compile C (zstd, from rs1090). Install Zig, then `cargo install --locked cargo-zigbuild`. CI uses `mlugg/setup-zig`.
+Build the Pi binary. It is static musl so it copies onto Raspberry Pi OS Lite without matching glibc. That target compiles C (zstd, from rs1090). Install Zig, then `cargo install --locked cargo-zigbuild`. CI uses `mlugg/setup-zig`.
 
 ```
-cargo zigbuild --release --locked --target arm-unknown-linux-musleabihf
 cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
 ```
 
-Copy `target/<triple>/release/trck`. `arm-unknown-linux-musleabihf` is the Zero W. `aarch64-unknown-linux-musl` is the Pi 3B on 64-bit Lite. Release assets are `trck-arm` and `trck-aarch64`.
+Copy `target/aarch64-unknown-linux-musl/release/trck`. `aarch64-unknown-linux-musl` is the Zero 2 W on 64-bit Lite. The same binary runs on a Pi 3B on 64-bit Lite. The release asset is `trck-aarch64`.
 
 ## Run
 
@@ -77,7 +76,7 @@ rtl_sdr -f 1090e6 -s 2.4e6 capture.cu8
 
 `--rate 0` is as fast as possible. `--messages N` stops after N generated frames. Omit both `--seconds` and `--messages` to run until Ctrl-C.
 
-`--uart` and `--table` are the same as live. On exit it prints `messages`, `fixes`, `dropped`, `csv`, and `elapsed` so you can see the ceiling on a Zero W 1.
+`--uart` and `--table` are the same as live. On exit it prints `messages`, `fixes`, `dropped`, `csv`, and `elapsed` so you can see the ceiling on a Zero 2 W.
 
 The mix is airborne even/odd CPR, BDS 0,8 callsign (`--ident`), BDS 0,9 velocity (`--velocity`), and a `--junk` fraction of CRC-bad or truncated frames. The rest is position. `--emergency` is the fraction of ICAOs that advertise squawk 7700; ordinary traffic never evicts those from the 64-deep UART queue.
 

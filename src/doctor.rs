@@ -315,8 +315,7 @@ fn stdout_is_serial(path: &str) -> bool {
 }
 
 fn is_zero_w(model: &str) -> bool {
-    let lower = model.to_ascii_lowercase();
-    lower.contains("pi zero w") || lower.contains("pi zero 2 w")
+    model.to_ascii_lowercase().contains("pi zero 2 w")
 }
 
 struct FirmwareConfig {
@@ -564,7 +563,7 @@ mod tests {
         let check = check_uart_console(&ConsoleProbe {
             cmdline: "console=serial0,115200 console=tty1".into(),
             stdout_path: None,
-            model: Some("Raspberry Pi Zero W Rev 1.1".into()),
+            model: Some("Raspberry Pi Zero 2 W Rev 1.0".into()),
             config: Some((
                 "/boot/firmware/config.txt".into(),
                 "enable_uart=1\ndtoverlay=disable-bt\n".into(),
@@ -579,7 +578,7 @@ mod tests {
         let check = check_uart_console(&ConsoleProbe {
             cmdline: "console=tty1".into(),
             stdout_path: None,
-            model: Some("Raspberry Pi Zero W Rev 1.1".into()),
+            model: Some("Raspberry Pi Zero 2 W Rev 1.0".into()),
             config: Some(("/boot/firmware/config.txt".into(), "enable_uart=1\n".into())),
         });
         assert_eq!(check.status, Status::Fail);
@@ -591,7 +590,7 @@ mod tests {
         let check = check_uart_console(&ConsoleProbe {
             cmdline: "console=tty1".into(),
             stdout_path: None,
-            model: Some("Raspberry Pi Zero W Rev 1.1".into()),
+            model: Some("Raspberry Pi Zero 2 W Rev 1.0".into()),
             config: Some((
                 "/boot/firmware/config.txt".into(),
                 "enable_uart=1\ndtoverlay=disable-bt\n".into(),
