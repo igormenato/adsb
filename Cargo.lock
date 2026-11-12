@@ -1733,6 +1733,7 @@ dependencies = [
  "desperado",
  "futures-util",
  "libc",
+ "num-complex",
  "rs1090",
  "serde",
  "serde_json",

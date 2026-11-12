@@ -9,7 +9,11 @@ use clap::Parser;
 use serde::Deserialize;
 use serde_json::Value;
 
+use trck::parse_hex_frame;
+
+use super::iq::{Synth, encode_cu8};
 use super::modes::{airborne_position, hex14, identification, status, velocity};
+use super::radio;
 
 const GEOM_ALT: u32 = 8;
 
@@ -33,6 +37,21 @@ pub struct Args {
     /// Pose encoded into each position pair.
     #[arg(long, value_name = "FILE")]
     truth: Option<PathBuf>,
+    /// RTL-SDR cu8 I/Q of the generated frames.
+    #[arg(long, value_name = "FILE")]
+    iq_out: Option<PathBuf>,
+    /// Sample rate for --iq-out.
+    #[arg(long, default_value_t = radio::SAMPLE_HZ)]
+    iq_rate: u32,
+    /// Pulse amplitude 0..=1 for --iq-out.
+    #[arg(long, default_value_t = 0.8)]
+    iq_amp: f64,
+    /// Gaussian noise SNR in dB for --iq-out. Omit for a clean file.
+    #[arg(long, requires = "iq_out")]
+    iq_snr: Option<f64>,
+    /// RNG seed for --iq-out noise.
+    #[arg(long, default_value_t = 1)]
+    iq_seed: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,7 +163,41 @@ pub fn run(opts: Args) -> ExitCode {
         eprintln!("sim: {err}");
         return ExitCode::from(1);
     }
+    if let Some(path) = opts.iq_out.as_deref() {
+        match write_iq(path, &frames, &opts) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("sim: {err}");
+                return ExitCode::from(1);
+            }
+        }
+    }
     ExitCode::SUCCESS
+}
+
+fn write_iq(path: &Path, text: &str, opts: &Args) -> Result<(), String> {
+    let mut frames = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let hex = line.split_once(',').map(|p| p.1).unwrap_or(line);
+        let raw = parse_hex_frame(hex.as_bytes()).ok_or_else(|| format!("iq frame {i}: {hex}"))?;
+        if raw.len() != 14 {
+            return Err(format!("iq frame {i}: expected 14 bytes"));
+        }
+        let mut frame = [0u8; 14];
+        frame.copy_from_slice(&raw);
+        frames.push(frame);
+    }
+    let bytes = encode_cu8(
+        &frames,
+        Synth {
+            amplitude: opts.iq_amp,
+            snr_db: opts.iq_snr,
+            seed: opts.iq_seed,
+            sample_hz: opts.iq_rate,
+            overlap_us: None,
+        },
+    )?;
+    fs::write(path, bytes).map_err(|err| format!("{}: {err}", path.display()))
 }
 
 fn write_out(path: Option<&Path>, text: &str) -> io::Result<()> {
@@ -641,6 +694,11 @@ rate_hz = 2
             until: None,
             out: None,
             truth: None,
+            iq_out: None,
+            iq_rate: radio::SAMPLE_HZ,
+            iq_amp: 0.8,
+            iq_snr: None,
+            iq_seed: 1,
         })
     }
 

@@ -5,7 +5,7 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,6 +19,7 @@ use trck::{
 };
 
 mod doctor;
+mod iq;
 mod modes;
 mod radio;
 mod sim;
@@ -53,6 +54,12 @@ struct Args {
     /// Newline hex Mode S frames. For tests and a Beast-less feed.
     #[arg(long, conflicts_with = "check", value_name = "HOST:PORT")]
     hex: Option<String>,
+    /// RTL-SDR cu8 I/Q file. Same demodulate2400 path as the dongle.
+    #[arg(long, conflicts_with_all = ["check", "hex"], value_name = "FILE")]
+    iq: Option<PathBuf>,
+    /// Sample rate of --iq. Other rates are resampled to 2.4 MS/s.
+    #[arg(long, value_name = "HZ")]
+    iq_rate: Option<u32>,
     /// UART device, or - for stdout.
     #[arg(long, default_value = DEFAULT_UART)]
     uart: String,
@@ -343,6 +350,11 @@ fn main() -> ExitCode {
         }
     }
 
+    if args.iq_rate.is_some() && args.iq.is_none() {
+        eprintln!("--iq-rate requires --iq");
+        return ExitCode::from(1);
+    }
+
     if args.check {
         eprintln!(
             "check uart={} baud={} table={}",
@@ -351,6 +363,18 @@ fn main() -> ExitCode {
             args.table.display()
         );
         return run_check(&mut writer, &stop);
+    }
+
+    if let Some(path) = args.iq.as_deref() {
+        let rate = args.iq_rate.unwrap_or(radio::SAMPLE_HZ);
+        eprintln!(
+            "iq={} rate={rate} uart={} baud={} table={}",
+            path.display(),
+            args.uart,
+            args.baud,
+            args.table.display()
+        );
+        return run_iq(path, rate, writer, stop);
     }
 
     if let Some(text) = args.hex.as_deref() {
@@ -375,6 +399,65 @@ fn main() -> ExitCode {
         args.table.display()
     );
     run_radio(args.rtlsdr, writer, stop)
+}
+
+fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<AtomicBool>) -> ExitCode {
+    let shared = Arc::clone(&writer.shared);
+    let csv_on = shared
+        .table
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_some();
+    let radio_stop = Arc::clone(&stop);
+    let done = Arc::new(AtomicBool::new(false));
+    let n_drop = Arc::new(AtomicU64::new(0));
+    let n_csv = Arc::new(AtomicU64::new(0));
+    let stats = Arc::new(Mutex::new(radio::IqStats::default()));
+    let started = Instant::now();
+    let path = path.to_path_buf();
+    let reader = {
+        let done = Arc::clone(&done);
+        let n_drop = Arc::clone(&n_drop);
+        let n_csv = Arc::clone(&n_csv);
+        let stats = Arc::clone(&stats);
+        let shared = Arc::clone(&shared);
+        thread::spawn(move || {
+            let enqueue_shared = Arc::clone(&shared);
+            match radio::run_iq(
+                &path,
+                rate,
+                move |fix| {
+                    log_fix(&fix);
+                    if csv_on {
+                        n_csv.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if let Some(dropped) = enqueue_shared.push(fix) {
+                        n_drop.fetch_add(1, Ordering::Relaxed);
+                        log_drop(&dropped);
+                    }
+                },
+                &radio_stop,
+            ) {
+                Ok(got) => *stats.lock().unwrap_or_else(PoisonError::into_inner) = got,
+                Err(err) => eprintln!("iq: {err}"),
+            }
+            done.store(true, Ordering::Relaxed);
+            shared.ready.notify_one();
+        })
+    };
+    let code = run_writer(writer, &stop, Some(&done));
+    stop.store(true, Ordering::Relaxed);
+    let _ = reader.join();
+    let got = *stats.lock().unwrap_or_else(PoisonError::into_inner);
+    let elapsed = started.elapsed().as_secs_f64();
+    eprintln!(
+        "iq messages={} fixes={} dropped={} csv={} elapsed={elapsed:.3}s",
+        got.messages,
+        got.fixes,
+        n_drop.load(Ordering::Relaxed),
+        n_csv.load(Ordering::Relaxed),
+    );
+    code
 }
 
 fn run_radio(device: usize, writer: Writer, stop: Arc<AtomicBool>) -> ExitCode {
