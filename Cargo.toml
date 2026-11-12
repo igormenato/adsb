@@ -12,9 +12,11 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 crc = "3.2"
+csv = "1"
 ctrlc = "3.4"
 desperado = { version = "0.5.2", features = ["rtlsdr"] }
 futures-util = "0.3.34"
+hex = "0.4.3"
 libc = "0.2"
 num-complex = "0.4"
 rs1090 = "0.8.1"

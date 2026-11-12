@@ -332,13 +332,10 @@ pub fn parse_hex_frame(bytes: &[u8]) -> Option<Vec<u8>> {
         .strip_prefix("0x")
         .or_else(|| text.strip_prefix("0X"))
         .unwrap_or(text);
-    if text.len() < 14 || text.len() % 2 != 0 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if text.len() < 14 || text.len() % 2 != 0 {
         return None;
     }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
-        .collect()
+    hex::decode(text).ok()
 }
 
 #[cfg(test)]
