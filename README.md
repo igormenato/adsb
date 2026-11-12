@@ -53,6 +53,20 @@ nc localhost 30002 | ./trck --hex - --uart /dev/serial0
 
 `doctor` is a host probe. It does not open the radio or the UART.
 
+## Stress
+
+`trck stress` generates Mode S / ADS-B in-process and runs the same decode → queue → UART/CSV path as live. It does not open the RTL-SDR.
+
+```
+./trck stress --uart - --aircraft 32 --rate 0 --seconds 10 --emergency 0.1
+```
+
+`--rate 0` is as fast as possible. `--messages N` stops after N generated frames. Omit both `--seconds` and `--messages` to run until Ctrl-C.
+
+`--uart` and `--table` are the same as live. On exit it prints `messages`, `fixes`, `dropped`, `csv`, and `elapsed` so you can see the ceiling on a Zero W 1.
+
+The mix is airborne even/odd CPR, BDS 0,8 callsign (`--ident`), BDS 0,9 velocity (`--velocity`), and a `--junk` fraction of CRC-bad or truncated frames. The rest is position. `--emergency` is the fraction of ICAOs that advertise squawk 7700; ordinary traffic never evicts those from the 64-deep UART queue.
+
 ## Frame
 
 The layout is in [ESP32 satellite telemetry](docs/esp32-alert.md).

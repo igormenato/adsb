@@ -21,6 +21,7 @@ use trck::{
 
 mod doctor;
 mod radio;
+mod stress;
 mod sys;
 
 const DEFAULT_UART: &str = "/dev/serial0";
@@ -68,6 +69,8 @@ struct Args {
 enum Cmd {
     /// Probe this host for RTL-SDR, UART, and CSV setup.
     Doctor,
+    /// Generate Mode S in-process and run the live decode path.
+    Stress(stress::Args),
     /// Replay recorded `ts,hex` frames through the live pipeline.
     Replay {
         /// CSV of `ts,hex` lines.
@@ -380,6 +383,7 @@ fn main() -> ExitCode {
     let args = Args::parse();
     match args.command {
         Some(Cmd::Doctor) => return doctor::run(),
+        Some(Cmd::Stress(opts)) => return stress::run(opts),
         Some(Cmd::Replay {
             file,
             uart,
@@ -599,13 +603,14 @@ fn run_radio(device: usize, writer: Writer, stop: Arc<AtomicBool>) -> ExitCode {
         radio_stop.store(true, Ordering::Relaxed);
         shared.ready.notify_one();
     });
-    let code = run_writer(writer, &stop);
+    let code = run_writer(writer, &stop, None);
     stop.store(true, Ordering::Relaxed);
     let _ = radio.join();
     code
 }
 
-fn run_writer(mut writer: Writer, stop: &AtomicBool) -> ExitCode {
+fn run_writer(mut writer: Writer, stop: &AtomicBool, done: Option<&AtomicBool>) -> ExitCode {
+    let mut drain_from = None;
     loop {
         if stop.load(Ordering::Relaxed) {
             eprintln!("stopped");
@@ -613,6 +618,16 @@ fn run_writer(mut writer: Writer, stop: &AtomicBool) -> ExitCode {
         }
         if let Err(err) = writer.write_some() {
             return write_exit(err);
+        }
+        let finished = done.is_some_and(|flag| flag.load(Ordering::Relaxed));
+        if finished && !writer.has_pending() {
+            return ExitCode::SUCCESS;
+        }
+        if finished {
+            let started = drain_from.get_or_insert_with(Instant::now);
+            if started.elapsed() >= Duration::from_secs(2) {
+                return ExitCode::SUCCESS;
+            }
         }
         if writer.has_pending() {
             if let Some(fd) = writer.uart_fd() {

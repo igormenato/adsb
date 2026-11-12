@@ -1,5 +1,6 @@
 //! Turn Mode S frames into a [`Fix`] when an airborne position solves.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -67,9 +68,10 @@ impl Tracker {
     /// Decode one Mode S frame. A [`Fix`] is the airborne position that just solved.
     pub fn ingest(&mut self, timestamp: f64, frame: &[u8]) -> Option<Fix> {
         let mut message = Message::try_from(frame).ok()?;
-        let (icao, fix) = match &mut message.df {
+        let (icao, fix, known) = match &mut message.df {
             DF::ExtendedSquitterADSB(adsb) => {
                 let icao24 = adsb.icao24;
+                let known = self.known(icao24);
                 let no_update = None;
                 decode_position(
                     &mut adsb.message,
@@ -79,12 +81,13 @@ impl Tracker {
                     &mut self.reference,
                     &no_update,
                 );
-                (icao24, self.apply_adsb(icao24, &adsb.message))
+                (icao24, self.apply_adsb(icao24, &adsb.message), known)
             }
             DF::SurveillanceIdentityReply { id, ap, .. } => {
                 let icao = ICAO::from(*ap);
+                let known = self.known(icao);
                 self.apply_squawk(icao, id.0);
-                (icao, None)
+                (icao, None, known)
             }
             DF::ShortAirAirSurveillance { .. }
             | DF::SurveillanceAltitudeReply { .. }
@@ -97,15 +100,19 @@ impl Tracker {
             | DF::CommDExtended { .. } => return None,
         };
         self.fields.entry(icao).or_default().last_seen = timestamp;
-        self.trim(timestamp, icao);
+        self.trim(timestamp, icao, known);
         fix
+    }
+
+    fn known(&self, icao: ICAO) -> bool {
+        self.fields.contains_key(&icao) || self.cpr.contains_key(&icao)
     }
 
     fn ident_mut(&mut self, icao: ICAO) -> &mut Cached {
         &mut self.fields.entry(icao).or_default().ident
     }
 
-    fn trim(&mut self, now: f64, keep: ICAO) {
+    fn trim(&mut self, now: f64, keep: ICAO, known: bool) {
         if self.cpr.len() <= TRACKER_CAP && self.fields.len() <= TRACKER_CAP {
             return;
         }
@@ -113,12 +120,46 @@ impl Tracker {
             .retain(|icao, seen| *icao == keep || now - seen.last_seen <= CPR_LOCAL_MAX_AGE_S);
         self.cpr.retain(|icao, _| self.fields.contains_key(icao));
         while self.cpr.len() > TRACKER_CAP || self.fields.len() > TRACKER_CAP {
+            if let Some(icao) = self.oldest_solved(keep) {
+                self.evict(icao);
+                continue;
+            }
+            if !known && self.known(keep) {
+                self.evict(keep);
+                continue;
+            }
             let Some(icao) = self.oldest(keep) else {
                 break;
             };
-            self.cpr.remove(&icao);
-            self.fields.remove(&icao);
+            self.evict(icao);
         }
+    }
+
+    fn evict(&mut self, icao: ICAO) {
+        self.cpr.remove(&icao);
+        self.fields.remove(&icao);
+    }
+
+    fn recency(left_icao: &ICAO, left: &Seen, right_icao: &ICAO, right: &Seen) -> Ordering {
+        left.last_seen
+            .total_cmp(&right.last_seen)
+            .then(left_icao.cmp(right_icao))
+    }
+
+    fn oldest_solved(&self, keep: ICAO) -> Option<ICAO> {
+        self.fields
+            .iter()
+            .filter(|(icao, _)| **icao != keep)
+            .filter(|(icao, _)| {
+                self.cpr
+                    .get(*icao)
+                    .and_then(AircraftState::last_position)
+                    .is_some()
+            })
+            .min_by(|(left_icao, left), (right_icao, right)| {
+                Self::recency(left_icao, left, right_icao, right)
+            })
+            .map(|(icao, _)| *icao)
     }
 
     fn oldest(&self, keep: ICAO) -> Option<ICAO> {
@@ -126,9 +167,7 @@ impl Tracker {
             .iter()
             .filter(|(icao, _)| **icao != keep)
             .min_by(|(left_icao, left), (right_icao, right)| {
-                left.last_seen
-                    .total_cmp(&right.last_seen)
-                    .then(left_icao.cmp(right_icao))
+                Self::recency(left_icao, left, right_icao, right)
             })
             .map(|(icao, _)| *icao)
     }
@@ -424,5 +463,71 @@ mod tests {
         assert!(parse_hex_frame(b"@short;").is_none());
         assert!(parse_hex_frame(b"# comment").is_none());
         assert!(parse_hex_frame(b"").is_none());
+    }
+
+    fn modes_crc(data: &[u8]) -> u32 {
+        let mut crc = 0u32;
+        for &byte in data {
+            crc ^= u32::from(byte) << 16;
+            for _ in 0..8 {
+                crc <<= 1;
+                if crc & 0x0100_0000 != 0 {
+                    crc ^= 0x01FF_F409;
+                }
+            }
+        }
+        crc & 0x00FF_FFFF
+    }
+
+    fn with_icao(template: &[u8], icao: u32) -> Vec<u8> {
+        let mut frame = template.to_vec();
+        frame[1] = (icao >> 16) as u8;
+        frame[2] = (icao >> 8) as u8;
+        frame[3] = icao as u8;
+        let crc = modes_crc(&frame[..11]);
+        frame[11] = (crc >> 16) as u8;
+        frame[12] = (crc >> 8) as u8;
+        frame[13] = crc as u8;
+        frame
+    }
+
+    #[test]
+    fn one_over_cap_does_not_wipe_pending_cpr() {
+        let mut tracker = Tracker::new();
+        let even = frame(EVEN);
+        let odd = frame(ODD);
+        let n = TRACKER_CAP + 1;
+        for i in 0..n {
+            let icao = 0x10_0000 + i as u32;
+            assert!(
+                tracker.ingest(1.0, &with_icao(&even, icao)).is_none(),
+                "even {icao:06x}"
+            );
+        }
+        let mut fixes = 0usize;
+        for i in 0..n {
+            let icao = 0x10_0000 + i as u32;
+            if tracker.ingest(2.0, &with_icao(&odd, icao)).is_some() {
+                fixes += 1;
+            }
+        }
+        assert_eq!(fixes, TRACKER_CAP, "fixes={fixes}");
+    }
+
+    #[test]
+    fn sequential_pairs_past_cap_keep_solving() {
+        let mut tracker = Tracker::new();
+        let even = frame(EVEN);
+        let odd = frame(ODD);
+        let n = TRACKER_CAP + 16;
+        for i in 0..n {
+            let icao = 0x10_0000 + i as u32;
+            let t = f64::from(i as u32);
+            assert!(tracker.ingest(t, &with_icao(&even, icao)).is_none());
+            assert!(
+                tracker.ingest(t + 0.5, &with_icao(&odd, icao)).is_some(),
+                "missing pair {icao:06x}"
+            );
+        }
     }
 }
