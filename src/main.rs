@@ -1,5 +1,6 @@
 //! Decode 1090 MHz ADS-B and write one UART frame per airborne position.
 
+use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
@@ -14,8 +15,8 @@ use clap::{Parser, Subcommand};
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
 use trck::{
-    DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Lines, Queue, Table, Tracker, check_positions,
-    parse_hex_frame,
+    DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Lines, Queue, ReplayLine, Table, Tracker,
+    check_positions, parse_hex_frame, parse_replay_line,
 };
 
 mod doctor;
@@ -67,6 +68,53 @@ struct Args {
 enum Cmd {
     /// Probe this host for RTL-SDR, UART, and CSV setup.
     Doctor,
+    /// Replay recorded `ts,hex` frames through the live pipeline.
+    Replay {
+        /// CSV of `ts,hex` lines.
+        file: PathBuf,
+        /// UART device, or - for stdout.
+        #[arg(long, default_value = DEFAULT_UART)]
+        uart: String,
+        #[arg(long, default_value_t = DEFAULT_BAUD)]
+        baud: u32,
+        /// Local CSV of each position queued for UART.
+        #[arg(long, default_value = DEFAULT_PATH, value_name = "PATH")]
+        table: PathBuf,
+        /// Playback rate. `0` or `max` runs as fast as possible.
+        #[arg(long, default_value = "1", value_parser = parse_pace)]
+        speed: Pace,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Pace {
+    Max,
+    Rate(f64),
+}
+
+fn parse_pace(text: &str) -> Result<Pace, String> {
+    if text.eq_ignore_ascii_case("max") {
+        return Ok(Pace::Max);
+    }
+    let n: f64 = text
+        .parse()
+        .map_err(|_| format!("invalid --speed {text}"))?;
+    if n == 0.0 {
+        return Ok(Pace::Max);
+    }
+    if !n.is_finite() || n < 0.0 {
+        return Err(format!("invalid --speed {text}"));
+    }
+    Ok(Pace::Rate(n))
+}
+
+impl std::fmt::Display for Pace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Pace::Max => f.write_str("max"),
+            Pace::Rate(n) => write!(f, "{n}"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -107,18 +155,22 @@ impl Shared {
     }
 
     fn push(&self, fix: Fix) -> Option<Fix> {
+        self.push_at(fix, SystemTime::now())
+    }
+
+    fn push_at(&self, fix: Fix, now: SystemTime) -> Option<Fix> {
         let dropped = self.lock().push(fix);
         self.ready.notify_one();
-        self.append_row(&fix);
+        self.append_row_at(&fix, now);
         dropped
     }
 
-    fn append_row(&self, fix: &Fix) {
+    fn append_row_at(&self, fix: &Fix, now: SystemTime) {
         let mut table = self.table.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(table) = table.as_mut() else {
             return;
         };
-        if let Err(err) = table.append(fix) {
+        if let Err(err) = table.append_at(fix, now) {
             eprintln!("table: {err}");
         }
     }
@@ -128,6 +180,7 @@ struct Writer {
     sink: Sink,
     stop: Arc<AtomicBool>,
     shared: Arc<Shared>,
+    frames_written: usize,
 }
 
 impl Writer {
@@ -143,7 +196,11 @@ impl Writer {
     }
 
     fn enqueue(&mut self, fix: Fix) {
-        if let Some(dropped) = self.shared.push(fix) {
+        self.enqueue_at(fix, SystemTime::now());
+    }
+
+    fn enqueue_at(&mut self, fix: Fix, now: SystemTime) {
+        if let Some(dropped) = self.shared.push_at(fix, now) {
             log_drop(&dropped);
         }
     }
@@ -175,7 +232,9 @@ impl Writer {
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => return Err(ChunkError::Failed(err)),
             };
-            self.shared.lock().advance(wrote);
+            if self.shared.lock().advance(wrote) {
+                self.frames_written += 1;
+            }
         }
     }
 
@@ -279,6 +338,7 @@ fn open_uart(
         sink: Sink::Uart(port),
         stop,
         shared,
+        frames_written: 0,
     })
 }
 
@@ -294,6 +354,7 @@ fn open_output(
             sink: Sink::Stdout,
             stop,
             shared,
+            frames_written: 0,
         });
     }
     open_uart(path, baud, stop, shared)
@@ -319,6 +380,13 @@ fn main() -> ExitCode {
     let args = Args::parse();
     match args.command {
         Some(Cmd::Doctor) => return doctor::run(),
+        Some(Cmd::Replay {
+            file,
+            uart,
+            baud,
+            table,
+            speed,
+        }) => return run_replay(file, &uart, baud, &table, speed),
         None => {}
     }
     let stop = Arc::new(AtomicBool::new(false));
@@ -366,6 +434,132 @@ fn main() -> ExitCode {
         args.table.display()
     );
     run_radio(args.rtlsdr, writer, stop)
+}
+
+fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pace) -> ExitCode {
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        if ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed)).is_err() {
+            eprintln!("could not install the interrupt handler");
+        }
+    }
+    let text = match fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("cannot open {}: {err}", file.display());
+            return ExitCode::from(1);
+        }
+    };
+    let table = open_table(table_path);
+    let mut writer = match open_output(uart, baud, Arc::clone(&stop), table) {
+        Ok(writer) => writer,
+        Err(code) => return code,
+    };
+    eprintln!(
+        "replay file={} uart={uart} baud={baud} speed={speed} table={}",
+        file.display(),
+        table_path.display()
+    );
+
+    let mut tracker = Tracker::new();
+    let mut prev = None;
+    let mut read = 0usize;
+    let mut decoded = 0usize;
+    let mut malformed = 0usize;
+    let mut fixes = 0usize;
+    for line in text.lines() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match parse_replay_line(line) {
+            ReplayLine::Skip => {}
+            ReplayLine::Malformed => malformed += 1,
+            ReplayLine::Frame { timestamp, frame } => {
+                read += 1;
+                if let Some(prev_ts) = prev {
+                    pace_sleep(speed, timestamp - prev_ts, &stop);
+                }
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                prev = Some(timestamp);
+                decoded += 1;
+                if let Some(fix) = tracker.ingest(timestamp, &frame) {
+                    fixes += 1;
+                    log_fix(&fix);
+                    writer.enqueue_at(fix, unix_time(timestamp));
+                }
+                if let Err(err) = writer.write_some() {
+                    print_replay_summary(read, decoded, malformed, fixes, writer.frames_written);
+                    return write_exit(err);
+                }
+            }
+        }
+    }
+    let drain = drain_writer(&mut writer, &stop);
+    print_replay_summary(read, decoded, malformed, fixes, writer.frames_written);
+    match drain {
+        Ok(()) => {
+            if stop.load(Ordering::Relaxed) {
+                eprintln!("stopped");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => write_exit(err),
+    }
+}
+
+fn print_replay_summary(read: usize, decoded: usize, malformed: usize, fixes: usize, uart: usize) {
+    eprintln!(
+        "frames read={read} decoded={decoded} malformed={malformed} fixes={fixes} UART frames written={uart}"
+    );
+}
+
+fn drain_writer(writer: &mut Writer, stop: &AtomicBool) -> Result<(), ChunkError> {
+    loop {
+        writer.write_some()?;
+        if !writer.has_pending() {
+            return Ok(());
+        }
+        if stop.load(Ordering::Relaxed) {
+            return Err(ChunkError::Stopped);
+        }
+        let Some(fd) = writer.uart_fd() else {
+            continue;
+        };
+        let mut poll_fd = sys::pollfd(fd, libc::POLLOUT);
+        if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE) {
+            return Err(ChunkError::Failed(err));
+        }
+    }
+}
+
+fn pace_sleep(pace: Pace, dt: f64, stop: &AtomicBool) {
+    match pace {
+        Pace::Max => {}
+        Pace::Rate(n) => {
+            if !dt.is_finite() || dt <= 0.0 {
+                return;
+            }
+            let secs = dt / n;
+            if !secs.is_finite() || secs <= 0.0 {
+                return;
+            }
+            sleep_until_stop(stop, Duration::from_secs_f64(secs));
+        }
+    }
+}
+
+fn unix_time(ts: f64) -> SystemTime {
+    if !ts.is_finite() || ts <= 0.0 {
+        return UNIX_EPOCH;
+    }
+    let secs = ts.trunc();
+    let nanos = ((ts - secs) * 1_000_000_000.0)
+        .round()
+        .clamp(0.0, 999_999_999.0) as u32;
+    UNIX_EPOCH + Duration::new(secs as u64, nanos)
 }
 
 fn run_radio(device: usize, writer: Writer, stop: Arc<AtomicBool>) -> ExitCode {

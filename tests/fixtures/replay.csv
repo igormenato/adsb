@@ -1,0 +1,13 @@
+# 40058B ident, velocity, emergency, even CPR, odd CPR
+# Frames match the existing trck decoder tests.
+1.00,8d40058b205054d4c72ce03f949e
+1.02,8d40058b9904027fc00000b14147
+1.04,8d40058be1200000000000a05f30
+1.06,8D40058B58C901375147EFD09357
+1.08,8D40058B58C904A87F402D3B8C59
+
+# skipped blank above; malformed below
+not a row
+1.10,zz
+1.12,8D40058B
+inf,8D40058B58C901375147EFD09357

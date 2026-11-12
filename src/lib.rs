@@ -4,6 +4,7 @@ mod decode;
 mod frame;
 mod lines;
 mod queue;
+mod replay;
 mod table;
 
 #[doc(inline)]
@@ -18,5 +19,7 @@ pub use frame::{
 pub use lines::Lines;
 #[doc(inline)]
 pub use queue::Queue;
+#[doc(inline)]
+pub use replay::{ReplayLine, parse_replay_line};
 #[doc(inline)]
 pub use table::{DEFAULT_PATH, Table};

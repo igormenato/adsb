@@ -1,0 +1,2 @@
+icao,callsign,lat,lon,altitude_ft,ground_speed_kt,track_deg,timestamp
+40058b,TEST123,49.8175514,6.0844215,39000,1021,0,1
