@@ -3,6 +3,7 @@
 mod decode;
 mod frame;
 mod lines;
+pub mod modes;
 mod queue;
 mod replay;
 mod table;

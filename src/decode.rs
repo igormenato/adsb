@@ -345,15 +345,13 @@ pub fn parse_hex_frame(bytes: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    use crate::modes::{EVEN, ODD, STATUS, hex14, with_icao};
     use crate::pack_frame;
 
-    const EVEN: &str = "8D40058B58C901375147EFD09357";
-    const ODD: &str = "8D40058B58C904A87F402D3B8C59";
     const IDENT: &str = "8d406b902015a678d4d220aa4bda";
     const IDENT_40058B: &str = "8d40058b205054d4c72ce03f949e";
     const VELOCITY: &str = "8D485020994409940838175B284F";
     const VELOCITY_40058B: &str = "8d40058b9904027fc00000b14147";
-    const STATUS: &str = "8d40058be1200000000000a05f30";
 
     fn frame(hex: &str) -> Vec<u8> {
         parse_hex_frame(hex.as_bytes()).expect("hex")
@@ -362,8 +360,8 @@ mod tests {
     #[test]
     fn even_then_odd_emits_a_position() {
         let mut tracker = Tracker::new();
-        assert!(tracker.ingest(1.0, &frame(EVEN)).is_none());
-        let fix = tracker.ingest(2.0, &frame(ODD)).expect("position");
+        assert!(tracker.ingest(1.0, &EVEN).is_none());
+        let fix = tracker.ingest(2.0, &ODD).expect("position");
         assert_eq!(fix.aircraft.icao.to_u24(), 0x0040_058B);
         assert!((fix.aircraft.latitude_e7 as f64 / 1e7 - 49.81755).abs() < 0.001);
         assert!((fix.aircraft.longitude_e7 as f64 / 1e7 - 6.08442).abs() < 0.001);
@@ -383,8 +381,8 @@ mod tests {
     fn callsign_attaches_to_the_same_icao() {
         let mut tracker = Tracker::new();
         assert!(tracker.ingest(1.0, &frame(IDENT_40058B)).is_none());
-        assert!(tracker.ingest(2.0, &frame(EVEN)).is_none());
-        let fix = tracker.ingest(3.0, &frame(ODD)).expect("position");
+        assert!(tracker.ingest(2.0, &EVEN).is_none());
+        let fix = tracker.ingest(3.0, &ODD).expect("position");
         assert_eq!(fix.aircraft.callsign.as_bytes(), *b"TEST123 ");
     }
 
@@ -392,17 +390,17 @@ mod tests {
     fn ident_does_not_attach_to_another_icao() {
         let mut tracker = Tracker::new();
         assert!(tracker.ingest(1.0, &frame(IDENT)).is_none());
-        assert!(tracker.ingest(2.0, &frame(EVEN)).is_none());
-        let fix = tracker.ingest(3.0, &frame(ODD)).expect("position");
+        assert!(tracker.ingest(2.0, &EVEN).is_none());
+        let fix = tracker.ingest(3.0, &ODD).expect("position");
         assert_eq!(fix.aircraft.callsign.as_bytes(), *b"        ");
     }
 
     #[test]
     fn emergency_is_on_the_wire() {
         let mut tracker = Tracker::new();
-        assert!(tracker.ingest(1.0, &frame(STATUS)).is_none());
-        assert!(tracker.ingest(2.0, &frame(EVEN)).is_none());
-        let fix = tracker.ingest(3.0, &frame(ODD)).expect("position");
+        assert!(tracker.ingest(1.0, &STATUS).is_none());
+        assert!(tracker.ingest(2.0, &EVEN).is_none());
+        let fix = tracker.ingest(3.0, &ODD).expect("position");
         assert_eq!(fix.aircraft.emergency, Some(EmergencyKind::General));
         assert_eq!(pack_frame(&fix)[31], 1);
     }
@@ -411,8 +409,8 @@ mod tests {
     fn track_360_wraps_to_0() {
         let mut tracker = Tracker::new();
         assert!(tracker.ingest(1.0, &frame(VELOCITY_40058B)).is_none());
-        assert!(tracker.ingest(2.0, &frame(EVEN)).is_none());
-        let fix = tracker.ingest(3.0, &frame(ODD)).expect("position");
+        assert!(tracker.ingest(2.0, &EVEN).is_none());
+        let fix = tracker.ingest(3.0, &ODD).expect("position");
         assert_eq!(fix.aircraft.track_deg, Some(0));
         assert_eq!(&pack_frame(&fix)[29..31], &[0, 0]);
     }
@@ -446,18 +444,19 @@ mod tests {
     #[test]
     fn hex_lines() {
         assert_eq!(parse_hex_frame(b"8D40058B"), None);
-        assert_eq!(parse_hex_frame(EVEN.as_bytes()).unwrap().len(), 14);
+        let even = hex14(&EVEN);
+        assert_eq!(parse_hex_frame(even.as_bytes()).unwrap().len(), 14);
         assert_eq!(
-            parse_hex_frame(format!("  {EVEN}  ").as_bytes()),
-            parse_hex_frame(EVEN.as_bytes())
+            parse_hex_frame(format!("  {even}  ").as_bytes()),
+            parse_hex_frame(even.as_bytes())
         );
         assert_eq!(
-            parse_hex_frame(format!("*{EVEN};").as_bytes()),
-            parse_hex_frame(EVEN.as_bytes())
+            parse_hex_frame(format!("*{even};").as_bytes()),
+            parse_hex_frame(even.as_bytes())
         );
         assert_eq!(
-            parse_hex_frame(format!("@000000000000{EVEN};").as_bytes()),
-            parse_hex_frame(EVEN.as_bytes())
+            parse_hex_frame(format!("@000000000000{even};").as_bytes()),
+            parse_hex_frame(even.as_bytes())
         );
         assert!(parse_hex_frame(b"*zzzz;").is_none());
         assert!(parse_hex_frame(b"@short;").is_none());
@@ -465,49 +464,21 @@ mod tests {
         assert!(parse_hex_frame(b"").is_none());
     }
 
-    fn modes_crc(data: &[u8]) -> u32 {
-        let mut crc = 0u32;
-        for &byte in data {
-            crc ^= u32::from(byte) << 16;
-            for _ in 0..8 {
-                crc <<= 1;
-                if crc & 0x0100_0000 != 0 {
-                    crc ^= 0x01FF_F409;
-                }
-            }
-        }
-        crc & 0x00FF_FFFF
-    }
-
-    fn with_icao(template: &[u8], icao: u32) -> Vec<u8> {
-        let mut frame = template.to_vec();
-        frame[1] = (icao >> 16) as u8;
-        frame[2] = (icao >> 8) as u8;
-        frame[3] = icao as u8;
-        let crc = modes_crc(&frame[..11]);
-        frame[11] = (crc >> 16) as u8;
-        frame[12] = (crc >> 8) as u8;
-        frame[13] = crc as u8;
-        frame
-    }
-
     #[test]
     fn one_over_cap_does_not_wipe_pending_cpr() {
         let mut tracker = Tracker::new();
-        let even = frame(EVEN);
-        let odd = frame(ODD);
         let n = TRACKER_CAP + 1;
         for i in 0..n {
             let icao = 0x10_0000 + i as u32;
             assert!(
-                tracker.ingest(1.0, &with_icao(&even, icao)).is_none(),
+                tracker.ingest(1.0, &with_icao(&EVEN, icao)).is_none(),
                 "even {icao:06x}"
             );
         }
         let mut fixes = 0usize;
         for i in 0..n {
             let icao = 0x10_0000 + i as u32;
-            if tracker.ingest(2.0, &with_icao(&odd, icao)).is_some() {
+            if tracker.ingest(2.0, &with_icao(&ODD, icao)).is_some() {
                 fixes += 1;
             }
         }
@@ -517,15 +488,13 @@ mod tests {
     #[test]
     fn sequential_pairs_past_cap_keep_solving() {
         let mut tracker = Tracker::new();
-        let even = frame(EVEN);
-        let odd = frame(ODD);
         let n = TRACKER_CAP + 16;
         for i in 0..n {
             let icao = 0x10_0000 + i as u32;
             let t = f64::from(i as u32);
-            assert!(tracker.ingest(t, &with_icao(&even, icao)).is_none());
+            assert!(tracker.ingest(t, &with_icao(&EVEN, icao)).is_none());
             assert!(
-                tracker.ingest(t + 0.5, &with_icao(&odd, icao)).is_some(),
+                tracker.ingest(t + 0.5, &with_icao(&ODD, icao)).is_some(),
                 "missing pair {icao:06x}"
             );
         }

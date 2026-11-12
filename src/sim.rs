@@ -9,10 +9,10 @@ use clap::Parser;
 use serde::Deserialize;
 use serde_json::Value;
 
+use trck::modes::{airborne_position, hex14, identification, status, velocity};
 use trck::parse_hex_frame;
 
 use super::iq::{Synth, encode_cu8};
-use super::modes::{airborne_position, hex14, identification, status, velocity};
 use super::radio;
 
 const GEOM_ALT: u32 = 8;

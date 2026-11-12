@@ -7,14 +7,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use clap::Parser;
-use trck::{Icao, Tracker};
-
-use super::modes::{EVEN, IDENT, ODD, STATUS, VELOCITY, with_icao};
 use super::{
     DEFAULT_BAUD, DEFAULT_PATH, DEFAULT_UART, now_unix, open_output, open_table, run_writer,
     sleep_until_stop,
 };
+use clap::Parser;
+use trck::modes::{EVEN, IDENT, ODD, STATUS, VELOCITY, with_icao};
+use trck::{Icao, Tracker};
 
 const ICAO_BASE: u32 = 0x10_0000;
 const MIX_PARTS: u32 = 10_000;
