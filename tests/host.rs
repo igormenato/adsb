@@ -2,21 +2,26 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serialport::{SerialPort, TTYPort};
-
+use nix::errno::Errno;
+use nix::fcntl::{FcntlArg, FlockArg, OFlag, fcntl};
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::unistd::{self, read};
 use rs1090::decode::cpr::{Position, distance_nm};
+use serialport::{SerialPort, TTYPort};
 use trck::modes::{EVEN, ODD, STATUS, hex14};
 use trck::{
     Aircraft, DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Tracker, check_positions,
     crc16_ccitt_false, pack_frame, parse_hex_frame, unpack_frame,
 };
+
+nix::ioctl_none!(tiocnxcl, b'T', 0x0D);
 const ORDINARY_A: &str = "8d4d224f58bf07c2d41a9a353d70";
 const ORDINARY_B: &str = "8d4d224f58bf003b221b34aa5b8d";
 const ICAO_40058B: u32 = 0x40058B;
@@ -511,15 +516,11 @@ impl Pty {
     fn open() -> Self {
         let (master, slave) = TTYPort::pair().expect("pty");
         let slave_fd = slave.as_raw_fd();
-        // SAFETY: `slave_fd` is the open pty slave this `Pty` owns.
-        unsafe {
-            let _ = libc::ioctl(slave_fd, libc::TIOCNXCL);
-            let _ = libc::flock(slave_fd, libc::LOCK_UN);
-            let flags = libc::fcntl(slave_fd, libc::F_GETFL);
-            assert!(flags >= 0, "{}", io::Error::last_os_error());
-            let rc = libc::fcntl(slave_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            assert_eq!(rc, 0, "{}", io::Error::last_os_error());
-        }
+        // SAFETY: `slave_fd` is the open pty slave this `Pty` owns. TIOCNXCL takes no pointer.
+        let _ = unsafe { tiocnxcl(slave_fd) };
+        #[allow(deprecated)]
+        let _ = nix::fcntl::flock(slave_fd, FlockArg::Unlock);
+        set_nonblocking(&slave);
         Self { master, slave }
     }
 
@@ -536,50 +537,66 @@ fn frame_is_general(frame: &[u8]) -> bool {
     unpack_frame(frame).is_some_and(|fix| fix.aircraft.emergency == Some(EmergencyKind::General))
 }
 
-fn write_until_would_block(fd: i32) {
+fn as_fd(fd: &impl AsRawFd) -> BorrowedFd<'_> {
+    // SAFETY: `fd` keeps the descriptor open for this borrow.
+    unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) }
+}
+
+fn from_raw_fd(fd: RawFd) -> BorrowedFd<'static> {
+    // SAFETY: the caller keeps the pty open for the duration of the borrow.
+    unsafe { BorrowedFd::borrow_raw(fd) }
+}
+
+fn set_nonblocking(fd: &impl AsRawFd) {
+    let fd = as_fd(fd);
+    let flags = OFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFL).expect("F_GETFL"));
+    fcntl(fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).expect("F_SETFL");
+}
+
+fn write_until_would_block(fd: RawFd) {
+    let fd = from_raw_fd(fd);
     let buf = [0xA5u8; 1024];
     let mut chunk = buf.len();
     loop {
-        // SAFETY: `fd` is the open pty slave. `buf` is a live slice `write` does not keep.
-        let rc = unsafe { libc::write(fd, buf.as_ptr().cast(), chunk) };
-        if rc < 0 {
-            let err = io::Error::last_os_error();
-            assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
-            if chunk == 1 {
-                return;
+        match unistd::write(fd, &buf[..chunk]) {
+            Ok(0) => return,
+            Ok(_) => chunk = buf.len(),
+            Err(err) => {
+                let err = io::Error::from(err);
+                assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
+                if chunk == 1 {
+                    return;
+                }
+                chunk = 1;
             }
-            chunk = 1;
-            continue;
         }
-        if rc == 0 {
-            return;
-        }
-        chunk = buf.len();
     }
 }
 
-fn fill_until_blocked(fd: i32) -> usize {
+fn fill_until_blocked(fd: RawFd) -> usize {
+    let fd = from_raw_fd(fd);
     let buf = [0xA5u8; 1024];
     let mut wrote = 0usize;
     let mut chunk = buf.len();
     loop {
-        // SAFETY: `fd` is the open pty slave. `buf` is a live slice `write` does not keep.
-        let rc = unsafe { libc::write(fd, buf.as_ptr().cast(), chunk) };
-        if rc < 0 {
-            let err = io::Error::last_os_error();
-            assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
-            if chunk == 1 {
-                break;
+        match unistd::write(fd, &buf[..chunk]) {
+            Ok(n) => {
+                assert!(n > 0);
+                wrote += n;
+                assert!(
+                    wrote < 1024 * 1024,
+                    "pty accepted a megabyte without blocking"
+                );
             }
-            chunk = 1;
-            continue;
+            Err(err) => {
+                let err = io::Error::from(err);
+                assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
+                if chunk == 1 {
+                    break;
+                }
+                chunk = 1;
+            }
         }
-        assert!(rc > 0);
-        wrote += rc as usize;
-        assert!(
-            wrote < 1024 * 1024,
-            "pty accepted a megabyte without blocking"
-        );
     }
     assert!(wrote > 0, "pty buffer was already full");
     wrote
@@ -598,49 +615,40 @@ fn wait_frames_until(
     timeout: Duration,
     ready: impl Fn(&[[u8; FRAME_LEN]]) -> bool,
 ) -> Vec<[u8; FRAME_LEN]> {
-    let fd = master.as_raw_fd();
-    // SAFETY: `fd` is the open pty master this test owns.
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        assert!(flags >= 0, "{}", io::Error::last_os_error());
-        let rc = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        assert_eq!(rc, 0, "{}", io::Error::last_os_error());
-    }
+    set_nonblocking(master);
     let mut raw = Vec::new();
     let started = Instant::now();
     loop {
         let mut tmp = [0u8; 4096];
-        // SAFETY: `fd` is the open pty master. `tmp` is a live buffer `read` does not keep.
-        let rc = unsafe { libc::read(fd, tmp.as_mut_ptr().cast(), tmp.len()) };
-        if rc > 0 {
-            raw.extend_from_slice(&tmp[..rc as usize]);
-            let frames = complete_frames(&raw);
-            if ready(&frames) {
-                return frames;
+        match read(as_fd(master), &mut tmp) {
+            Ok(0) => {}
+            Ok(n) => {
+                raw.extend_from_slice(&tmp[..n]);
+                let frames = complete_frames(&raw);
+                if ready(&frames) {
+                    return frames;
+                }
+                continue;
             }
-            continue;
-        }
-        if rc < 0 {
-            let err = io::Error::last_os_error();
-            assert!(
-                err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::Interrupted,
-                "{err}"
-            );
+            Err(err) => {
+                let err = io::Error::from(err);
+                assert!(
+                    err.kind() == io::ErrorKind::WouldBlock
+                        || err.kind() == io::ErrorKind::Interrupted,
+                    "{err}"
+                );
+            }
         }
         if started.elapsed() > timeout {
             panic!("got {} bytes", raw.len());
         }
         let left = timeout.saturating_sub(started.elapsed());
-        let mut poll_fd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: `poll_fd` is one live `pollfd` for the pty master this test owns.
-        let prc = unsafe { libc::poll(&mut poll_fd, 1, left.as_millis() as libc::c_int) };
-        if prc < 0 {
-            let err = io::Error::last_os_error();
-            assert_eq!(err.kind(), io::ErrorKind::Interrupted, "{err}");
+        let mut poll_fd = [PollFd::new(as_fd(master), PollFlags::POLLIN)];
+        if let Err(err) = poll(
+            &mut poll_fd,
+            PollTimeout::try_from(left).unwrap_or(PollTimeout::MAX),
+        ) {
+            assert_eq!(err, Errno::EINTR, "{err}");
         }
     }
 }
