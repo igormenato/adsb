@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
@@ -929,17 +930,45 @@ fn replay_max_matches_golden() {
     let expect_csv = fs::read_to_string(fixture("replay.table.csv")).expect("golden csv");
     assert_eq!(got_csv, expect_csv);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("frames read=5"), "{stderr}");
-    assert!(stderr.contains("decoded=5"), "{stderr}");
+    assert!(stderr.contains("frames read=62"), "{stderr}");
+    assert!(stderr.contains("decoded=61"), "{stderr}");
     assert!(stderr.contains("malformed=4"), "{stderr}");
-    assert!(stderr.contains("fixes=1"), "{stderr}");
-    assert!(stderr.contains("UART frames written=1"), "{stderr}");
+    assert!(stderr.contains("fixes=14"), "{stderr}");
+    assert!(stderr.contains("UART frames written=14"), "{stderr}");
+    let mut by_icao: HashMap<u32, Vec<Aircraft>> = HashMap::new();
+    for frame in out.stdout.as_chunks::<FRAME_LEN>().0 {
+        let aircraft = frame_aircraft(frame);
+        by_icao
+            .entry(aircraft.icao.to_u24())
+            .or_default()
+            .push(aircraft);
+    }
+    assert_eq!(by_icao.len(), 3, "{:?}", by_icao.keys());
+    for aircrafts in by_icao.values() {
+        assert!(aircrafts.len() >= 2, "{aircrafts:?}");
+    }
+    let easy = &by_icao[&0x406B90];
+    assert_eq!(easy[0].callsign.as_bytes(), *b"EZY85MH ");
+    assert!(
+        easy.windows(2)
+            .any(|w| w[0].latitude_e7 != w[1].latitude_e7
+                || w[0].longitude_e7 != w[1].longitude_e7),
+        "{easy:?}"
+    );
+    assert!(
+        by_icao[&0x40058B]
+            .iter()
+            .any(|a| a.emergency == Some(EmergencyKind::General)
+                && a.callsign.as_bytes() == *b"TEST123 "),
+        "{:?}",
+        by_icao[&0x40058B]
+    );
     let _ = fs::remove_file(&table);
 }
 
 #[test]
 fn replay_speed_does_not_change_bytes() {
-    let file = fixture("replay.csv");
+    let file = fixture("replay-speed.csv");
     let mut uart = Vec::new();
     let mut csv = String::new();
     for speed in ["1", "10", "max", "0"] {

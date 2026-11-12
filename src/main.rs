@@ -1,7 +1,7 @@
 //! Decode 1090 MHz ADS-B and write one UART frame per airborne position.
 
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBit
 
 use trck::{
     DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Lines, Queue, ReplayLine, Table, Tracker,
-    check_positions, parse_hex_frame, parse_replay_line,
+    check_positions, is_mode_s, parse_hex_frame, parse_replay_line,
 };
 
 mod doctor;
@@ -444,8 +444,8 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
             eprintln!("could not install the interrupt handler");
         }
     }
-    let text = match fs::read_to_string(&file) {
-        Ok(text) => text,
+    let input = match fs::File::open(&file) {
+        Ok(input) => input,
         Err(err) => {
             eprintln!("cannot open {}: {err}", file.display());
             return ExitCode::from(1);
@@ -468,15 +468,26 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
     let mut decoded = 0usize;
     let mut malformed = 0usize;
     let mut fixes = 0usize;
-    for line in text.lines() {
+    for line in BufReader::new(input).lines() {
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        match parse_replay_line(line) {
+        let line = match line {
+            Ok(line) => line,
+            Err(err) => {
+                eprintln!("{}: {err}", file.display());
+                print_replay_summary(read, decoded, malformed, fixes, writer.frames_written);
+                return ExitCode::from(1);
+            }
+        };
+        match parse_replay_line(&line) {
             ReplayLine::Skip => {}
             ReplayLine::Malformed => malformed += 1,
             ReplayLine::Frame { timestamp, frame } => {
                 read += 1;
+                if is_mode_s(&frame) {
+                    decoded += 1;
+                }
                 if let Some(prev_ts) = prev {
                     pace_sleep(speed, timestamp - prev_ts, &stop);
                 }
@@ -484,7 +495,6 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
                     break;
                 }
                 prev = Some(timestamp);
-                decoded += 1;
                 if let Some(fix) = tracker.ingest(timestamp, &frame) {
                     fixes += 1;
                     log_fix(&fix);

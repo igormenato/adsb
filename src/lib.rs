@@ -8,7 +8,7 @@ mod replay;
 mod table;
 
 #[doc(inline)]
-pub use decode::{Tracker, parse_hex_frame};
+pub use decode::{Tracker, is_mode_s, parse_hex_frame};
 #[doc(inline)]
 pub use frame::{
     ALT_UNKNOWN, Aircraft, CALLSIGN_LEN, Callsign, EmergencyKind, FRAME_LEN, Fix, Icao,

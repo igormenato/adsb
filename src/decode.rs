@@ -263,6 +263,11 @@ fn kind_from_squawk(code: u16) -> Option<EmergencyKind> {
     }
 }
 
+/// True when rs1090 parses `frame` as a Mode S message.
+pub fn is_mode_s(frame: &[u8]) -> bool {
+    Message::try_from(frame).is_ok()
+}
+
 /// One Mode S frame as hex. 7-byte and 14-byte frames are accepted.
 pub fn parse_hex_frame(bytes: &[u8]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(bytes).ok()?.trim();

@@ -72,4 +72,15 @@ mod tests {
             ReplayLine::Malformed
         );
     }
+
+    #[test]
+    fn all_ff_hex_is_not_mode_s() {
+        match parse_replay_line("1,FFFFFFFFFFFFFFFFFFFFFFFFFFFF") {
+            ReplayLine::Frame { frame, .. } => {
+                assert_eq!(frame.len(), 14);
+                assert!(!crate::is_mode_s(&frame));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 }
