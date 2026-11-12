@@ -21,7 +21,6 @@ use trck::{
 
 mod doctor;
 mod iq;
-mod modes;
 mod radio;
 mod sim;
 mod stress;

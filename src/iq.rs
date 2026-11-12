@@ -157,7 +157,7 @@ mod tests {
     use rs1090::source::demod::magnitude_u16;
 
     use super::*;
-    use crate::modes::EVEN;
+    use trck::modes::EVEN;
     fn cu8_to_complex(bytes: &[u8]) -> Vec<num_complex::Complex<f32>> {
         bytes
             .as_chunks::<2>()
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn overlapping_frames_are_shorter_than_sequential() {
-        let odd = crate::modes::ODD;
+        let odd = trck::modes::ODD;
         let sequential = encode_cu8(&[EVEN, odd], Synth::default()).expect("seq");
         let overlap = encode_cu8(
             &[EVEN, odd],

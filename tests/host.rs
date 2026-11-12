@@ -11,14 +11,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serialport::{SerialPort, TTYPort};
 
+use rs1090::decode::cpr::{Position, distance_nm};
+use trck::modes::{EVEN, ODD, STATUS, hex14};
 use trck::{
     Aircraft, DEFAULT_PATH, EmergencyKind, FRAME_LEN, Fix, Tracker, check_positions,
     crc16_ccitt_false, pack_frame, parse_hex_frame, unpack_frame,
 };
-
-const EVEN: &str = "8D40058B58C901375147EFD09357";
-const ODD: &str = "8D40058B58C904A87F402D3B8C59";
-const STATUS: &str = "8d40058be1200000000000a05f30";
 const ORDINARY_A: &str = "8d4d224f58bf07c2d41a9a353d70";
 const ORDINARY_B: &str = "8d4d224f58bf003b221b34aa5b8d";
 const ICAO_40058B: u32 = 0x40058B;
@@ -51,10 +49,8 @@ const PUBLISHED_GENERAL: [u8; FRAME_LEN] = [
 
 fn decoded_aircraft() -> Aircraft {
     let mut tracker = Tracker::new();
-    let even = parse_hex_frame(EVEN.as_bytes()).expect("even");
-    let odd = parse_hex_frame(ODD.as_bytes()).expect("odd");
-    assert!(tracker.ingest(1.0, &even).is_none());
-    tracker.ingest(2.0, &odd).expect("position").aircraft
+    assert!(tracker.ingest(1.0, &EVEN).is_none());
+    tracker.ingest(2.0, &ODD).expect("position").aircraft
 }
 
 fn ordinary_aircraft() -> Aircraft {
@@ -241,8 +237,8 @@ fn serve(
 }
 
 fn write_pair(sock: &mut std::net::TcpStream) {
-    writeln!(sock, "{EVEN}").expect("even");
-    writeln!(sock, "{ODD}").expect("odd");
+    writeln!(sock, "{}", hex14(&EVEN)).expect("even");
+    writeln!(sock, "{}", hex14(&ODD)).expect("odd");
 }
 
 #[test]
@@ -282,8 +278,8 @@ fn one_frame_per_solved_position() {
     let (listener, port) = listen();
     serve(listener, |sock| {
         writeln!(sock, "not hex").expect("junk");
-        writeln!(sock, "{EVEN}").expect("even");
-        writeln!(sock, "{ODD}").expect("odd");
+        writeln!(sock, "{}", hex14(&EVEN)).expect("even");
+        writeln!(sock, "{}", hex14(&ODD)).expect("odd");
         Session::KeepOpen
     });
     let mut sender = spawn_hex(port);
@@ -328,7 +324,8 @@ fn a_split_hex_line_is_one_frame() {
     let (listener, port) = listen();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-    let even = EVEN.as_bytes();
+    let even = hex14(&EVEN);
+    let even = even.as_bytes();
     let (head, tail) = even.split_at(even.len() / 2);
     let head = head.to_vec();
     let mut tail = tail.to_vec();
@@ -338,7 +335,7 @@ fn a_split_hex_line_is_one_frame() {
         ready_tx.send(()).expect("ready");
         go_rx.recv().expect("go");
         sock.write_all(&tail).expect("tail");
-        writeln!(sock, "{ODD}").expect("odd");
+        writeln!(sock, "{}", hex14(&ODD)).expect("odd");
         Session::KeepOpen
     });
     let mut sender = spawn_hex(port);
@@ -675,12 +672,9 @@ fn spawn_hex_stdin(uart: &str) -> StopSender {
 
 fn decoded_7700_aircraft() -> Aircraft {
     let mut tracker = Tracker::new();
-    let status = parse_hex_frame(STATUS.as_bytes()).expect("status");
-    let even = parse_hex_frame(EVEN.as_bytes()).expect("even");
-    let odd = parse_hex_frame(ODD.as_bytes()).expect("odd");
-    assert!(tracker.ingest(1.0, &status).is_none());
-    assert!(tracker.ingest(2.0, &even).is_none());
-    tracker.ingest(3.0, &odd).expect("position").aircraft
+    assert!(tracker.ingest(1.0, &STATUS).is_none());
+    assert!(tracker.ingest(2.0, &EVEN).is_none());
+    tracker.ingest(3.0, &ODD).expect("position").aircraft
 }
 
 #[test]
@@ -688,9 +682,9 @@ fn avr_hex_writes_a_pty_frame() {
     let mut pty = Pty::open();
     let mut sender = spawn_hex_stdin(&pty.path());
     let mut stdin = sender.0.stdin.take().expect("stdin");
-    writeln!(stdin, "*{STATUS};").expect("status");
-    writeln!(stdin, "*{EVEN};").expect("even");
-    writeln!(stdin, "@000000000000{ODD};").expect("odd");
+    writeln!(stdin, "*{};", hex14(&STATUS)).expect("status");
+    writeln!(stdin, "*{};", hex14(&EVEN)).expect("even");
+    writeln!(stdin, "@000000000000{};", hex14(&ODD)).expect("odd");
     stdin.flush().expect("flush");
     let frames = wait_frames(&mut pty.master, 1, Duration::from_secs(2));
     let expect = decoded_7700_aircraft();
@@ -746,11 +740,11 @@ fn a_full_tty_drops_ordinary_hex_and_keeps_7700() {
         body.push_str(ORDINARY_B);
         body.push('\n');
     }
-    body.push_str(STATUS);
+    body.push_str(&hex14(&STATUS));
     body.push('\n');
-    body.push_str(EVEN);
+    body.push_str(&hex14(&EVEN));
     body.push('\n');
-    body.push_str(ODD);
+    body.push_str(&hex14(&ODD));
     body.push('\n');
     sock.write_all(body.as_bytes()).expect("lines");
     let frames = wait_frames_until(&mut pty.master, Duration::from_secs(5), |frames| {
@@ -782,13 +776,15 @@ fn a_full_tty_of_emergencies_drops_ordinary() {
     let (mut sock, _) = listener.accept().expect("accept");
     fill_until_blocked(pty.slave.as_raw_fd());
     sock.set_nodelay(true).expect("nodelay");
+    let even = hex14(&EVEN);
+    let odd = hex14(&ODD);
     let mut body = String::new();
-    body.push_str(STATUS);
+    body.push_str(&hex14(&STATUS));
     body.push('\n');
     for _ in 0..=QUEUE {
-        body.push_str(EVEN);
+        body.push_str(&even);
         body.push('\n');
-        body.push_str(ODD);
+        body.push_str(&odd);
         body.push('\n');
     }
     body.push_str(ORDINARY_A);
@@ -1280,13 +1276,17 @@ fn run_sim(args: &[&str]) -> (std::process::ExitStatus, String, String) {
     )
 }
 
-fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    let r = 6_371_000.0;
-    let dlat = (lat2 - lat1).to_radians();
-    let dlon = (lon2 - lon1).to_radians();
-    let a = (dlat / 2.0).sin().powi(2)
-        + lat1.to_radians().cos() * lat2.to_radians().cos() * (dlon / 2.0).sin().powi(2);
-    2.0 * r * a.sqrt().asin()
+fn distance_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    distance_nm(
+        &Position {
+            latitude: lat1,
+            longitude: lon1,
+        },
+        &Position {
+            latitude: lat2,
+            longitude: lon2,
+        },
+    ) * 1852.0
 }
 
 fn parse_truth(text: &str) -> BTreeMap<(i64, u32), (f64, f64, i32)> {
@@ -1330,7 +1330,7 @@ fn ingest_against_truth(
             .unwrap_or_else(|| panic!("no truth for {icao:06x} t={t}"));
         let got_lat = f64::from(fix.aircraft.latitude_e7) / 10_000_000.0;
         let got_lon = f64::from(fix.aircraft.longitude_e7) / 10_000_000.0;
-        let err = haversine_m(lat, lon, got_lat, got_lon);
+        let err = distance_m(lat, lon, got_lat, got_lon);
         let slot = max_err.entry(icao).or_insert(0.0);
         if err > *slot {
             *slot = err;
@@ -1537,7 +1537,7 @@ fn assert_uart_matches_truth(uart: &[u8], truth_text: &str) {
         };
         let err = list
             .iter()
-            .map(|&(tlat, tlon, _)| haversine_m(tlat, tlon, lat, lon))
+            .map(|&(tlat, tlon, _)| distance_m(tlat, tlon, lat, lon))
             .fold(f64::INFINITY, f64::min);
         assert!(
             err < POS_TOL_M,
@@ -1891,7 +1891,7 @@ fn iq_awec2026_recording() {
             let lon = f64::from(fix.aircraft.longitude_e7) / 10_000_000.0;
             let csv_lat: f64 = row[lat_i].parse().expect("lat");
             let csv_lon: f64 = row[lon_i].parse().expect("lon");
-            let vs = haversine_m(csv_lat, csv_lon, lat, lon);
+            let vs = distance_m(csv_lat, csv_lon, lat, lon);
             csv_vs_row.push(vs);
             eprintln!("iq awec2026 CSV row at t={t:.3} vs rs1090(all 10) {vs:.1} m");
         }
@@ -1927,7 +1927,7 @@ fn iq_awec2026_recording() {
         let fix = unpack_frame(frame).expect("uart");
         let lat = f64::from(fix.aircraft.latitude_e7) / 10_000_000.0;
         let lon = f64::from(fix.aircraft.longitude_e7) / 10_000_000.0;
-        let err = haversine_m(rlat, rlon, lat, lon);
+        let err = distance_m(rlat, rlon, lat, lon);
         if err > max_err {
             max_err = err;
         }

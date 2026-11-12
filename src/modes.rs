@@ -1,6 +1,5 @@
-//! DF17 Mode S / ADS-B frames. Shared by `stress` and `sim`.
+//! DF17 Mode S / ADS-B frames.
 
-/// Known DF17 templates from the decode tests. ICAO and CRC are rewritten.
 pub const EVEN: [u8; 14] = [
     0x8D, 0x40, 0x05, 0x8B, 0x58, 0xC9, 0x01, 0x37, 0x51, 0x47, 0xEF, 0xD0, 0x93, 0x57,
 ];
@@ -82,21 +81,6 @@ const NL_BOUND: [f64; 58] = [
     87.000_000_00,
 ];
 
-/// Mode S CRC-24. Polynomial `0xFFF409`.
-pub fn modes_crc(data: &[u8]) -> u32 {
-    let mut crc = 0u32;
-    for &byte in data {
-        crc ^= u32::from(byte) << 16;
-        for _ in 0..8 {
-            crc <<= 1;
-            if crc & 0x0100_0000 != 0 {
-                crc ^= 0x01FF_F409;
-            }
-        }
-    }
-    crc & 0x00FF_FFFF
-}
-
 pub fn with_icao(template: &[u8; 14], icao: u32) -> [u8; 14] {
     df17(icao, template[4..11].try_into().expect("ME"))
 }
@@ -108,7 +92,7 @@ pub fn df17(icao: u32, me: [u8; 7]) -> [u8; 14] {
     frame[2] = (icao >> 8) as u8;
     frame[3] = icao as u8;
     frame[4..11].copy_from_slice(&me);
-    let crc = modes_crc(&frame[..11]);
+    let crc = rs1090::decode::crc::modes_checksum(&frame, 112).expect("DF17");
     frame[11] = (crc >> 16) as u8;
     frame[12] = (crc >> 8) as u8;
     frame[13] = crc as u8;
@@ -312,16 +296,28 @@ fn cpr_encode(lat: f64, lon: f64, odd: bool) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trck::{EmergencyKind, Tracker};
+    use crate::{EmergencyKind, Tracker};
+    use rs1090::decode::crc::modes_checksum;
+
+    fn remainder(frame: &[u8; 14]) -> u32 {
+        modes_checksum(frame, 112).expect("DF17")
+    }
+
+    fn parity(frame: &[u8; 14]) -> u32 {
+        let mut payload = *frame;
+        payload[11..].fill(0);
+        remainder(&payload)
+    }
 
     #[test]
     fn crc_matches_known_df17() {
-        assert_eq!(modes_crc(&EVEN[..11]), 0xD0_9357);
-        assert_eq!(modes_crc(&ODD[..11]), 0x3B_8C59);
-        assert_eq!(modes_crc(&IDENT[..11]), 0x3F_949E);
-        assert_eq!(modes_crc(&VELOCITY[..11]), 0xB1_4147);
-        assert_eq!(modes_crc(&STATUS[..11]), 0xA0_5F30);
-        assert_eq!(modes_crc(&EVEN), 0);
+        assert_eq!(parity(&EVEN), 0xD0_9357);
+        assert_eq!(parity(&ODD), 0x3B_8C59);
+        assert_eq!(parity(&IDENT), 0x3F_949E);
+        assert_eq!(parity(&VELOCITY), 0xB1_4147);
+        assert_eq!(parity(&STATUS), 0xA0_5F30);
+        assert_eq!(remainder(&EVEN), 0);
+        assert_eq!(remainder(&IDENT), 0);
     }
 
     #[test]
@@ -330,7 +326,7 @@ mod tests {
         assert_eq!(frame, EVEN);
         let patched = with_icao(&EVEN, 0x10_0000);
         assert_eq!(&patched[1..4], &[0x10, 0x00, 0x00]);
-        assert_eq!(modes_crc(&patched), 0);
+        assert_eq!(remainder(&patched), 0);
         assert_ne!(patched[11..], EVEN[11..]);
     }
 
@@ -348,7 +344,7 @@ mod tests {
         let mut tracker = Tracker::new();
         let even = airborne_position(icao, lat, lon, alt, false);
         let odd = airborne_position(icao, lat, lon, alt, true);
-        assert_eq!(modes_crc(&even), 0);
+        assert_eq!(remainder(&even), 0);
         assert!(tracker.ingest(1.0, &even).is_none());
         let fix = tracker.ingest(2.0, &odd).expect("position");
         assert_eq!(fix.aircraft.icao.to_u24(), icao);
