@@ -87,12 +87,17 @@ impl Queue {
         &partial.frame[partial.sent..]
     }
 
-    /// Record that `n` bytes from [`Self::rest`] were accepted by the UART.
-    pub fn advance(&mut self, n: usize) {
+    /// Record that `n` bytes from [`Self::unsent`] were accepted by the UART.
+    ///
+    /// Returns true when that finished the in-flight frame.
+    pub fn advance(&mut self, n: usize) -> bool {
         let partial = self.current.as_mut().expect("current frame");
         partial.sent += n;
         if partial.sent >= partial.frame.len() {
             self.current = None;
+            true
+        } else {
+            false
         }
     }
 }
