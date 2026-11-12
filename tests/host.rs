@@ -542,11 +542,6 @@ fn as_fd(fd: &impl AsRawFd) -> BorrowedFd<'_> {
     unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) }
 }
 
-fn from_raw_fd(fd: RawFd) -> BorrowedFd<'static> {
-    // SAFETY: the caller keeps the pty open for the duration of the borrow.
-    unsafe { BorrowedFd::borrow_raw(fd) }
-}
-
 fn set_nonblocking(fd: &impl AsRawFd) {
     let fd = as_fd(fd);
     let flags = OFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFL).expect("F_GETFL"));
@@ -554,7 +549,8 @@ fn set_nonblocking(fd: &impl AsRawFd) {
 }
 
 fn write_until_would_block(fd: RawFd) {
-    let fd = from_raw_fd(fd);
+    // SAFETY: the worker holds this fd until `pty` is dropped after join.
+    let fd = unsafe { BorrowedFd::borrow_raw(fd) };
     let buf = [0xA5u8; 1024];
     let mut chunk = buf.len();
     loop {
@@ -573,8 +569,8 @@ fn write_until_would_block(fd: RawFd) {
     }
 }
 
-fn fill_until_blocked(fd: RawFd) -> usize {
-    let fd = from_raw_fd(fd);
+fn fill_until_blocked(fd: &impl AsRawFd) -> usize {
+    let fd = as_fd(fd);
     let buf = [0xA5u8; 1024];
     let mut wrote = 0usize;
     let mut chunk = buf.len();
@@ -739,7 +735,7 @@ fn a_full_tty_drops_ordinary_hex_and_keeps_7700() {
     let mut pty = Pty::open();
     let mut sender = spawn_uart(port, &pty.path());
     let (mut sock, _) = listener.accept().expect("accept");
-    fill_until_blocked(pty.slave.as_raw_fd());
+    fill_until_blocked(&pty.slave);
     sock.set_nodelay(true).expect("nodelay");
     let mut body = String::new();
     for _ in 0..=QUEUE {
@@ -782,7 +778,7 @@ fn a_full_tty_of_emergencies_drops_ordinary() {
     let mut pty = Pty::open();
     let mut sender = spawn_uart(port, &pty.path());
     let (mut sock, _) = listener.accept().expect("accept");
-    fill_until_blocked(pty.slave.as_raw_fd());
+    fill_until_blocked(&pty.slave);
     sock.set_nodelay(true).expect("nodelay");
     let even = hex14(&EVEN);
     let odd = hex14(&ODD);
@@ -931,7 +927,7 @@ fn csv_is_written_while_the_tty_is_full() {
     let pty = Pty::open();
     let mut sender = spawn_uart_table(port, &pty.path(), &table);
     let (mut sock, _) = listener.accept().expect("accept");
-    fill_until_blocked(pty.slave.as_raw_fd());
+    fill_until_blocked(&pty.slave);
     let before = now_secs();
     write_pair(&mut sock);
     let rows = wait_csv_rows(&table, 1, Duration::from_secs(2));
