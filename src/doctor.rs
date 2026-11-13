@@ -84,7 +84,6 @@ impl UsbDev {
 
 struct ConsoleProbe {
     cmdline: String,
-    stdout_path: Option<String>,
     model: Option<String>,
     config: Option<(String, String)>,
 }
@@ -173,14 +172,6 @@ fn check_uart_console(probe: &ConsoleProbe) -> Check {
         return Check::fail(
             "uart-console",
             format!("{token} owns the UART; remove it from cmdline.txt (serial login No)"),
-        );
-    }
-    if let Some(path) = probe.stdout_path.as_deref()
-        && stdout_is_serial(path)
-    {
-        return Check::fail(
-            "uart-console",
-            format!("device-tree stdout-path {path} is serial; disable the serial console"),
         );
     }
     if let Some((config_path, text)) = probe.config.as_ref() {
@@ -309,11 +300,6 @@ fn serial_console_token(cmdline: &str) -> Option<&str> {
     })
 }
 
-fn stdout_is_serial(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains("serial") || lower.contains("uart")
-}
-
 fn is_zero_2w(model: &str) -> bool {
     model.to_ascii_lowercase().contains("pi zero 2 w")
 }
@@ -356,7 +342,6 @@ fn parse_config_txt(text: &str) -> FirmwareConfig {
 fn live_console() -> ConsoleProbe {
     ConsoleProbe {
         cmdline: fs::read_to_string("/proc/cmdline").unwrap_or_default(),
-        stdout_path: read_dt(Path::new("/proc/device-tree/chosen/stdout-path")),
         model: read_dt(Path::new("/proc/device-tree/model")),
         config: read_first_config(),
     }
@@ -558,26 +543,54 @@ mod tests {
         assert!(!parsed.disable_bt);
     }
 
-    #[test]
-    fn uart_console_fails_when_login_shell_owns_the_port() {
-        let check = check_uart_console(&ConsoleProbe {
-            cmdline: "console=serial0,115200 console=tty1".into(),
-            stdout_path: None,
+    const ZERO_2W_CONSOLE_OFF: &str = "coherent_pool=1M 8250.nr_uarts=1 snd_bcm2835.enable_headphones=0 cgroup_disable=memory snd_bcm2835.enable_hdmi=1 snd_bcm2835.enable_hdmi=0  smsc95xx.macaddr=B8:27:EB:5B:87:FD vc_mem.mem_base=0x1ec00000 vc_mem.mem_size=0x20000000  console=tty1 root=PARTUUID=08f7b8f1-02 rootfstype=ext4 fsck.repair=yes rootwait cfg80211.ieee80211_regdom=BR";
+
+    fn zero_2w_probe(cmdline: &str) -> ConsoleProbe {
+        ConsoleProbe {
+            cmdline: cmdline.into(),
             model: Some("Raspberry Pi Zero 2 W Rev 1.0".into()),
             config: Some((
                 "/boot/firmware/config.txt".into(),
                 "enable_uart=1\ndtoverlay=disable-bt\n".into(),
             )),
-        });
+        }
+    }
+
+    #[test]
+    fn uart_console_passes_zero_2w_with_console_off() {
+        let check = check_uart_console(&zero_2w_probe(ZERO_2W_CONSOLE_OFF));
+        assert_eq!(check.status, Status::Pass, "{}", check.detail);
+        assert!(
+            check.detail.contains("no serial console"),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn uart_console_fails_when_login_shell_owns_the_port() {
+        let check = check_uart_console(&zero_2w_probe("console=serial0,115200 console=tty1"));
         assert_eq!(check.status, Status::Fail);
-        assert!(check.detail.contains("serial0"), "{}", check.detail);
+        assert_eq!(
+            check.detail,
+            "console=serial0,115200 owns the UART; remove it from cmdline.txt (serial login No)"
+        );
+    }
+
+    #[test]
+    fn uart_console_fails_when_ttyama0_owns_the_port() {
+        let check = check_uart_console(&zero_2w_probe("console=ttyAMA0,115200"));
+        assert_eq!(check.status, Status::Fail);
+        assert_eq!(
+            check.detail,
+            "console=ttyAMA0,115200 owns the UART; remove it from cmdline.txt (serial login No)"
+        );
     }
 
     #[test]
     fn uart_console_fails_when_zero_2w_leaves_bluetooth_on_pl011() {
         let check = check_uart_console(&ConsoleProbe {
             cmdline: "console=tty1".into(),
-            stdout_path: None,
             model: Some("Raspberry Pi Zero 2 W Rev 1.0".into()),
             config: Some(("/boot/firmware/config.txt".into(), "enable_uart=1\n".into())),
         });
@@ -587,15 +600,7 @@ mod tests {
 
     #[test]
     fn uart_console_passes_a_configured_zero_2w() {
-        let check = check_uart_console(&ConsoleProbe {
-            cmdline: "console=tty1".into(),
-            stdout_path: None,
-            model: Some("Raspberry Pi Zero 2 W Rev 1.0".into()),
-            config: Some((
-                "/boot/firmware/config.txt".into(),
-                "enable_uart=1\ndtoverlay=disable-bt\n".into(),
-            )),
-        });
+        let check = check_uart_console(&zero_2w_probe("console=tty1"));
         assert_eq!(check.status, Status::Pass);
     }
 
@@ -603,7 +608,6 @@ mod tests {
     fn uart_console_skips_overlay_when_config_is_absent() {
         let check = check_uart_console(&ConsoleProbe {
             cmdline: "console=tty1".into(),
-            stdout_path: None,
             model: None,
             config: None,
         });
@@ -615,7 +619,6 @@ mod tests {
     fn uart_console_ignores_a_pc_hypervisor_serial() {
         let check = check_uart_console(&ConsoleProbe {
             cmdline: "console=ttyS0 8250.nr_uarts=0".into(),
-            stdout_path: None,
             model: None,
             config: None,
         });
