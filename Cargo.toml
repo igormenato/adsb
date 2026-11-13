@@ -1,6 +1,6 @@
 [package]
 name = "trck"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Send each decoded ADS-B position to a UART as it arrives."
 
