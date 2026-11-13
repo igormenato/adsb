@@ -34,10 +34,21 @@ enum Sink {
     Stdout,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingReply {
     bytes: [u8; ACK_LEN],
     sent: usize,
     power: Option<PowerOp>,
+}
+
+fn offer_reply(slot: &mut Option<PendingReply>, next: PendingReply) -> bool {
+    if let Some(cur) = slot.as_ref()
+        && (cur.sent > 0 || cur.power.is_some())
+    {
+        return false;
+    }
+    *slot = Some(next);
+    true
 }
 
 pub(crate) struct Shared {
@@ -106,14 +117,21 @@ impl Shared {
     }
 
     fn queue_reply(&self, bytes: [u8; ACK_LEN], power: Option<PowerOp>) {
-        *self
+        let mut slot = self
             .pending_reply
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(PendingReply {
-            bytes,
-            sent: 0,
-            power,
-        });
+            .unwrap_or_else(PoisonError::into_inner);
+        if !offer_reply(
+            &mut slot,
+            PendingReply {
+                bytes,
+                sent: 0,
+                power,
+            },
+        ) {
+            eprintln!("cmd dropped, reply in flight");
+        }
+        drop(slot);
         self.ready.notify_one();
     }
 
@@ -506,5 +524,52 @@ pub(crate) fn write_exit(err: ChunkError) -> ExitCode {
             eprintln!("uart write failed: {err}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ping() -> PendingReply {
+        PendingReply {
+            bytes: [0; ACK_LEN],
+            sent: 0,
+            power: None,
+        }
+    }
+
+    fn reboot() -> PendingReply {
+        PendingReply {
+            bytes: [1; ACK_LEN],
+            sent: 0,
+            power: Some(PowerOp::Reboot),
+        }
+    }
+
+    #[test]
+    fn in_flight_reply_is_not_replaced() {
+        let mut slot = Some(PendingReply { sent: 4, ..ping() });
+        assert!(!offer_reply(&mut slot, reboot()));
+        let got = slot.unwrap();
+        assert_eq!(got.sent, 4);
+        assert_eq!(got.power, None);
+
+        let mut slot = Some(PendingReply {
+            sent: 4,
+            ..reboot()
+        });
+        assert!(!offer_reply(&mut slot, ping()));
+        let got = slot.unwrap();
+        assert_eq!(got.power, Some(PowerOp::Reboot));
+        assert_eq!(got.sent, 4);
+
+        let mut slot = Some(reboot());
+        assert!(!offer_reply(&mut slot, ping()));
+        assert_eq!(slot.unwrap().power, Some(PowerOp::Reboot));
+
+        let mut slot = Some(ping());
+        assert!(offer_reply(&mut slot, reboot()));
+        assert_eq!(slot.unwrap().power, Some(PowerOp::Reboot));
     }
 }
