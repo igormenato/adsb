@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{OutputArgs, Stop, now_unix, open_output, open_table, run_writer, sleep_until_stop};
+use super::writer::{Shared, open_output, open_table, run_writer};
+use super::{OutputArgs, Stop, now_unix, sleep_until_stop};
 use anyhow::{Result, bail};
 use clap::Parser;
 use trck::modes::{EVEN, IDENT, ODD, STATUS, VELOCITY, with_icao};
@@ -91,7 +92,7 @@ impl Args {
         if self.aircraft == 0 {
             bail!("stress --aircraft must be at least 1");
         }
-        let max = (Icao::MAX - ICAO_BASE) as usize;
+        let max = Icao::MAX.saturating_sub(ICAO_BASE) as usize;
         if self.aircraft > max {
             bail!("stress --aircraft must be at most {max}");
         }
@@ -167,7 +168,7 @@ pub fn run(opts: Args) -> ExitCode {
     code
 }
 
-fn generate(opts: &Args, shared: Arc<super::Shared>, stop: &Stop, stats: &Stats, csv_on: bool) {
+fn generate(opts: &Args, shared: Arc<Shared>, stop: &Stop, stats: &Stats, csv_on: bool) {
     let mut tracker = Tracker::new();
     let mut odd = vec![false; opts.aircraft];
     let mut seen = vec![false; opts.aircraft];
@@ -191,7 +192,7 @@ fn generate(opts: &Args, shared: Arc<super::Shared>, stop: &Stop, stats: &Stats,
             let due = Duration::from_secs_f64(n as f64 / f64::from(opts.rate));
             let now = start.elapsed();
             if now < due {
-                sleep_until_stop(stop, due - now);
+                sleep_until_stop(stop, due.saturating_sub(now));
                 if stop.is_set() {
                     break;
                 }
