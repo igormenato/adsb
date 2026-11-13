@@ -2,8 +2,6 @@
 
 Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`.
 
-This is not the OBC radio firmware. It copies fields by offset. It does not overlay a packed struct on the UART buffer.
-
 Open `esp32/trck_uart/trck_uart.ino`. Decode logic is `trck_frame.h`, shared with `make -C esp32/host test`.
 
 Board package: esp32 by Espressif Systems 3.3.x.

@@ -17,7 +17,7 @@ static void fmt_deg(char *out, size_t cap, int32_t e7) {
     uint32_t abs_e7;
     if (e7 < 0) {
         sign = "-";
-        abs_e7 = (uint32_t)(-(e7 + 1)) + 1u;
+        abs_e7 = (uint32_t)-e7;
     } else {
         abs_e7 = (uint32_t)e7;
     }
@@ -66,11 +66,11 @@ static void print_fix(const TrckFix *fix, const TrckScan *scan) {
     fmt_opt_u16(gs, sizeof gs, fix->gs_kt, TRCK_SPEED_UNKNOWN);
     fmt_opt_u16(track, sizeof track, fix->track_deg, TRCK_TRACK_UNKNOWN);
     fmt_callsign(callsign, sizeof callsign, fix->callsign);
-    const char *name = fix->emergency < 8 ? kEmergency[fix->emergency] : "?";
     Serial.printf(
         "icao=%06lX callsign=%s lat=%s lon=%s alt=%s gs=%s track=%s emergency=%u %s crc_fail=%lu "
         "resync=%lu\n",
-        (unsigned long)fix->icao, callsign, lat, lon, alt, gs, track, (unsigned)fix->emergency, name,
+        (unsigned long)fix->icao, callsign, lat, lon, alt, gs, track, (unsigned)fix->emergency,
+        kEmergency[fix->emergency],
         scan->crc_fail, scan->resync);
 }
 
