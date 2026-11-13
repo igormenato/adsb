@@ -66,6 +66,9 @@ struct OutputArgs {
     /// Local CSV of each position queued for UART.
     #[arg(long, default_value = DEFAULT_PATH, value_name = "PATH")]
     table: PathBuf,
+    /// Honor UART REBOOT and SHUTDOWN. Off so noise on the line cannot power the Pi off.
+    #[arg(long)]
+    allow_power_commands: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -186,7 +189,7 @@ fn main() -> ExitCode {
             file,
             output,
             speed,
-        }) => return run_replay(file, &output.uart, output.baud, &output.table, speed),
+        }) => return run_replay(file, &output, speed),
         None => {}
     }
     let stop = Stop::new();
@@ -196,6 +199,7 @@ fn main() -> ExitCode {
         args.output.baud,
         Arc::clone(&stop),
         table,
+        args.output.allow_power_commands,
     ) {
         Ok(writer) => writer,
         Err(err) => return fail(format!("{err:#}")),
@@ -313,7 +317,7 @@ fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<Stop>) -> ExitCode {
     code
 }
 
-fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pace) -> ExitCode {
+fn run_replay(file: PathBuf, output: &OutputArgs, speed: Pace) -> ExitCode {
     let stop = Stop::new();
     install_ctrlc(Arc::clone(&stop));
     let input =
@@ -321,15 +325,23 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
             Ok(input) => input,
             Err(err) => return fail(format!("{err:#}")),
         };
-    let table = writer::open_table(table_path);
-    let mut writer = match writer::open_output(uart, baud, Arc::clone(&stop), table) {
+    let table = writer::open_table(&output.table);
+    let mut writer = match writer::open_output(
+        &output.uart,
+        output.baud,
+        Arc::clone(&stop),
+        table,
+        output.allow_power_commands,
+    ) {
         Ok(writer) => writer,
         Err(err) => return fail(format!("{err:#}")),
     };
     eprintln!(
-        "replay file={} uart={uart} baud={baud} speed={speed} table={}",
+        "replay file={} uart={} baud={} speed={speed} table={}",
         file.display(),
-        table_path.display()
+        output.uart,
+        output.baud,
+        output.table.display()
     );
 
     let mut tracker = Tracker::new();
@@ -348,7 +360,7 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
             Ok(Some(line)) => line,
             Err(err) => {
                 eprintln!("{}: {err}", file.display());
-                print_replay_summary(read, decoded, malformed, fixes, writer.frames_written);
+                print_replay_summary(read, decoded, malformed, fixes, writer.frames_written());
                 return ExitCode::from(1);
             }
         };
@@ -373,14 +385,14 @@ fn run_replay(file: PathBuf, uart: &str, baud: u32, table_path: &Path, speed: Pa
                     writer.enqueue_at(fix, unix_time(timestamp));
                 }
                 if let Err(err) = writer.write_some() {
-                    print_replay_summary(read, decoded, malformed, fixes, writer.frames_written);
+                    print_replay_summary(read, decoded, malformed, fixes, writer.frames_written());
                     return writer::write_exit(err);
                 }
             }
         }
     }
     let drain = writer::drain_writer(&mut writer, &stop);
-    print_replay_summary(read, decoded, malformed, fixes, writer.frames_written);
+    print_replay_summary(read, decoded, malformed, fixes, writer.frames_written());
     match drain {
         Ok(()) => {
             if stop.is_set() {

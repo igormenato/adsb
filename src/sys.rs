@@ -22,6 +22,10 @@ pub(super) fn write(fd: impl AsFd, bytes: &[u8]) -> io::Result<usize> {
     unistd::write(fd, bytes).map_err(io::Error::from)
 }
 
+pub(super) fn read(fd: impl AsFd, buf: &mut [u8]) -> io::Result<usize> {
+    unistd::read(fd, buf).map_err(io::Error::from)
+}
+
 pub(super) fn set_nonblocking(fd: impl AsFd) -> io::Result<()> {
     let flags = OFlag::from_bits_truncate(fcntl(fd.as_fd(), FcntlArg::F_GETFL)?);
     fcntl(fd.as_fd(), FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;

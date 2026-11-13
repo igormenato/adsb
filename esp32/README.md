@@ -1,6 +1,6 @@
 # ESP32-S3 UART ingest
 
-Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`.
+Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, or `shutdown` on that Serial to send a 7-byte `TCMD` frame to the Pi. Replies are 20-byte `TACK` frames.
 
 Open `esp32/trck_uart/trck_uart.ino`. Host check: `make -C esp32/host test`.
 
@@ -19,14 +19,30 @@ If the monitor is empty because you are on the DevKit UART/COM port, set USB CDC
 
 ## Wire
 
-3.3 V UART. Common ground. Pi TX is GPIO 14 (header pin 8). Firmware RX is GPIO 18 (`Serial1`).
+3.3 V UART. Common ground. Pi TX is GPIO 14 (header pin 8). Pi RX is GPIO 15 (header pin 10). Firmware RX is GPIO 11, TX is GPIO 10 (`Serial1`). The RF team uses ESP32 GPIO 11 for RX from the Pi.
 
 | Pi | ESP32-S3 |
 | --- | --- |
-| GPIO 14 (pin 8) TX | GPIO 18 RX |
+| GPIO 14 (pin 8) TX | GPIO 11 RX |
+| GPIO 15 (pin 10) RX | GPIO 10 TX |
 | GND (pin 6) | GND |
 
 Do not use a 5 V adapter. Leave the Pi serial login shell off so `/dev/serial0` is the UART `trck` opens.
+
+## Commands
+
+On the USB Serial Monitor, send one word and a newline.
+
+| Word | Pi action |
+| --- | --- |
+| `ping` | Reply `ok` |
+| `status` | Reply `ok` with uptime seconds, frames sent, and last-fix age |
+| `reboot` | `systemctl reboot` if `trck` was started with `--allow-power-commands` |
+| `shutdown` | `systemctl poweroff` with the same flag |
+
+Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. `trck` must run as a user that may call those `systemctl` verbs, typically root. There is no systemd unit in this repo.
+
+Change `kPiRxGpio` / `kPiTxGpio` in `trck_uart.ino` if those pins are not free on the board.
 
 ## What you should see
 
@@ -46,4 +62,3 @@ icao=40621D callsign=BAW123 lat=52.2572021 lon=3.9193726 alt=38000 gs=450 track=
 icao=4CA123 callsign=EZY456 lat=51.4700000 lon=-0.4500000 alt=8000 gs=220 track=180 emergency=1 general crc_fail=0 resync=0
 ```
 
-Change `kPiRxGpio` in `trck_uart.ino` if GPIO 18 is not free on the board.

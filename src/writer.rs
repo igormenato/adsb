@@ -1,18 +1,22 @@
 //! UART sink, position queue, and the write loop.
 
 use std::io::{self, Write};
-use std::os::fd::BorrowedFd;
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::path::Path;
-use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::{Command, ExitCode};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context as _;
 use nix::poll::{PollFd, PollFlags};
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
-use trck::{EmergencyKind, FRAME_LEN, Fix, Queue, Table, check_positions};
+use trck::{
+    CmdFeed, CmdScan, CmdStats, CmdStatus, EmergencyKind, FRAME_LEN, Fix, LAST_FIX_NONE, Power,
+    PowerOp, Queue, Table, check_positions, decide, pack_reply,
+};
 
 use super::sys;
 use super::{CHECK_PAUSE, POLL_SLICE, Stop, sleep_until_stop};
@@ -34,14 +38,24 @@ pub(crate) struct Shared {
     queue: Mutex<Queue>,
     pub(crate) ready: Condvar,
     pub(crate) table: Mutex<Option<Table>>,
+    started: Instant,
+    frames_written: AtomicUsize,
+    last_fix: Mutex<Option<Instant>>,
+    in_flight: AtomicBool,
+    allow_power: bool,
 }
 
 impl Shared {
-    fn new(table: Option<Table>) -> Arc<Self> {
+    fn new(table: Option<Table>, allow_power: bool) -> Arc<Self> {
         Arc::new(Self {
             queue: Mutex::new(Queue::new(QUEUE_CAP)),
             ready: Condvar::new(),
             table: Mutex::new(table),
+            started: Instant::now(),
+            frames_written: AtomicUsize::new(0),
+            last_fix: Mutex::new(None),
+            in_flight: AtomicBool::new(false),
+            allow_power,
         })
     }
 
@@ -55,9 +69,27 @@ impl Shared {
 
     fn push_at(&self, fix: Fix, now: SystemTime) -> Option<Fix> {
         let dropped = self.lock().push(fix);
+        *self.last_fix.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
         self.ready.notify_one();
         self.append_row_at(&fix, now);
         dropped
+    }
+
+    fn stats(&self) -> CmdStats {
+        let uptime_s = self.started.elapsed().as_secs().min(u64::from(u32::MAX)) as u32;
+        let frames_sent = self
+            .frames_written
+            .load(Ordering::Relaxed)
+            .min(u32::MAX as usize) as u32;
+        let last_fix_age_s = match *self.last_fix.lock().unwrap_or_else(PoisonError::into_inner) {
+            Some(at) => at.elapsed().as_secs().min(u64::from(u32::MAX)) as u32,
+            None => LAST_FIX_NONE,
+        };
+        CmdStats {
+            uptime_s,
+            frames_sent,
+            last_fix_age_s,
+        }
     }
 
     fn append_row_at(&self, fix: &Fix, now: SystemTime) {
@@ -72,10 +104,10 @@ impl Shared {
 }
 
 pub(crate) struct Writer {
-    sink: Sink,
+    sink: Arc<Mutex<Sink>>,
+    uart: Option<RawFd>,
     stop: Arc<Stop>,
     pub(crate) shared: Arc<Shared>,
-    pub(crate) frames_written: usize,
 }
 
 impl Writer {
@@ -84,10 +116,14 @@ impl Writer {
     }
 
     pub(crate) fn uart_fd(&self) -> Option<BorrowedFd<'_>> {
-        match &self.sink {
-            Sink::Uart(port) => Some(sys::as_fd(port)),
-            Sink::Stdout => None,
-        }
+        self.uart.map(|fd| {
+            // SAFETY: `fd` is the UART this Writer keeps open.
+            unsafe { BorrowedFd::borrow_raw(fd) }
+        })
+    }
+
+    pub(crate) fn frames_written(&self) -> usize {
+        self.shared.frames_written.load(Ordering::Relaxed)
     }
 
     pub(crate) fn enqueue(&mut self, fix: Fix) {
@@ -115,20 +151,25 @@ impl Writer {
                 buf[..rest.len()].copy_from_slice(rest);
                 rest.len()
             };
-            let wrote = match write_sink(&mut self.sink, &buf[..n]) {
-                Ok(0) => {
-                    return Err(ChunkError::Failed(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "uart write wrote nothing",
-                    )));
+            self.shared.in_flight.store(true, Ordering::SeqCst);
+            let wrote = {
+                let mut sink = lock_sink(&self.sink);
+                match write_sink(&mut sink, &buf[..n]) {
+                    Ok(0) => {
+                        return Err(ChunkError::Failed(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "uart write wrote nothing",
+                        )));
+                    }
+                    Ok(n) => n,
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(err) => return Err(ChunkError::Failed(err)),
                 }
-                Ok(n) => n,
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) => return Err(ChunkError::Failed(err)),
             };
             if self.shared.lock().advance(wrote) {
-                self.frames_written += 1;
+                self.shared.in_flight.store(false, Ordering::SeqCst);
+                self.shared.frames_written.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -159,6 +200,10 @@ pub(crate) fn log_fix(fix: &Fix) {
     eprintln!("fix icao={:06x}", fix.aircraft.icao);
 }
 
+fn lock_sink(sink: &Mutex<Sink>) -> MutexGuard<'_, Sink> {
+    sink.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
     match sink {
         Sink::Uart(port) => sys::write(sys::as_fd(port), bytes),
@@ -167,6 +212,134 @@ fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
             out.write_all(bytes)?;
             out.flush()?;
             Ok(bytes.len())
+        }
+    }
+}
+
+fn poll_fd(fd: RawFd, flags: PollFlags) -> io::Result<i32> {
+    // SAFETY: `fd` is the UART kept open by Writer or the command thread.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let mut poll_fd = PollFd::new(borrowed, flags);
+    sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE)
+}
+
+fn write_reply(
+    sink: &Mutex<Sink>,
+    uart: RawFd,
+    in_flight: &AtomicBool,
+    bytes: &[u8],
+    stop: &Stop,
+) -> Result<(), ChunkError> {
+    loop {
+        if stop.is_set() {
+            return Err(ChunkError::Stopped);
+        }
+        let mut guard = lock_sink(sink);
+        if in_flight.load(Ordering::SeqCst) {
+            drop(guard);
+            if let Err(err) = poll_fd(uart, PollFlags::POLLOUT) {
+                return Err(ChunkError::Failed(err));
+            }
+            continue;
+        }
+        let mut off = 0;
+        while off < bytes.len() {
+            if stop.is_set() {
+                return Err(ChunkError::Stopped);
+            }
+            match write_sink(&mut guard, &bytes[off..]) {
+                Ok(0) => {
+                    return Err(ChunkError::Failed(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "uart write wrote nothing",
+                    )));
+                }
+                Ok(n) => off += n,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) = poll_fd(uart, PollFlags::POLLOUT) {
+                        return Err(ChunkError::Failed(err));
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(ChunkError::Failed(err)),
+            }
+        }
+        return Ok(());
+    }
+}
+
+struct Systemctl;
+
+impl Power for Systemctl {
+    fn apply(&self, op: PowerOp) {
+        let arg = match op {
+            PowerOp::Reboot => "reboot",
+            PowerOp::Shutdown => "poweroff",
+        };
+        match Command::new("systemctl").arg(arg).status() {
+            Ok(status) if status.success() => {}
+            Ok(status) => eprintln!("systemctl {arg} failed: {status}"),
+            Err(err) => eprintln!("systemctl {arg}: {err}"),
+        }
+    }
+}
+
+fn read_cmds(
+    reader: TTYPort,
+    sink: Arc<Mutex<Sink>>,
+    uart: RawFd,
+    shared: Arc<Shared>,
+    stop: Arc<Stop>,
+) {
+    let fd = sys::as_fd(&reader);
+    let mut scan = CmdScan::new();
+    let mut tmp = [0u8; 64];
+    while !stop.is_set() {
+        match sys::read(fd, &mut tmp) {
+            Ok(0) => {
+                if poll_fd(uart, PollFlags::POLLIN).is_err() {
+                    return;
+                }
+            }
+            Ok(n) => {
+                for &byte in &tmp[..n] {
+                    match scan.feed(byte) {
+                        CmdFeed::None => {}
+                        CmdFeed::BadCrc => eprintln!("cmd crc mismatch"),
+                        CmdFeed::Cmd(cmd) => {
+                            let (reply, power) = decide(cmd, shared.allow_power, shared.stats());
+                            if reply.status == CmdStatus::Disabled {
+                                eprintln!("power command disabled");
+                            }
+                            let raw = pack_reply(&reply);
+                            if let Err(err) =
+                                write_reply(&sink, uart, &shared.in_flight, &raw, &stop)
+                            {
+                                match err {
+                                    ChunkError::Stopped => return,
+                                    ChunkError::Failed(err) => {
+                                        eprintln!("uart write failed: {err}");
+                                        return;
+                                    }
+                                }
+                            }
+                            if let Some(op) = power {
+                                Systemctl.apply(op);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                if poll_fd(uart, PollFlags::POLLIN).is_err() {
+                    return;
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                eprintln!("uart read: {err}");
+                return;
+            }
         }
     }
 }
@@ -197,11 +370,22 @@ fn open_uart(
     port.clear(ClearBuffer::All)
         .with_context(|| format!("cannot open {path}"))?;
     sys::set_nonblocking(sys::as_fd(&port)).with_context(|| format!("cannot open {path}"))?;
+    let reader = port
+        .try_clone_native()
+        .with_context(|| format!("cannot clone {path}"))?;
+    let uart = port.as_raw_fd();
+    let sink = Arc::new(Mutex::new(Sink::Uart(port)));
+    {
+        let sink = Arc::clone(&sink);
+        let shared = Arc::clone(&shared);
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || read_cmds(reader, sink, uart, shared, stop));
+    }
     Ok(Writer {
-        sink: Sink::Uart(port),
+        sink,
+        uart: Some(uart),
         stop,
         shared,
-        frames_written: 0,
     })
 }
 
@@ -210,14 +394,15 @@ pub(crate) fn open_output(
     baud: u32,
     stop: Arc<Stop>,
     table: Option<Table>,
+    allow_power: bool,
 ) -> anyhow::Result<Writer> {
-    let shared = Shared::new(table);
+    let shared = Shared::new(table, allow_power);
     if path == "-" {
         return Ok(Writer {
-            sink: Sink::Stdout,
+            sink: Arc::new(Mutex::new(Sink::Stdout)),
+            uart: None,
             stop,
             shared,
-            frames_written: 0,
         });
     }
     open_uart(path, baud, stop, shared)

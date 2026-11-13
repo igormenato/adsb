@@ -44,6 +44,8 @@ nc localhost 30002 | ./trck --hex - --uart /dev/serial0
 
 `--baud` defaults to 115200.
 
+`--allow-power-commands` lets a UART `REBOOT` or `SHUTDOWN` from the ESP32 run `systemctl reboot` or `systemctl poweroff`. Off by default so noise on the line cannot power the Pi off. Run `trck` as a user that may invoke those verbs (root is enough). There is no systemd unit in this repo. `PING` and `STATUS` always reply.
+
 `--check` sends known frames instead of reading the radio, to check the UART. It repeats those frames every second.
 
 `--table PATH` appends one CSV row for each position queued for UART. Default is `aircraft.csv` in the working directory. The file stays append-only for the process. Timestamp is the Pi clock, not contest reception.
