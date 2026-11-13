@@ -1,6 +1,6 @@
 # ESP32-S3 UART ingest
 
-Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, or `shutdown` on that Serial to send a 7-byte `TCMD` frame to the Pi. Replies are 20-byte `TACK` frames.
+Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, `shutdown`, `pause`, `resume`, or `restart` on that Serial to send a 7-byte `TCMD` frame to the Pi. Replies are 21-byte `TACK` frames.
 
 Open `esp32/trck_uart/trck_uart.ino`. Host check: `make -C esp32/host test`.
 
@@ -35,12 +35,15 @@ On the USB Serial Monitor, send one word and a newline.
 
 | Word | Pi action |
 | --- | --- |
-| `ping` | Reply `ok` |
-| `status` | Reply `ok` with uptime seconds, frames sent, and last-fix age |
+| `ping` | Reply `ok` with run state |
+| `status` | Reply `ok` with run state, uptime seconds, frames sent, and last-fix age |
+| `pause` | Keep decoding and CSV; stop sending `TRCK` frames. Replies still go out |
+| `resume` | Start sending `TRCK` frames again. `trck` starts running; there is no start command |
+| `restart` | Reply, drain the UART, then `exec` the same binary and args |
 | `reboot` | `systemctl reboot` if `trck` was started with `--allow-power-commands` |
 | `shutdown` | `systemctl poweroff` with the same flag |
 
-Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. `trck` must run as a user that may call those `systemctl` verbs, typically root. There is no systemd unit in this repo.
+Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. `trck` must run as a user that may call those `systemctl` verbs, typically root. There is no systemd unit in this repo. Pause, resume, and restart do not need the flag. Restart uses `exec` so the process comes back without a unit. While paused, new positions still hit the CSV table and are not queued for UART, so resume does not flood the wire.
 
 Change `kPiRxGpio` / `kPiTxGpio` in `trck_uart.ino` if those pins are not free on the board.
 

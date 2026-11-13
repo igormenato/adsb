@@ -2,6 +2,7 @@
 
 use std::io::{self, Write};
 use std::os::fd::BorrowedFd;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -14,8 +15,8 @@ use nix::poll::{PollFd, PollFlags};
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
 use trck::{
-    ACK_LEN, CmdFeed, CmdScan, CmdStats, CmdStatus, EmergencyKind, FRAME_LEN, Fix, LAST_FIX_NONE,
-    PowerOp, Queue, Table, check_positions, decide, pack_reply,
+    ACK_LEN, AfterReply, CmdFeed, CmdScan, CmdStats, CmdStatus, EmergencyKind, FRAME_LEN, Fix,
+    LAST_FIX_NONE, PowerOp, Queue, Table, check_positions, decide, pack_reply,
 };
 
 use super::sys;
@@ -32,18 +33,20 @@ pub(crate) enum ChunkError {
 enum Sink {
     Uart(TTYPort),
     Stdout,
+    #[cfg(test)]
+    Buf(Vec<u8>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingReply {
     bytes: [u8; ACK_LEN],
     sent: usize,
-    power: Option<PowerOp>,
+    after: AfterReply,
 }
 
 fn offer_reply(slot: &mut Option<PendingReply>, next: PendingReply) -> bool {
     if let Some(cur) = slot.as_ref()
-        && (cur.sent > 0 || cur.power.is_some())
+        && (cur.sent > 0 || cur.after != AfterReply::None)
     {
         return false;
     }
@@ -60,6 +63,7 @@ pub(crate) struct Shared {
     last_fix: Mutex<Option<Instant>>,
     pending_reply: Mutex<Option<PendingReply>>,
     allow_power: bool,
+    paused: AtomicBool,
 }
 
 impl Shared {
@@ -73,6 +77,7 @@ impl Shared {
             last_fix: Mutex::new(None),
             pending_reply: Mutex::new(None),
             allow_power,
+            paused: AtomicBool::new(false),
         })
     }
 
@@ -85,11 +90,26 @@ impl Shared {
     }
 
     fn push_at(&self, fix: Fix, now: SystemTime) -> Option<Fix> {
-        let dropped = self.lock().push(fix);
         *self.last_fix.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
-        self.ready.notify_one();
         self.append_row_at(&fix, now);
+        if self.paused.load(Ordering::Relaxed) {
+            return None;
+        }
+        let dropped = self.lock().push(fix);
+        self.ready.notify_one();
         dropped
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
+        if paused {
+            self.lock().drop_waiting();
+        }
+        self.ready.notify_one();
     }
 
     fn stats(&self) -> CmdStats {
@@ -116,7 +136,7 @@ impl Shared {
             .is_some()
     }
 
-    fn queue_reply(&self, bytes: [u8; ACK_LEN], power: Option<PowerOp>) {
+    fn queue_reply(&self, bytes: [u8; ACK_LEN], after: AfterReply) {
         let mut slot = self
             .pending_reply
             .lock()
@@ -126,7 +146,7 @@ impl Shared {
             PendingReply {
                 bytes,
                 sent: 0,
-                power,
+                after,
             },
         ) {
             eprintln!("cmd dropped, reply in flight");
@@ -161,6 +181,8 @@ impl Writer {
         match &self.sink {
             Sink::Uart(port) => Some(sys::as_fd(port)),
             Sink::Stdout => None,
+            #[cfg(test)]
+            Sink::Buf(_) => None,
         }
     }
 
@@ -190,7 +212,7 @@ impl Writer {
                     }
                     continue;
                 }
-                if !self.shared.lock().begin() {
+                if self.shared.is_paused() || !self.shared.lock().begin() {
                     return Ok(());
                 }
             }
@@ -244,12 +266,17 @@ impl Writer {
                 if pending.sent < ACK_LEN {
                     return Ok(false);
                 }
-                let op = pending.power.take();
+                let after = pending.after;
                 *slot = None;
                 drop(slot);
                 drain_sink(&self.sink);
-                if let Some(op) = op {
-                    power(op);
+                match after {
+                    AfterReply::None => {}
+                    AfterReply::Power(op) => power(op),
+                    AfterReply::Restart => {
+                        drop(std::mem::replace(&mut self.sink, Sink::Stdout));
+                        restart();
+                    }
                 }
                 Ok(true)
             }
@@ -297,6 +324,11 @@ fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
             out.flush()?;
             Ok(bytes.len())
         }
+        #[cfg(test)]
+        Sink::Buf(buf) => {
+            buf.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
     }
 }
 
@@ -307,6 +339,20 @@ fn drain_sink(sink: &Sink) {
     if let Err(err) = nix::sys::termios::tcdrain(sys::as_fd(port)) {
         eprintln!("uart drain: {err}");
     }
+}
+
+fn restart() -> ! {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            eprintln!("restart: {err}");
+            std::process::exit(78);
+        }
+    };
+    eprintln!("restart");
+    let err = Command::new(exe).args(std::env::args_os().skip(1)).exec();
+    eprintln!("restart exec: {err}");
+    std::process::exit(78);
 }
 
 fn power(op: PowerOp) {
@@ -337,11 +383,13 @@ fn read_cmds(reader: TTYPort, shared: Arc<Shared>, stop: Arc<Stop>) {
                         CmdFeed::None => {}
                         CmdFeed::BadCrc => eprintln!("cmd crc mismatch"),
                         CmdFeed::Cmd(cmd) => {
-                            let (reply, power) = decide(cmd, shared.allow_power, shared.stats());
+                            let (reply, after) =
+                                decide(cmd, shared.allow_power, shared.is_paused(), shared.stats());
                             if reply.status == CmdStatus::Disabled {
                                 eprintln!("power command disabled");
                             }
-                            shared.queue_reply(pack_reply(&reply), power);
+                            shared.set_paused(reply.paused);
+                            shared.queue_reply(pack_reply(&reply), after);
                         }
                     }
                 }
@@ -392,9 +440,11 @@ fn open_uart(
     port.clear(ClearBuffer::All)
         .with_context(|| format!("cannot open {path}"))?;
     sys::set_nonblocking(sys::as_fd(&port)).with_context(|| format!("cannot open {path}"))?;
+    sys::set_cloexec(sys::as_fd(&port)).with_context(|| format!("cannot open {path}"))?;
     let reader = port
         .try_clone_native()
         .with_context(|| format!("cannot clone {path}"))?;
+    sys::set_cloexec(sys::as_fd(&reader)).with_context(|| format!("cannot clone {path}"))?;
     {
         let shared = Arc::clone(&shared);
         let stop = Arc::clone(&stop);
@@ -530,12 +580,13 @@ pub(crate) fn write_exit(err: ChunkError) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trck::Cmd;
 
     fn ping() -> PendingReply {
         PendingReply {
             bytes: [0; ACK_LEN],
             sent: 0,
-            power: None,
+            after: AfterReply::None,
         }
     }
 
@@ -543,7 +594,7 @@ mod tests {
         PendingReply {
             bytes: [1; ACK_LEN],
             sent: 0,
-            power: Some(PowerOp::Reboot),
+            after: AfterReply::Power(PowerOp::Reboot),
         }
     }
 
@@ -553,7 +604,7 @@ mod tests {
         assert!(!offer_reply(&mut slot, reboot()));
         let got = slot.unwrap();
         assert_eq!(got.sent, 4);
-        assert_eq!(got.power, None);
+        assert_eq!(got.after, AfterReply::None);
 
         let mut slot = Some(PendingReply {
             sent: 4,
@@ -561,15 +612,64 @@ mod tests {
         });
         assert!(!offer_reply(&mut slot, ping()));
         let got = slot.unwrap();
-        assert_eq!(got.power, Some(PowerOp::Reboot));
+        assert_eq!(got.after, AfterReply::Power(PowerOp::Reboot));
         assert_eq!(got.sent, 4);
 
         let mut slot = Some(reboot());
         assert!(!offer_reply(&mut slot, ping()));
-        assert_eq!(slot.unwrap().power, Some(PowerOp::Reboot));
+        assert_eq!(slot.unwrap().after, AfterReply::Power(PowerOp::Reboot));
 
         let mut slot = Some(ping());
         assert!(offer_reply(&mut slot, reboot()));
-        assert_eq!(slot.unwrap().power, Some(PowerOp::Reboot));
+        assert_eq!(slot.unwrap().after, AfterReply::Power(PowerOp::Reboot));
+    }
+
+    fn buf_writer() -> Writer {
+        Writer {
+            sink: Sink::Buf(Vec::new()),
+            stop: Stop::new(),
+            shared: Shared::new(None, false),
+        }
+    }
+
+    fn buf(writer: &Writer) -> &[u8] {
+        match &writer.sink {
+            Sink::Buf(bytes) => bytes,
+            _ => panic!("expected buf sink"),
+        }
+    }
+
+    #[test]
+    fn paused_writer_skips_frames_and_writes_replies() {
+        let mut writer = buf_writer();
+        writer.enqueue(check_positions()[0]);
+        writer.shared.set_paused(true);
+        writer.write_some().expect("write");
+        assert!(buf(&writer).is_empty());
+
+        writer.shared.set_paused(false);
+        writer.enqueue(check_positions()[0]);
+        writer.write_some().expect("write");
+        assert_eq!(buf(&writer).len(), FRAME_LEN);
+
+        writer.shared.set_paused(true);
+        writer.enqueue(check_positions()[1]);
+        writer.write_some().expect("write");
+        assert_eq!(buf(&writer).len(), FRAME_LEN);
+
+        let (reply, after) = decide(Cmd::Status as u8, false, true, writer.shared.stats());
+        assert!(reply.paused);
+        assert_eq!(after, AfterReply::None);
+        writer.shared.queue_reply(pack_reply(&reply), after);
+        writer.write_some().expect("write");
+        let out = buf(&writer);
+        assert_eq!(out.len(), FRAME_LEN + ACK_LEN);
+        assert_eq!(&out[FRAME_LEN..FRAME_LEN + 4], b"TACK");
+        assert_eq!(out[FRAME_LEN + 18], 1);
+
+        writer.shared.set_paused(false);
+        writer.enqueue(check_positions()[1]);
+        writer.write_some().expect("write");
+        assert_eq!(buf(&writer).len(), FRAME_LEN * 2 + ACK_LEN);
     }
 }

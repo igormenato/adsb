@@ -3,7 +3,7 @@
 use crate::frame::crc16_ccitt_false;
 
 pub const CMD_MAGIC: &[u8; 4] = b"TCMD";
-pub const ACK_LEN: usize = 20;
+pub const ACK_LEN: usize = 21;
 pub const CMD_LEN: usize = 7;
 pub const LAST_FIX_NONE: u32 = u32::MAX;
 
@@ -18,6 +18,9 @@ pub enum Cmd {
     Status = 1,
     Reboot = 2,
     Shutdown = 3,
+    Pause = 4,
+    Resume = 5,
+    Restart = 6,
 }
 
 impl Cmd {
@@ -27,6 +30,9 @@ impl Cmd {
             1 => Self::Status,
             2 => Self::Reboot,
             3 => Self::Shutdown,
+            4 => Self::Pause,
+            5 => Self::Resume,
+            6 => Self::Restart,
             _ => return None,
         })
     }
@@ -54,6 +60,7 @@ pub struct CmdStats {
 pub struct CmdReply {
     pub cmd: u8,
     pub status: CmdStatus,
+    pub paused: bool,
     pub stats: CmdStats,
 }
 
@@ -62,6 +69,14 @@ pub struct CmdReply {
 pub enum PowerOp {
     Reboot,
     Shutdown,
+}
+
+/// Work after the reply is on the wire. Pause and resume take effect immediately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterReply {
+    None,
+    Power(PowerOp),
+    Restart,
 }
 
 pub fn unpack_cmd(bytes: &[u8]) -> Option<u8> {
@@ -81,21 +96,37 @@ pub fn pack_reply(reply: &CmdReply) -> [u8; ACK_LEN] {
     raw[6..10].copy_from_slice(&reply.stats.uptime_s.to_le_bytes());
     raw[10..14].copy_from_slice(&reply.stats.frames_sent.to_le_bytes());
     raw[14..18].copy_from_slice(&reply.stats.last_fix_age_s.to_le_bytes());
+    raw[18] = u8::from(reply.paused);
     let crc = crc16_ccitt_false(&raw[..ACK_BODY_LEN]);
     raw[ACK_BODY_LEN..ACK_LEN].copy_from_slice(&crc.to_le_bytes());
     raw
 }
 
-/// What to write, and whether to reboot or power off after the reply is on the wire.
-pub fn decide(cmd: u8, allow_power: bool, stats: CmdStats) -> (CmdReply, Option<PowerOp>) {
-    let (status, op) = match Cmd::from_u8(cmd) {
-        Some(Cmd::Ping | Cmd::Status) => (CmdStatus::Ok, None),
-        Some(Cmd::Reboot) if allow_power => (CmdStatus::Ok, Some(PowerOp::Reboot)),
-        Some(Cmd::Shutdown) if allow_power => (CmdStatus::Ok, Some(PowerOp::Shutdown)),
-        Some(Cmd::Reboot | Cmd::Shutdown) => (CmdStatus::Disabled, None),
-        None => (CmdStatus::Unknown, None),
+/// What to write, the run state after this command, and any later host action.
+pub fn decide(cmd: u8, allow_power: bool, paused: bool, stats: CmdStats) -> (CmdReply, AfterReply) {
+    let (status, paused, after) = match Cmd::from_u8(cmd) {
+        Some(Cmd::Ping | Cmd::Status) => (CmdStatus::Ok, paused, AfterReply::None),
+        Some(Cmd::Pause) => (CmdStatus::Ok, true, AfterReply::None),
+        Some(Cmd::Resume) => (CmdStatus::Ok, false, AfterReply::None),
+        Some(Cmd::Restart) => (CmdStatus::Ok, paused, AfterReply::Restart),
+        Some(Cmd::Reboot) if allow_power => {
+            (CmdStatus::Ok, paused, AfterReply::Power(PowerOp::Reboot))
+        }
+        Some(Cmd::Shutdown) if allow_power => {
+            (CmdStatus::Ok, paused, AfterReply::Power(PowerOp::Shutdown))
+        }
+        Some(Cmd::Reboot | Cmd::Shutdown) => (CmdStatus::Disabled, paused, AfterReply::None),
+        None => (CmdStatus::Unknown, paused, AfterReply::None),
     };
-    (CmdReply { cmd, status, stats }, op)
+    (
+        CmdReply {
+            cmd,
+            status,
+            paused,
+            stats,
+        },
+        after,
+    )
 }
 
 /// Byte-at-a-time reader. Resyncs on `TCMD`. Never panics on garbage.
@@ -187,6 +218,11 @@ fn unpack_reply(bytes: &[u8]) -> Option<CmdReply> {
     Some(CmdReply {
         cmd: bytes[4],
         status,
+        paused: match bytes[18] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        },
         stats: CmdStats {
             uptime_s: u32::from_le_bytes(bytes[6..10].try_into().ok()?),
             frames_sent: u32::from_le_bytes(bytes[10..14].try_into().ok()?),
@@ -207,13 +243,22 @@ mod tests {
 
     #[test]
     fn cmd_round_trip() {
-        for cmd in [Cmd::Ping, Cmd::Status, Cmd::Reboot, Cmd::Shutdown] {
+        for cmd in [
+            Cmd::Ping,
+            Cmd::Status,
+            Cmd::Reboot,
+            Cmd::Shutdown,
+            Cmd::Pause,
+            Cmd::Resume,
+            Cmd::Restart,
+        ] {
             let raw = pack_cmd(cmd);
             assert_eq!(unpack_cmd(&raw), Some(cmd as u8));
         }
         let reply = CmdReply {
             cmd: Cmd::Status as u8,
             status: CmdStatus::Ok,
+            paused: true,
             stats: STATS,
         };
         let raw = pack_reply(&reply);
@@ -250,21 +295,51 @@ mod tests {
 
     #[test]
     fn power_refused_without_flag() {
-        let (reply, op) = decide(Cmd::Reboot as u8, false, STATS);
+        let (reply, after) = decide(Cmd::Reboot as u8, false, false, STATS);
         assert_eq!(reply.status, CmdStatus::Disabled);
-        assert_eq!(op, None);
-        let (reply, op) = decide(Cmd::Shutdown as u8, false, STATS);
+        assert_eq!(after, AfterReply::None);
+        let (reply, after) = decide(Cmd::Shutdown as u8, false, true, STATS);
         assert_eq!(reply.status, CmdStatus::Disabled);
-        assert_eq!(op, None);
+        assert!(reply.paused);
+        assert_eq!(after, AfterReply::None);
     }
 
     #[test]
     fn power_flag_sets_op() {
-        let (reply, op) = decide(Cmd::Reboot as u8, true, STATS);
+        let (reply, after) = decide(Cmd::Reboot as u8, true, false, STATS);
         assert_eq!(reply.status, CmdStatus::Ok);
-        assert_eq!(op, Some(PowerOp::Reboot));
-        let (reply, op) = decide(Cmd::Shutdown as u8, true, STATS);
+        assert_eq!(after, AfterReply::Power(PowerOp::Reboot));
+        let (reply, after) = decide(Cmd::Shutdown as u8, true, false, STATS);
         assert_eq!(reply.status, CmdStatus::Ok);
-        assert_eq!(op, Some(PowerOp::Shutdown));
+        assert_eq!(after, AfterReply::Power(PowerOp::Shutdown));
+    }
+
+    #[test]
+    fn pause_resume_restart() {
+        let (reply, after) = decide(Cmd::Pause as u8, false, false, STATS);
+        assert_eq!(reply.status, CmdStatus::Ok);
+        assert!(reply.paused);
+        assert_eq!(after, AfterReply::None);
+
+        let (reply, after) = decide(Cmd::Pause as u8, false, true, STATS);
+        assert!(reply.paused);
+        assert_eq!(after, AfterReply::None);
+
+        let (reply, after) = decide(Cmd::Resume as u8, false, true, STATS);
+        assert_eq!(reply.status, CmdStatus::Ok);
+        assert!(!reply.paused);
+        assert_eq!(after, AfterReply::None);
+
+        let (reply, after) = decide(Cmd::Status as u8, false, true, STATS);
+        assert!(reply.paused);
+        assert_eq!(after, AfterReply::None);
+
+        let (reply, after) = decide(Cmd::Restart as u8, false, true, STATS);
+        assert_eq!(reply.status, CmdStatus::Ok);
+        assert!(reply.paused);
+        assert_eq!(after, AfterReply::Restart);
+        let (reply, after) = decide(Cmd::Restart as u8, false, false, STATS);
+        assert!(!reply.paused);
+        assert_eq!(after, AfterReply::Restart);
     }
 }

@@ -151,10 +151,35 @@ int main(int argc, char **argv) {
     trck_pack_cmd(TCMD_SHUTDOWN, ping);
     assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
     assert(cmd == TCMD_SHUTDOWN);
+    trck_pack_cmd(TCMD_PAUSE, ping);
+    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
+    assert(cmd == TCMD_PAUSE);
+    trck_pack_cmd(TCMD_RESUME, ping);
+    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
+    assert(cmd == TCMD_RESUME);
+    trck_pack_cmd(TCMD_RESTART, ping);
+    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
+    assert(cmd == TCMD_RESTART);
     uint8_t bad_cmd[TCMD_LEN];
     trck_pack_cmd(TCMD_PING, bad_cmd);
     bad_cmd[TCMD_LEN - 1] ^= 0x5A;
     assert(!trck_unpack_cmd(bad_cmd, sizeof bad_cmd, &cmd));
+
+    uint8_t ack_raw[TACK_LEN];
+    memset(ack_raw, 0, sizeof ack_raw);
+    memcpy(ack_raw, "TACK", 4);
+    ack_raw[4] = TCMD_STATUS;
+    ack_raw[5] = TCMD_OK;
+    ack_raw[18] = 1;
+    trck_wr_u16(ack_raw + TACK_BODY_LEN, trck_crc16(ack_raw, TACK_BODY_LEN));
+    TrckAck ack;
+    assert(trck_unpack_ack(ack_raw, sizeof ack_raw, &ack));
+    assert(ack.cmd == TCMD_STATUS);
+    assert(ack.status == TCMD_OK);
+    assert(ack.paused == 1);
+    ack_raw[18] = 2;
+    trck_wr_u16(ack_raw + TACK_BODY_LEN, trck_crc16(ack_raw, TACK_BODY_LEN));
+    assert(!trck_unpack_ack(ack_raw, sizeof ack_raw, &ack));
 
     puts("ok");
     return 0;
