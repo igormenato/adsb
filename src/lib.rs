@@ -1,5 +1,6 @@
 //! Pi sender: one decoded ADS-B position at a time onto the UART.
 
+mod cmd;
 mod decode;
 mod frame;
 mod lines;
@@ -8,6 +9,10 @@ mod queue;
 mod replay;
 mod table;
 
+#[doc(inline)]
+pub use cmd::{
+    ACK_LEN, CmdFeed, CmdScan, CmdStats, CmdStatus, LAST_FIX_NONE, PowerOp, decide, pack_reply,
+};
 #[doc(inline)]
 pub use decode::{Tracker, is_mode_s, parse_hex_frame};
 #[doc(inline)]

@@ -38,6 +38,10 @@ impl Queue {
         self.current.is_some() || !self.waiting.is_empty()
     }
 
+    pub fn has_current(&self) -> bool {
+        self.current.is_some()
+    }
+
     /// Queue `fix`. Returns the position dropped to make room.
     #[must_use]
     pub fn push(&mut self, fix: Fix) -> Option<Fix> {

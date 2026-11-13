@@ -117,6 +117,7 @@ pub fn run(opts: Args) -> ExitCode {
         opts.output.baud,
         Arc::clone(&stop),
         table,
+        opts.output.allow_power_commands,
     ) {
         Ok(writer) => writer,
         Err(err) => {

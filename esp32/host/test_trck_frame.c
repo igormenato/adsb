@@ -133,6 +133,29 @@ int main(int argc, char **argv) {
     assert(scan.crc_fail >= 1);
 
     free(raw);
+
+    uint8_t ping[TCMD_LEN];
+    trck_pack_cmd(TCMD_PING, ping);
+    assert(memcmp(ping, "TCMD", 4) == 0);
+    assert(ping[4] == TCMD_PING);
+    uint8_t cmd = 0xFF;
+    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
+    assert(cmd == TCMD_PING);
+    uint8_t status[TCMD_LEN];
+    trck_pack_cmd(TCMD_STATUS, status);
+    assert(trck_unpack_cmd(status, sizeof status, &cmd));
+    assert(cmd == TCMD_STATUS);
+    trck_pack_cmd(TCMD_REBOOT, ping);
+    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
+    assert(cmd == TCMD_REBOOT);
+    trck_pack_cmd(TCMD_SHUTDOWN, ping);
+    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
+    assert(cmd == TCMD_SHUTDOWN);
+    uint8_t bad_cmd[TCMD_LEN];
+    trck_pack_cmd(TCMD_PING, bad_cmd);
+    bad_cmd[TCMD_LEN - 1] ^= 0x5A;
+    assert(!trck_unpack_cmd(bad_cmd, sizeof bad_cmd, &cmd));
+
     puts("ok");
     return 0;
 }
