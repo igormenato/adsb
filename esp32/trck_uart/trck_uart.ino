@@ -1,6 +1,3 @@
-#include <stdio.h>
-#include <string.h>
-
 #include "trck_frame.h"
 
 static const int kPiRxGpio = 18;
@@ -12,66 +9,32 @@ static const char *kEmergency[] = {
 
 static TrckScan gScan;
 
-static void fmt_deg(char *out, size_t cap, int32_t e7) {
-    const char *sign = "";
-    uint32_t abs_e7;
-    if (e7 < 0) {
-        sign = "-";
-        abs_e7 = (uint32_t)-e7;
-    } else {
-        abs_e7 = (uint32_t)e7;
-    }
-    (void)snprintf(out, cap, "%s%lu.%07lu", sign, (unsigned long)(abs_e7 / 10000000u),
-                   (unsigned long)(abs_e7 % 10000000u));
-}
-
-static void fmt_callsign(char *out, size_t cap, const uint8_t *cs) {
-    size_t n = TRCK_CALLSIGN_LEN;
-    while (n > 0 && cs[n - 1] == (uint8_t)' ') {
+static void print_fix(const TrckFix *fix, const TrckScan *scan) {
+    int n = TRCK_CALLSIGN_LEN;
+    while (n > 0 && fix->callsign[n - 1] == (uint8_t)' ') {
         n--;
     }
-    if (n >= cap) {
-        n = cap - 1;
-    }
-    memcpy(out, cs, n);
-    out[n] = '\0';
-}
-
-static void fmt_opt_i32(char *out, size_t cap, int32_t value, int32_t unknown) {
-    if (value == unknown) {
-        (void)snprintf(out, cap, "unknown");
+    Serial.printf("icao=%06lX callsign=%.*s lat=%.7f lon=%.7f alt=", (unsigned long)fix->icao, n,
+                  (const char *)fix->callsign, fix->lat_e7 / 1e7, fix->lon_e7 / 1e7);
+    if (fix->alt_ft == TRCK_ALT_UNKNOWN) {
+        Serial.print("unknown");
     } else {
-        (void)snprintf(out, cap, "%ld", (long)value);
+        Serial.printf("%ld", (long)fix->alt_ft);
     }
-}
-
-static void fmt_opt_u16(char *out, size_t cap, uint16_t value, uint16_t unknown) {
-    if (value == unknown) {
-        (void)snprintf(out, cap, "unknown");
+    Serial.print(" gs=");
+    if (fix->gs_kt == TRCK_SPEED_UNKNOWN) {
+        Serial.print("unknown");
     } else {
-        (void)snprintf(out, cap, "%u", (unsigned)value);
+        Serial.printf("%u", (unsigned)fix->gs_kt);
     }
-}
-
-static void print_fix(const TrckFix *fix, const TrckScan *scan) {
-    char lat[16];
-    char lon[16];
-    char alt[16];
-    char gs[16];
-    char track[16];
-    char callsign[TRCK_CALLSIGN_LEN + 1];
-    fmt_deg(lat, sizeof lat, fix->lat_e7);
-    fmt_deg(lon, sizeof lon, fix->lon_e7);
-    fmt_opt_i32(alt, sizeof alt, fix->alt_ft, TRCK_ALT_UNKNOWN);
-    fmt_opt_u16(gs, sizeof gs, fix->gs_kt, TRCK_SPEED_UNKNOWN);
-    fmt_opt_u16(track, sizeof track, fix->track_deg, TRCK_TRACK_UNKNOWN);
-    fmt_callsign(callsign, sizeof callsign, fix->callsign);
-    Serial.printf(
-        "icao=%06lX callsign=%s lat=%s lon=%s alt=%s gs=%s track=%s emergency=%u %s crc_fail=%lu "
-        "resync=%lu\n",
-        (unsigned long)fix->icao, callsign, lat, lon, alt, gs, track, (unsigned)fix->emergency,
-        kEmergency[fix->emergency],
-        scan->crc_fail, scan->resync);
+    Serial.print(" track=");
+    if (fix->track_deg == TRCK_TRACK_UNKNOWN) {
+        Serial.print("unknown");
+    } else {
+        Serial.printf("%u", (unsigned)fix->track_deg);
+    }
+    Serial.printf(" emergency=%u %s crc_fail=%lu resync=%lu\n", (unsigned)fix->emergency,
+                  kEmergency[fix->emergency], scan->crc_fail, scan->resync);
 }
 
 void setup() {
