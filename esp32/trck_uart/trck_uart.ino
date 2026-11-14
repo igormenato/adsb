@@ -11,12 +11,15 @@
 #define TRCK_TRACK_UNKNOWN ((uint16_t)0xFFFF)
 #define TCMD_LEN 7
 #define TCMD_BODY_LEN 5
-#define TACK_LEN 20
-#define TACK_BODY_LEN 18
+#define TACK_LEN 21
+#define TACK_BODY_LEN 19
 #define TCMD_PING 0
 #define TCMD_STATUS 1
 #define TCMD_REBOOT 2
 #define TCMD_SHUTDOWN 3
+#define TCMD_PAUSE 4
+#define TCMD_RESUME 5
+#define TCMD_RESTART 6
 #define TCMD_OK 0
 #define TCMD_DISABLED 1
 #define TCMD_UNKNOWN 2
@@ -46,6 +49,7 @@ typedef struct {
     uint32_t uptime_s;
     uint32_t frames_sent;
     uint32_t last_fix_age_s;
+    uint8_t paused;
 } TrckAck;
 
 typedef struct {
@@ -187,11 +191,15 @@ static inline bool trck_unpack_ack(const uint8_t *bytes, size_t len, TrckAck *ou
     if (bytes[5] > TCMD_UNKNOWN) {
         return false;
     }
+    if (bytes[18] > 1) {
+        return false;
+    }
     out->cmd = bytes[4];
     out->status = bytes[5];
     out->uptime_s = trck_rd_u32(bytes + 6);
     out->frames_sent = trck_rd_u32(bytes + 10);
     out->last_fix_age_s = trck_rd_u32(bytes + 14);
+    out->paused = bytes[18];
     return true;
 }
 
@@ -247,7 +255,7 @@ static const char *kEmergency[] = {
     "none", "general", "lifeguard", "minfuel", "nordo", "unlawful", "downed", "reserved",
 };
 
-static const char *kCmdName[] = {"ping", "status", "reboot", "shutdown"};
+static const char *kCmdName[] = {"ping", "status", "reboot", "shutdown", "pause", "resume", "restart"};
 static const char *kCmdStatus[] = {"ok", "disabled", "unknown"};
 
 static TrckScan gScan;
@@ -284,10 +292,11 @@ static void print_fix(const TrckFix *fix, const TrckScan *scan) {
 }
 
 static void print_ack(const TrckAck *ack) {
-    const char *cmd = ack->cmd <= TCMD_SHUTDOWN ? kCmdName[ack->cmd] : "unknown";
+    const char *cmd = ack->cmd <= TCMD_RESTART ? kCmdName[ack->cmd] : "unknown";
     const char *status = ack->status <= TCMD_UNKNOWN ? kCmdStatus[ack->status] : "?";
-    Serial.printf("ack cmd=%s status=%s uptime=%lu frames=%lu last_fix_age=", cmd, status,
-                  (unsigned long)ack->uptime_s, (unsigned long)ack->frames_sent);
+    const char *state = ack->paused ? "paused" : "running";
+    Serial.printf("ack cmd=%s status=%s state=%s uptime=%lu frames=%lu last_fix_age=", cmd, status,
+                  state, (unsigned long)ack->uptime_s, (unsigned long)ack->frames_sent);
     if (ack->last_fix_age_s == TCMD_AGE_NONE) {
         Serial.println("none");
     } else {
@@ -305,6 +314,12 @@ static bool send_named_cmd(const char *line) {
         cmd = TCMD_REBOOT;
     } else if (strcmp(line, "shutdown") == 0) {
         cmd = TCMD_SHUTDOWN;
+    } else if (strcmp(line, "pause") == 0) {
+        cmd = TCMD_PAUSE;
+    } else if (strcmp(line, "resume") == 0) {
+        cmd = TCMD_RESUME;
+    } else if (strcmp(line, "restart") == 0) {
+        cmd = TCMD_RESTART;
     } else {
         return false;
     }
@@ -327,7 +342,7 @@ void setup() {
     Serial.printf("UART 115200 8N1 RX GPIO %d TX GPIO %d. TRCK in, TCMD out.\n", kPiRxGpio,
                   kPiTxGpio);
     Serial.println("Wire Pi GPIO 14 (pin 8) to RX, Pi GPIO 15 (pin 10) to TX, 3.3 V, common ground.");
-    Serial.println("Type ping, status, reboot, or shutdown.");
+    Serial.println("Type ping, status, reboot, shutdown, pause, resume, or restart.");
 }
 
 void loop() {
@@ -356,7 +371,7 @@ void loop() {
                 }
             }
             if (!send_named_cmd(gLine)) {
-                Serial.println("commands: ping status reboot shutdown");
+                Serial.println("commands: ping status reboot shutdown pause resume restart");
             }
         } else if (gLineN < sizeof gLine - 1) {
             gLine[gLineN++] = c;

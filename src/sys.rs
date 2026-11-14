@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use nix::errno::Errno;
-use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::poll::{PollFd, PollTimeout, poll as nix_poll};
 use nix::sys::socket::{
     AddressFamily, SockFlag, SockType, SockaddrStorage, connect as nix_connect, getsockopt, socket,
@@ -29,6 +29,11 @@ pub(super) fn read(fd: impl AsFd, buf: &mut [u8]) -> io::Result<usize> {
 pub(super) fn set_nonblocking(fd: impl AsFd) -> io::Result<()> {
     let flags = OFlag::from_bits_truncate(fcntl(fd.as_fd(), FcntlArg::F_GETFL)?);
     fcntl(fd.as_fd(), FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
+    Ok(())
+}
+
+pub(super) fn set_cloexec(fd: impl AsFd) -> io::Result<()> {
+    fcntl(fd.as_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
     Ok(())
 }
 

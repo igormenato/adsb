@@ -42,6 +42,11 @@ impl Queue {
         self.current.is_some()
     }
 
+    /// Drop positions that have not started on the wire.
+    pub fn drop_waiting(&mut self) {
+        self.waiting.clear();
+    }
+
     /// Queue `fix`. Returns the position dropped to make room.
     #[must_use]
     pub fn push(&mut self, fix: Fix) -> Option<Fix> {
