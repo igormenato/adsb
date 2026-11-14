@@ -90,11 +90,11 @@ impl Shared {
     }
 
     fn push_at(&self, fix: Fix, now: SystemTime) -> Option<Fix> {
-        *self.last_fix.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
-        self.append_row_at(&fix, now);
         if self.paused.load(Ordering::Relaxed) {
             return None;
         }
+        *self.last_fix.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+        self.append_row_at(&fix, now);
         let dropped = self.lock().push(fix);
         self.ready.notify_one();
         dropped
@@ -624,11 +624,11 @@ mod tests {
         assert_eq!(slot.unwrap().after, AfterReply::Power(PowerOp::Reboot));
     }
 
-    fn buf_writer() -> Writer {
+    fn buf_writer(table: Option<Table>) -> Writer {
         Writer {
             sink: Sink::Buf(Vec::new()),
             stop: Stop::new(),
-            shared: Shared::new(None, false),
+            shared: Shared::new(table, false),
         }
     }
 
@@ -639,23 +639,45 @@ mod tests {
         }
     }
 
+    fn csv_rows(path: &Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .skip(1)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
     #[test]
     fn paused_writer_skips_frames_and_writes_replies() {
-        let mut writer = buf_writer();
-        writer.enqueue(check_positions()[0]);
-        writer.shared.set_paused(true);
-        writer.write_some().expect("write");
-        assert!(buf(&writer).is_empty());
-
-        writer.shared.set_paused(false);
+        let path = std::env::temp_dir().join(format!(
+            "trck-pause-{}-{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let mut writer = buf_writer(Some(Table::open(&path).expect("table")));
         writer.enqueue(check_positions()[0]);
         writer.write_some().expect("write");
         assert_eq!(buf(&writer).len(), FRAME_LEN);
+        assert_eq!(csv_rows(&path).len(), 1);
 
         writer.shared.set_paused(true);
+        thread::sleep(Duration::from_millis(1100));
+        let age = writer.shared.stats().last_fix_age_s;
+        assert!(age >= 1, "{age}");
         writer.enqueue(check_positions()[1]);
         writer.write_some().expect("write");
         assert_eq!(buf(&writer).len(), FRAME_LEN);
+        assert_eq!(csv_rows(&path).len(), 1);
+        thread::sleep(Duration::from_millis(1100));
+        writer.enqueue(check_positions()[2]);
+        let age2 = writer.shared.stats().last_fix_age_s;
+        assert!(age2 > age, "age={age} age2={age2}");
+        assert_eq!(csv_rows(&path).len(), 1);
 
         let (reply, after) = decide(Cmd::Status as u8, false, true, writer.shared.stats());
         assert!(reply.paused);
@@ -671,5 +693,8 @@ mod tests {
         writer.enqueue(check_positions()[1]);
         writer.write_some().expect("write");
         assert_eq!(buf(&writer).len(), FRAME_LEN * 2 + ACK_LEN);
+        assert_eq!(csv_rows(&path).len(), 2);
+        assert_eq!(writer.shared.stats().last_fix_age_s, 0);
+        let _ = std::fs::remove_file(&path);
     }
 }

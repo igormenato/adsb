@@ -44,7 +44,7 @@ nc localhost 30002 | ./trck --hex - --uart /dev/serial0
 
 `--baud` defaults to 115200.
 
-`--allow-power-commands` lets a UART `REBOOT` or `SHUTDOWN` from the ESP32 run `systemctl reboot` or `systemctl poweroff`. Off by default so noise on the line cannot power the Pi off. Run `trck` as a user that may invoke those verbs (root is enough). There is no systemd unit in this repo. `PING`, `STATUS`, `PAUSE`, `RESUME`, and `RESTART` always reply. `PAUSE` keeps decoding and CSV writes but drops new UART frames so resume does not flood. `RESTART` `exec`s this process with the same args.
+`--allow-power-commands` lets a UART `REBOOT` or `SHUTDOWN` from the ESP32 run `systemctl reboot` or `systemctl poweroff`. Off by default so noise on the line cannot power the Pi off. Run `trck` as a user that may invoke those verbs (root is enough). There is no systemd unit in this repo. `PING`, `STATUS`, `PAUSE`, `RESUME`, and `RESTART` always reply. `PAUSE` stops CSV rows and UART frames. The radio stays open. `last_fix_age` keeps growing. Replies still go out. `RESTART` `exec`s this process with the same args.
 
 `--check` sends known frames instead of reading the radio, to check the UART. It repeats those frames every second.
 
