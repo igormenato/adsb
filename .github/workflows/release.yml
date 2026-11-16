@@ -53,21 +53,15 @@ jobs:
   upload:
     needs: release-plz-release
     if: needs.release-plz-release.outputs.releases_created == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
-    env:
-      ZIG_VERSION: "0.17.1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild@0.24.1
-      - run: cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: rustup target add aarch64-unknown-linux-musl
+      - run: cargo build --release --locked --target aarch64-unknown-linux-musl
       - run: cp target/aarch64-unknown-linux-musl/release/trck trck-aarch64
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

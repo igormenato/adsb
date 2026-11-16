@@ -41,3 +41,6 @@ unused_lifetimes = "warn"
 
 [lints.clippy]
 undocumented_unsafe_blocks = "warn"
+
+[profile.release]
+strip = true

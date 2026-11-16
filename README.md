@@ -14,11 +14,13 @@ Wire 3.3 V UART with a common ground. Do not use a 5 V adapter. Leave the serial
 
 ## Build
 
+Install musl-tools, then on an aarch64 host:
+
 ```
-cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
+cargo build --release --locked --target aarch64-unknown-linux-musl
 ```
 
-Install Zig, then `cargo install --locked cargo-zigbuild`. Copy `target/aarch64-unknown-linux-musl/release/trck`. The static musl binary runs on the Zero 2 W and the Pi 3B with 64-bit Pi OS Lite. The release asset is `trck-aarch64`.
+Copy `target/aarch64-unknown-linux-musl/release/trck`. The static musl binary runs on the Zero 2 W and the Pi 3B with 64-bit Pi OS Lite. The release asset is `trck-aarch64`. On x86, use `cross` or a similar toolchain.
 
 ## Run on the Pi
 
