@@ -1,108 +1,92 @@
 # trck
 
-`trck` writes one UART frame for each airborne position decoded from 1090 MHz ADS-B.
+`trck` decodes 1090 MHz ADS-B on a Raspberry Pi and writes one UART frame for each airborne position. Default live path is RTL-SDR device 0 at 1090 MHz into `/dev/serial0` at 115200 baud. The 34-byte `TRCK` layout is in [ESP32 satellite telemetry](docs/esp32-alert.md). Every flag is in `trck --help`.
+
+## Hardware
+
+```
+./trck doctor
+```
+
+The command prints one line per host check and exits non-zero if a required check fails. It does not send UART frames.
+
+Wire 3.3 V UART with a common ground. Do not use a 5 V adapter. Leave the serial login shell off so the console does not share `/dev/serial0`.
+
+| Pi | ESP32-S3 |
+| --- | --- |
+| GPIO 14 (pin 8) TX | GPIO 11 RX |
+| GPIO 15 (pin 10) RX | GPIO 10 TX |
+| GND (pin 6) | GND |
 
 ## Build
-
-Run the host checks in this order.
-
-1. `cargo fmt --check`
-2. `cargo clippy --locked --all-targets -- -D warnings`
-3. `cargo test --locked`
-
-Build the Pi binary. It is static musl so it copies onto Raspberry Pi OS Lite without matching glibc. That target compiles C (zstd, from rs1090). Install Zig, then `cargo install --locked cargo-zigbuild`. CI uses `mlugg/setup-zig`.
 
 ```
 cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
 ```
 
-Copy `target/aarch64-unknown-linux-musl/release/trck`. `aarch64-unknown-linux-musl` is the Zero 2 W on 64-bit Lite. The same binary runs on a Pi 3B on 64-bit Lite. The release asset is `trck-aarch64`. A push to `main` opens or updates a release PR (crate version and `CHANGELOG.md`). Merging that PR tags `vX.Y.Z` and attaches the asset.
+Install Zig, then `cargo install --locked cargo-zigbuild`. Copy `target/aarch64-unknown-linux-musl/release/trck`. That static musl binary is the Zero 2 W and the Pi 3B on 64-bit Lite. The release asset is `trck-aarch64`.
 
-## Run
-
-Disable the serial login shell and leave the UART enabled. The console shares the port if you do not.
+## Run on the Pi
 
 ```
 ./trck
 ```
 
-That opens RTL-SDR device 0 at 1090 MHz and writes frames to `/dev/serial0`.
+Tuner gain defaults to 49.6 dB. `--gain auto` is tuner AGC. `--uart -` writes frames to stdout. `--table` defaults to `aircraft.csv`. `--allow-power-commands` lets a UART `REBOOT` or `SHUTDOWN` run `systemctl reboot` or `systemctl poweroff`.
 
-`./trck doctor` probes this machine: RTL-SDR USB (nusb, not readsb), `/dev/serial0`, serial console, `aircraft.csv`, plugdev, and the clock. One line per check. Non-zero exit if a required check fails. It does not send UART frames; `--check` does that.
+```
+./trck --check
+```
 
-## Flags
-
-`--rtlsdr N` selects the dongle. Default is `0`.
-
-`--gain` sets RTL-SDR tuner gain in dB. Default is `49.6`. `--gain auto` is the tuner AGC, not readsb adaptive gain.
-
-`--hex HOST:PORT` reads newline hex Mode S frames instead of the dongle. AVR (`*8D...;` and `@` timestamp lines) from dump1090 `--net` port 30002, readsb, and rtl_adsb is accepted. `--hex -` reads the same lines from stdin.
+Known frames repeat every second. Use this to prove the UART without a radio.
 
 ```
 nc localhost 30002 | ./trck --hex - --uart /dev/serial0
 ```
 
-`--uart` defaults to `/dev/serial0`. Pass `--uart -` to write frames to stdout.
-
-`--baud` defaults to 115200.
-
-`--allow-power-commands` lets a UART `REBOOT` or `SHUTDOWN` from the ESP32 run `systemctl reboot` or `systemctl poweroff`. Off by default so noise on the line cannot power the Pi off. Run `trck` as a user that may invoke those verbs (root is enough). There is no systemd unit in this repo. `PING`, `STATUS`, `PAUSE`, `RESUME`, and `RESTART` always reply. `PAUSE` stops CSV rows and UART frames. The radio stays open. `last_fix_age` keeps growing. Replies still go out. `RESTART` `exec`s this process with the same args.
-
-`--check` sends known frames instead of reading the radio, to check the UART. It repeats those frames every second.
-
-`--table PATH` appends one CSV row for each position queued for UART. Default is `aircraft.csv` in the working directory. The file stays append-only for the process. Timestamp is the Pi clock, not contest reception.
-
-`trck replay FILE` reads a CSV of `ts,hex` lines (unix seconds, raw Mode S) and feeds each frame through the same decoder and UART/CSV path as the radio, using the file timestamps. Blank and `#` comment lines are skipped. Malformed lines are counted and skipped. `--speed N` scales the gap between frames (`1` is recorded timing, `0` or `max` is as fast as possible). `--uart` and `--table` work as they do for the other modes. The table timestamp is the recording time.
-
-`doctor` is a host probe. It does not open the radio or the UART.
-
-## IQ
-
-`--iq FILE` reads an RTL-SDR cu8 capture (interleaved unsigned 8-bit I/Q) and runs the same `demodulate2400` path as the dongle. `--iq-rate` is the file's sample rate. Default is 2400000. Any other rate is resampled to 2.4 MS/s before demodulation.
+`--hex` reads newline hex or AVR Mode S (`*8D...;` and `@` timestamp lines) from dump1090 `--net` port 30002, readsb, or rtl_adsb. `--hex HOST:PORT` opens that socket. `--hex -` reads stdin.
 
 ```
-rtl_sdr -f 1090e6 -s 2.4e6 capture.cu8
 ./trck --iq capture.cu8 --uart -
-./trck --iq capture.cu8 --iq-rate 2000000 --uart -
 ```
 
-`trck sim --iq-out FILE` writes a synthetic cu8 file from a scenario. `--iq-snr` adds seeded Gaussian noise.
+`--iq` is an RTL-SDR cu8 capture on the same `demodulate2400` path as the dongle. `--iq-rate` is the file sample rate and defaults to 2400000.
 
-`scripts/fetch-iq.sh` downloads two public recordings into gitignored `tests/data/`. Then `cargo test -- --ignored` runs them. [antirez/dump1090](https://github.com/antirez/dump1090) `testfiles/modes1.bin` is cu8 at 2 MS/s, packed with `--snip`, BSD-3-Clause, Copyright (c) 2012-present Salvatore Sanfilippo. The Porto AWEC 2026 set ([DOI 10.5281/zenodo.23342597](https://doi.org/10.5281/zenodo.23342597)) is CC BY 4.0 by Conrado Guimarães da Costa, Luís Tiago Paiva, and Fernando Fontes (FEUP).
-
-## Stress
-
-`trck stress` generates Mode S / ADS-B in-process and runs the same decode → queue → UART/CSV path as live. It does not open the RTL-SDR.
+## ESP32
 
 ```
-./trck stress --uart - --aircraft 32 --rate 0 --seconds 10 --emergency 0.1
+pio run -d esp32/pio -t upload
 ```
 
-`--rate 0` is as fast as possible. `--messages N` stops after N generated frames. Omit both `--seconds` and `--messages` to run until Ctrl-C.
+Board id is `esp32-s3-devkitc-1`. Arduino IDE settings, Serial words, and firmware trees are in [ESP32-S3 UART ingest](esp32/README.md).
 
-`--uart` and `--table` are the same as live. On exit it prints `messages`, `fixes`, `dropped`, `csv`, and `elapsed` so you can see the ceiling on a Zero 2 W.
+```
+make -C esp32/host test
+```
 
-The mix is airborne even/odd CPR, BDS 0,8 callsign (`--ident`), BDS 0,9 velocity (`--velocity`), and a `--junk` fraction of CRC-bad or truncated frames. The rest is position. `--emergency` is the fraction of ICAOs that advertise squawk 7700; ordinary traffic never evicts those from the 64-deep UART queue.
+## Test
 
-## Sim
+```
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
 
-`trck sim` writes a scripted Mode S scenario as `ts,hex` lines. Timestamp is seconds. One frame per line. It does not open the RTL-SDR or the UART.
+```
+scripts/fetch-iq.sh
+cargo test --locked -- --ignored
+```
+
+The script puts public recordings in gitignored `tests/data/`. Sources are [antirez/dump1090](https://github.com/antirez/dump1090) `testfiles/modes1.bin` and the Porto AWEC 2026 set ([DOI 10.5281/zenodo.23342597](https://doi.org/10.5281/zenodo.23342597)).
 
 ```
 ./trck sim examples/scenarios/crossing.toml
-./trck sim examples/scenarios/crossing.toml --out frames.csv --truth truth.csv
+./trck replay FILE --uart -
+./trck stress --uart - --aircraft 32 --rate 0 --seconds 10
 ```
 
-Each aircraft has an ICAO, callsign, start lat/lon/alt, heading, ground speed, and a message rate. Squawk is optional. One optional heading change (`turn_at` + `heading_to_deg`) or altitude change (`climb_at` + `alt_to_ft`) per aircraft. The same file yields the same bytes.
+`sim` writes `ts,hex` lines. `replay` runs those lines through the live decoder. `stress` generates Mode S in-process. `--speed` on `replay` scales timing. `0` or `max` is as fast as possible.
 
-`--truth` is `ts,icao,lat,lon,alt_ft` for each encoded position pair.
+## Release
 
-`--iq-out FILE` writes those frames as RTL-SDR cu8. `--iq-rate` defaults to 2400000. `--iq-snr` is optional Gaussian noise in dB.
-
-`examples/scenarios/crossing.toml` is a 7700 aircraft and a crossing pair near GRU. `examples/scenarios/climb.toml` is a single climb in the northern hemisphere. Feed the lines to `trck replay` when you want the live decode path without live traffic.
-
-`--trace` encodes one or more readsb globe_history JSON files with the same scheduler. Ground altitude and missing fields are skipped. `--from` / `--until` are Unix seconds (`timestamp` + `dt`). A day of traces is `traces/xx/trace_full_<icao>.json` inside an [adsblol/globe_history_YYYY](https://github.com/adsblol/globe_history_2026) release tarball (`gzip -dc` the file, then `./trck sim --trace trace_full_<icao>.json --out frames.csv --truth truth.csv`).
-
-## Frame
-
-The layout is in [ESP32 satellite telemetry](docs/esp32-alert.md).
+A push to `main` opens or updates a release PR. Merging that PR tags `v` plus the crate version and attaches `trck-aarch64`. Do not push tags by hand.
