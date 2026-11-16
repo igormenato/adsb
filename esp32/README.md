@@ -1,12 +1,12 @@
 # ESP32-S3 UART ingest
 
-Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, `shutdown`, `pause`, `resume`, or `restart` on that Serial to send a 7-byte `TCMD` frame to the Pi. Replies are 21-byte `TACK` frames.
+Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, `shutdown`, `pause`, `resume`, or `restart` on that Serial to send a 7-byte `TCMD` frame to the Pi. Replies are 21-byte `TACK` frames. Type `stats` to print frames received, `crc_fail`, `resync`, and `qdrop` (compare `frames` with `frames_sent` from `status` to measure wire loss; `qdrop` is events dropped when the print queue is full). UART1 RX runs in its own FreeRTOS task. After a `TCMD`, the sketch waits up to 1 s for the matching `TACK` and retries ping/status/pause/resume once. For reboot/shutdown/restart it sends `status` instead of repeating the command. Both attempts failing prints `no reply`.
 
-Open `esp32/trck_uart/trck_uart.ino`. Host check: `make -C esp32/host test`.
+Two firmware trees: Arduino sketch `esp32/trck_uart/trck_uart.ino` (self-contained, protocol inlined) and PlatformIO `esp32/pio` (`src/main.cpp`, protocol in `include/trck_frame.h`). Host check includes the Arduino `.ino` (same as before the shared header, simpler than pointing at the PlatformIO header): `make -C esp32/host test`.
 
-Board package: esp32 by Espressif Systems 3.3.x.
+Board package: esp32 by Espressif Systems 3.3.x. PlatformIO board id: `esp32-s3-devkitc-1` (ESP32-S3-DevKitC-1).
 
-Arduino IDE board settings:
+## Arduino IDE
 
 - Board: ESP32S3 Dev Module
 - USB CDC On Boot: Enabled
@@ -16,6 +16,16 @@ Arduino IDE board settings:
 - Serial Monitor: 115200 baud
 
 If the monitor is empty because you are on the DevKit UART/COM port, set USB CDC On Boot to Disabled so `Serial` is UART0.
+
+## PlatformIO
+
+Standalone PlatformIO C++ project in `esp32/pio`. From that directory:
+
+```
+pio run
+pio run -t upload
+pio device monitor
+```
 
 ## Wire
 
@@ -42,10 +52,11 @@ On the USB Serial Monitor, send one word and a newline.
 | `restart` | Reply, drain the UART, then `exec` the same binary and args |
 | `reboot` | `systemctl reboot` if `trck` was started with `--allow-power-commands` |
 | `shutdown` | `systemctl poweroff` with the same flag |
+| `stats` | ESP32 only: print `frames`, `crc_fail`, `resync`, `qdrop`. No UART command |
 
 Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. `trck` must run as a user that may call those `systemctl` verbs, typically root. There is no systemd unit in this repo. Pause, resume, and restart do not need the flag. Restart uses `exec` so the process comes back without a unit. While paused, new positions are discarded at the UART/CSV entry. `last_fix_age` keeps growing. Resume does not flood the wire.
 
-Change `kPiRxGpio` / `kPiTxGpio` in `trck_uart.ino` if those pins are not free on the board.
+Change `kPiRxGpio` / `kPiTxGpio` in the sketch and in `esp32/pio/src/main.cpp` if those pins are not free on the board.
 
 ## What you should see
 
@@ -64,4 +75,3 @@ icao=400ABC callsign=SIM0001 lat=10.5000000 lon=-20.2500000 alt=12000 gs=280 tra
 icao=40621D callsign=BAW123 lat=52.2572021 lon=3.9193726 alt=38000 gs=450 track=271 emergency=0 none crc_fail=0 resync=0
 icao=4CA123 callsign=EZY456 lat=51.4700000 lon=-0.4500000 alt=8000 gs=220 track=180 emergency=1 general crc_fail=0 resync=0
 ```
-
