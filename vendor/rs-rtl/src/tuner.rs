@@ -50,7 +50,7 @@ impl TunerType {
             Self::Fc0013 => DemodPath {
                 zero_if: true,
                 i_adc_only: false,
-                invert_spectrum: true,
+                invert_spectrum: false,
                 if_hz: 0,
             },
             Self::R820T | Self::R828D => DemodPath {

@@ -160,7 +160,7 @@ fn fc0013_demod_is_zero_if() {
     let path = TunerType::Fc0013.demod_path();
     assert!(path.zero_if);
     assert!(!path.i_adc_only);
-    assert!(path.invert_spectrum);
+    assert!(!path.invert_spectrum);
     assert_eq!(path.if_hz, 0);
 }
 
