@@ -16,7 +16,7 @@ Build the Pi binary. It is static musl so it copies onto Raspberry Pi OS Lite wi
 cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
 ```
 
-Copy `target/aarch64-unknown-linux-musl/release/trck`. `aarch64-unknown-linux-musl` is the Zero 2 W on 64-bit Lite. The same binary runs on a Pi 3B on 64-bit Lite. The release asset is `trck-aarch64`. A push to `trck-v2` opens or updates a release PR (crate version and `CHANGELOG.md`). Merging that PR tags `vX.Y.Z` and attaches the asset.
+Copy `target/aarch64-unknown-linux-musl/release/trck`. `aarch64-unknown-linux-musl` is the Zero 2 W on 64-bit Lite. The same binary runs on a Pi 3B on 64-bit Lite. The release asset is `trck-aarch64`. A push to `main` opens or updates a release PR (crate version and `CHANGELOG.md`). Merging that PR tags `vX.Y.Z` and attaches the asset.
 
 ## Run
 

@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [trck-v2]
+    branches: [main]
 
 jobs:
   release-plz-pr:
