@@ -26,3 +26,15 @@ jobs:
           python-version: "3.12"
       - run: pip install platformio
       - run: pio run -d esp32/pio
+
+  aarch64-musl:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+      - run: rustup target add aarch64-unknown-linux-musl
+      - run: cargo build --release --locked --target aarch64-unknown-linux-musl
+      - run: |
+          file target/aarch64-unknown-linux-musl/release/trck
+          ls -l target/aarch64-unknown-linux-musl/release/trck
+
