@@ -7,7 +7,7 @@ FIXTURE ?= $(CURDIR)/../../tests/fixtures/replay.uart
 test: test_trck_frame
 	./test_trck_frame "$(FIXTURE)"
 
-test_trck_frame: test_trck_frame.c ../trck_uart/trck_frame.h
+test_trck_frame: test_trck_frame.c ../trck_uart/trck_uart.ino
 	$(CC) $(CFLAGS) -o $@ test_trck_frame.c
 
 clean:
