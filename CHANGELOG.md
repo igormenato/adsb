@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/igormenato/adsb/compare/v0.3.2...v0.3.3) - 2026-11-16
+
+### Added
+
+- *(rtlsdr)* add FC0013 tuner support ([#93](https://github.com/igormenato/adsb/pull/93))
+
+### Other
+
+- *(release)* build aarch64 musl natively on ubuntu-24.04-arm ([#92](https://github.com/igormenato/adsb/pull/92))
+- rewrite the README into short task sections ([#90](https://github.com/igormenato/adsb/pull/90))
+
 ### Added
 
 - FC0013 tuner support for generic RTL2832U dongles
