@@ -34,6 +34,8 @@ That opens RTL-SDR device 0 at 1090 MHz and writes frames to `/dev/serial0`.
 
 `--rtlsdr N` selects the dongle. Default is `0`.
 
+`--gain` sets RTL-SDR tuner gain in dB. Default is `49.6`. `--gain auto` is the tuner AGC, not readsb adaptive gain.
+
 `--hex HOST:PORT` reads newline hex Mode S frames instead of the dongle. AVR (`*8D...;` and `@` timestamp lines) from dump1090 `--net` port 30002, readsb, and rtl_adsb is accepted. `--hex -` reads the same lines from stdin.
 
 ```

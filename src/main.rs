@@ -40,6 +40,9 @@ struct Args {
     /// RTL-SDR device index. Used when --check and --hex are off.
     #[arg(long, default_value_t = 0)]
     rtlsdr: usize,
+    /// Tuner gain in dB, or `auto` for tuner AGC (not readsb adaptive gain).
+    #[arg(long, default_value_t, value_parser = parse_gain, value_name = "auto|dB")]
+    gain: Gain,
     /// Newline hex or AVR Mode S frames. HOST:PORT, or - for stdin.
     #[arg(long, conflicts_with = "check", value_name = "HOST:PORT|-")]
     hex: Option<String>,
@@ -140,6 +143,47 @@ fn install_ctrlc(stop: Arc<Stop>) {
 enum Pace {
     Max,
     Rate(f64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gain {
+    Auto,
+    Manual(i32),
+}
+
+impl Default for Gain {
+    fn default() -> Self {
+        Self::Manual(radio::GAIN_TENTHS_DB)
+    }
+}
+
+impl std::fmt::Display for Gain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Manual(t) => write!(f, "{:.1}", f64::from(*t) / 10.0),
+        }
+    }
+}
+
+impl Gain {
+    fn rtlsdr(self) -> Option<i32> {
+        match self {
+            Self::Auto => None,
+            Self::Manual(t) => Some(t),
+        }
+    }
+}
+
+fn parse_gain(text: &str) -> Result<Gain, String> {
+    if text.eq_ignore_ascii_case("auto") {
+        return Ok(Gain::Auto);
+    }
+    let n: f64 = text.parse().map_err(|_| format!("invalid --gain {text}"))?;
+    if !n.is_finite() {
+        return Err(format!("invalid --gain {text}"));
+    }
+    Ok(Gain::Manual((n * 10.0).round() as i32))
 }
 
 fn parse_pace(text: &str) -> Result<Pace, String> {
@@ -255,7 +299,7 @@ fn main() -> ExitCode {
         args.output.baud,
         args.output.table.display()
     );
-    run_radio(args.rtlsdr, writer, stop)
+    run_radio(args.rtlsdr, args.gain.rtlsdr(), writer, stop)
 }
 
 fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<Stop>) -> ExitCode {
@@ -446,7 +490,7 @@ fn unix_time(ts: f64) -> SystemTime {
     UNIX_EPOCH + Duration::new(secs as u64, nanos)
 }
 
-fn run_radio(device: usize, writer: Writer, stop: Arc<Stop>) -> ExitCode {
+fn run_radio(device: usize, gain: Option<i32>, writer: Writer, stop: Arc<Stop>) -> ExitCode {
     let shared = Arc::clone(&writer.shared);
     let radio_stop = Arc::clone(&stop);
     let radio = thread::spawn(move || {
@@ -457,6 +501,7 @@ fn run_radio(device: usize, writer: Writer, stop: Arc<Stop>) -> ExitCode {
         {
             Ok(rt) => rt.block_on(radio::run_rtlsdr(
                 device,
+                gain,
                 move |fix| {
                     writer::log_fix(&fix);
                     if let Some(dropped) = enqueue_shared.push(fix) {
@@ -482,4 +527,34 @@ fn sleep_until_stop(stop: &Stop, timeout: Duration) {
         .wake
         .wait_timeout_while(flag, timeout, |set| !*set)
         .unwrap_or_else(PoisonError::into_inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_gain_auto() {
+        assert_eq!(parse_gain("auto").unwrap(), Gain::Auto);
+        assert_eq!(parse_gain("AUTO").unwrap(), Gain::Auto);
+    }
+
+    #[test]
+    fn parse_gain_db() {
+        assert_eq!(
+            parse_gain("49.6").unwrap(),
+            Gain::Manual(radio::GAIN_TENTHS_DB)
+        );
+        assert_eq!(parse_gain("40.2").unwrap(), Gain::Manual(402));
+        assert_eq!(parse_gain("0").unwrap(), Gain::Manual(0));
+        assert_eq!(Gain::default(), Gain::Manual(radio::GAIN_TENTHS_DB));
+    }
+
+    #[test]
+    fn parse_gain_invalid() {
+        assert!(parse_gain("nope").is_err());
+        assert!(parse_gain("").is_err());
+        assert!(parse_gain("nan").is_err());
+        assert!(parse_gain("inf").is_err());
+    }
 }
