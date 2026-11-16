@@ -20,6 +20,17 @@ cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
 
 Install Zig, then `cargo install --locked cargo-zigbuild`. Copy `target/aarch64-unknown-linux-musl/release/trck`. The static musl binary runs on the Zero 2 W and the Pi 3B with 64-bit Pi OS Lite. The release asset is `trck-aarch64`.
 
+## Docker
+
+```
+docker buildx build --target test .
+docker buildx build --target pio .
+docker buildx build --target artifact --output type=local,dest=dist .
+docker compose run --rm dev
+```
+
+Zig and cargo-zigbuild match the release workflow.
+
 ## Run on the Pi
 
 ```

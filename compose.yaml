@@ -1,0 +1,23 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    image: trck:dev
+    working_dir: /src
+    stdin_open: true
+    tty: true
+    volumes:
+      - .:/src
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/src/target
+      - pio:/home/trck/.platformio
+    command: bash
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  cargo-target:
+  pio:

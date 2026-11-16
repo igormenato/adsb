@@ -26,3 +26,22 @@ jobs:
           python-version: "3.12"
       - run: pip install platformio
       - run: pio run -d esp32/pio
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          cache-from: type=gha,scope=trck
+          cache-to: type=gha,mode=max,scope=trck
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: pio
+          cache-from: type=gha,scope=trck
+          cache-to: type=gha,mode=max,scope=trck
+

@@ -1,0 +1,15 @@
+.git
+.github
+.gitignore
+.cursor
+target
+**/target
+**/.pio
+dist
+tests/data
+docs
+*.md
+AGENTS.md
+compose.yaml
+Dockerfile
+.dockerignore
