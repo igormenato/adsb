@@ -36,12 +36,12 @@ jobs:
         with:
           context: .
           target: test
-          cache-from: type=gha,scope=trck
-          cache-to: type=gha,mode=max,scope=trck
+          cache-from: type=gha,scope=trck-test
+          cache-to: type=gha,mode=max,scope=trck-test
       - uses: docker/build-push-action@v6
         with:
           context: .
           target: pio
-          cache-from: type=gha,scope=trck
-          cache-to: type=gha,mode=max,scope=trck
+          cache-from: type=gha,scope=trck-pio
+          cache-to: type=gha,mode=max,scope=trck-pio
 
