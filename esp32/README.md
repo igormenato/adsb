@@ -2,7 +2,7 @@
 
 Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, `shutdown`, `pause`, `resume`, or `restart` on that Serial to send a 7-byte `TCMD` frame to the Pi. Replies are 21-byte `TACK` frames. Type `stats` to print frames received, `crc_fail`, `resync`, and `qdrop` (compare `frames` with `frames_sent` from `status` to measure wire loss; `qdrop` is events dropped when the print queue is full). UART1 RX runs in its own FreeRTOS task. After a `TCMD`, the sketch waits up to 1 s for the matching `TACK` and retries ping/status/pause/resume once. For reboot/shutdown/restart it sends `status` instead of repeating the command. Both attempts failing prints `no reply`.
 
-Two copies of the same firmware: Arduino sketch `esp32/trck_uart/trck_uart.ino` (self-contained) and PlatformIO `esp32/pio` (`src/trck_uart.ino`). Host check includes the Arduino `.ino` (same as before the shared header): `make -C esp32/host test`. `sh esp32/check-protocol.sh` diffs those two files so they cannot drift.
+Two firmware trees: Arduino sketch `esp32/trck_uart/trck_uart.ino` (self-contained, protocol inlined) and PlatformIO `esp32/pio` (`src/main.cpp`, protocol in `include/trck_frame.h`). Host check includes the Arduino `.ino` (same as before the shared header, simpler than pointing at the PlatformIO header): `make -C esp32/host test`.
 
 Board package: esp32 by Espressif Systems 3.3.x. PlatformIO board id: `esp32-s3-devkitc-1` (ESP32-S3-DevKitC-1).
 
@@ -19,7 +19,7 @@ If the monitor is empty because you are on the DevKit UART/COM port, set USB CDC
 
 ## PlatformIO
 
-Standalone project in `esp32/pio` (its own `src/trck_uart.ino`). From that directory:
+Standalone PlatformIO C++ project in `esp32/pio`. From that directory:
 
 ```
 pio run
@@ -56,7 +56,7 @@ On the USB Serial Monitor, send one word and a newline.
 
 Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. `trck` must run as a user that may call those `systemctl` verbs, typically root. There is no systemd unit in this repo. Pause, resume, and restart do not need the flag. Restart uses `exec` so the process comes back without a unit. While paused, new positions are discarded at the UART/CSV entry. `last_fix_age` keeps growing. Resume does not flood the wire.
 
-Change `kPiRxGpio` / `kPiTxGpio` in both copies if those pins are not free on the board.
+Change `kPiRxGpio` / `kPiTxGpio` in the sketch and in `esp32/pio/src/main.cpp` if those pins are not free on the board.
 
 ## What you should see
 
