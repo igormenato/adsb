@@ -18,4 +18,4 @@ Copy `target/aarch64-unknown-linux-musl/release/trck`. The release asset is `trc
 
 ## Release
 
-Bump the crate version on `main`. Tag `v` plus that version and push the tag. GitHub Actions publishes `trck-aarch64`. Do not `workflow_dispatch`; a tag push is enough.
+A push to `trck-v2` opens or updates a release PR. Merging it tags `v` plus the crate version and attaches `trck-aarch64`. Do not push tags by hand.
