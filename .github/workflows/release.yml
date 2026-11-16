@@ -2,27 +2,64 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag
-        required: true
-        type: string
+    branches: [trck-v2]
 
 jobs:
-  release:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+  release-plz-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-plz-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+      - id: release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - id: tag
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: echo "tag=$(echo "$RELEASES" | jq -r '.[0].tag')" >> "$GITHUB_OUTPUT"
+
+  upload:
+    needs: release-plz-release
+    if: needs.release-plz-release.outputs.releases_created == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
-      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       ZIG_VERSION: "0.17.1"
     steps:
       - uses: actions/checkout@v7
-      - run: grep -q "^version = \"${TAG#v}\"" Cargo.toml
       - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
       - uses: mlugg/setup-zig@v2
         with:
@@ -34,9 +71,5 @@ jobs:
       - run: cp target/aarch64-unknown-linux-musl/release/trck trck-aarch64
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >
-          gh release create "${TAG}"
-          trck-aarch64
-          --title "${TAG}"
-          --generate-notes
-          --target "${{ github.sha }}"
+          TAG: ${{ needs.release-plz-release.outputs.tag }}
+        run: gh release upload "${TAG}" trck-aarch64
