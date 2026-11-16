@@ -29,6 +29,10 @@ toml = "0.8"
 
 [dev-dependencies]
 nix = { version = "0.31", features = ["ioctl"] }
+rs-rtl = { path = "vendor/rs-rtl" }
+
+[patch.crates-io]
+rs-rtl = { path = "vendor/rs-rtl" }
 
 [lints.rust]
 ambiguous_negative_literals = "warn"
