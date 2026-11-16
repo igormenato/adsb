@@ -18,4 +18,4 @@ Copy `target/aarch64-unknown-linux-musl/release/trck`. The release asset is `trc
 
 ## Release
 
-A push to `trck-v2` opens or updates a release PR. Merging it tags `v` plus the crate version and attaches `trck-aarch64`. Do not push tags by hand.
+A push to `main` opens or updates a release PR. Merging it tags `v` plus the crate version and attaches `trck-aarch64`. Do not push tags by hand.
