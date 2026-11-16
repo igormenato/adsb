@@ -1,8 +1,6 @@
 # rs-rtl
 
-A pure-Rust library for RTL-SDR devices (RTL2832U + R820T/R828D/FC0013) using [`nusb`](https://docs.rs/nusb) for native USB communication. Supports standard RTL-SDR dongles and RTL-SDR Blog V4.
-
-This tree is `rs-rtl` 0.5.2 from crates.io, vendored so trck can add FC0013. MIT, Xavier Olive / desperado.
+A pure-Rust library for RTL-SDR devices (RTL2832U + R820T/R828D) using [`nusb`](https://docs.rs/nusb) for native USB communication. Supports standard RTL-SDR dongles and RTL-SDR Blog V4.
 
 ## Overview
 
@@ -17,7 +15,7 @@ This tree is `rs-rtl` 0.5.2 from crates.io, vendored so trck can add FC0013. MIT
 ## Features
 
 - No libusb / C dependency — pure Rust USB via `nusb`
-- Automatic tuner detection via I2C probing (R820T at 0x34, R828D at 0x74, FC0013 at 0xC6)
+- Automatic tuner detection via I2C probing (R820T at 0x34, R828D at 0x74)
 - 29 discrete gain steps from 0.0 to 49.6 dB
 - Sample rates from 225 kS/s to 3.2 MS/s
 - Bias-T (phantom power) control with EEPROM override support

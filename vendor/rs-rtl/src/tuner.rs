@@ -16,8 +16,6 @@
 /// Data read from the R82xx has **bit-reversed** byte order. Every byte read
 /// must be passed through [`bit_reverse`] before use. Writes are normal order.
 /// Maximum I2C message length is 8 bytes.
-use std::time::Duration;
-
 use tracing::{debug, trace, warn};
 
 use crate::device::{Device, I2cBus};
@@ -74,38 +72,22 @@ pub const R828D_I2C_ADDR: u8 = 0x74;
 /// Expected value at register 0x00 for R82xx identification.
 const R82XX_CHECK_VAL: u8 = 0x69;
 
-/// Probe table: I2C address and chip-id at register 0x00.
-#[derive(Debug)]
-pub struct KnownTuner {
-    pub kind: TunerType,
-    pub addr: u8,
-    pub chip_id: u8,
-}
-
 /// Known tuners to probe during detection.
-pub const KNOWN_TUNERS: &[KnownTuner] = &[
-    KnownTuner {
-        kind: TunerType::R820T,
-        addr: R820T_I2C_ADDR,
-        chip_id: R82XX_CHECK_VAL,
-    },
-    KnownTuner {
-        kind: TunerType::R828D,
-        addr: R828D_I2C_ADDR,
-        chip_id: R82XX_CHECK_VAL,
-    },
-    KnownTuner {
-        kind: TunerType::Fc0013,
-        addr: fc0013::I2C_ADDR,
-        chip_id: fc0013::CHIP_ID,
-    },
+pub const KNOWN_TUNERS: &[(TunerType, u8)] = &[
+    (TunerType::R820T, R820T_I2C_ADDR),
+    (TunerType::R828D, R828D_I2C_ADDR),
+    (TunerType::Fc0013, fc0013::I2C_ADDR),
 ];
 
 /// Identify the tuner by chip id at register 0x00.
 pub fn probe(bus: &impl I2cBus) -> Result<(TunerType, u8)> {
-    for t in KNOWN_TUNERS {
-        if bus.i2c_read_reg(t.addr, 0x00).ok() == Some(t.chip_id) {
-            return Ok((t.kind, t.addr));
+    for &(kind, addr) in KNOWN_TUNERS {
+        let id = match kind {
+            TunerType::Fc0013 => fc0013::CHIP_ID,
+            TunerType::R820T | TunerType::R828D => R82XX_CHECK_VAL,
+        };
+        if bus.i2c_read_reg(addr, 0x00).ok() == Some(id) {
+            return Ok((kind, addr));
         }
     }
     Err(Error::TunerNotFound)
@@ -1308,3 +1290,5 @@ impl Tuner {
         }
     }
 }
+
+use std::time::Duration;

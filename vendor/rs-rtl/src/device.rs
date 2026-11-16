@@ -15,8 +15,6 @@
 /// - **Demod write**: wValue=(addr<<8)|0x20, wIndex=0x10|page
 ///
 /// Reads are decoded as little-endian, writes are encoded as big-endian.
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::time::Duration;
 
 use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
@@ -26,7 +24,6 @@ use tracing::{debug, trace};
 use crate::error::{Error, Result};
 
 /// I2C writes and reads used by tuner code. [`Device`] is the USB bridge.
-/// [`FakeI2c`] is the in-memory stand-in for tests.
 pub trait I2cBus {
     fn i2c_write(&self, addr: u8, data: &[u8]) -> Result<()>;
     fn i2c_read(&self, addr: u8, len: u16) -> Result<Vec<u8>>;
@@ -365,89 +362,5 @@ impl I2cBus for Device {
 
     fn i2c_read_reg(&self, addr: u8, reg: u8) -> Result<u8> {
         Device::i2c_read_reg(self, addr, reg)
-    }
-}
-
-/// In-memory I2C devices keyed by 8-bit bridge address.
-#[derive(Clone, Debug, Default)]
-pub struct FakeI2c {
-    chips: RefCell<HashMap<u8, Chip>>,
-}
-
-#[derive(Clone, Debug)]
-struct Chip {
-    regs: [u8; 256],
-    ptr: u8,
-}
-
-impl FakeI2c {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Insert a chip and set register 0x00 to `chip_id`.
-    pub fn with_chip(addr: u8, chip_id: u8) -> Self {
-        let bus = Self::new();
-        bus.set(addr, 0x00, chip_id);
-        bus
-    }
-
-    pub fn set(&self, addr: u8, reg: u8, val: u8) {
-        let mut chips = self.chips.borrow_mut();
-        let chip = chips.entry(addr).or_insert_with(Chip::new);
-        chip.regs[reg as usize] = val;
-    }
-
-    pub fn get(&self, addr: u8, reg: u8) -> u8 {
-        self.chips
-            .borrow()
-            .get(&addr)
-            .map(|c| c.regs[reg as usize])
-            .unwrap_or(0)
-    }
-}
-
-impl Chip {
-    fn new() -> Self {
-        Self {
-            regs: [0; 256],
-            ptr: 0,
-        }
-    }
-}
-
-impl I2cBus for FakeI2c {
-    fn i2c_write(&self, addr: u8, data: &[u8]) -> Result<()> {
-        if data.is_empty() {
-            return Ok(());
-        }
-        let mut chips = self.chips.borrow_mut();
-        let chip = chips.entry(addr).or_insert_with(Chip::new);
-        chip.ptr = data[0];
-        for (i, &b) in data.iter().skip(1).enumerate() {
-            let idx = chip.ptr as usize + i;
-            if idx < 256 {
-                chip.regs[idx] = b;
-            }
-        }
-        if data.len() > 1 {
-            chip.ptr = data[0].wrapping_add((data.len() - 1) as u8);
-        }
-        // FC0013 VCO cal: after clearing 0x0e, the chip reports a mid-range code.
-        if data == [0x0e, 0x00] {
-            chip.regs[0x0e] = 0x10;
-        }
-        Ok(())
-    }
-
-    fn i2c_read(&self, addr: u8, len: u16) -> Result<Vec<u8>> {
-        let mut chips = self.chips.borrow_mut();
-        let chip = chips.entry(addr).or_insert_with(Chip::new);
-        let mut out = Vec::with_capacity(len as usize);
-        for i in 0..len as usize {
-            let idx = chip.ptr as usize + i;
-            out.push(if idx < 256 { chip.regs[idx] } else { 0 });
-        }
-        Ok(out)
     }
 }

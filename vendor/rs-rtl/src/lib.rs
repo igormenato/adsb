@@ -2,7 +2,7 @@
 //!
 //! This crate provides a complete RTL-SDR device driver built on [`nusb`] for
 //! native async multi-transfer USB bulk I/O. It supports the R820T and R828D
-//! tuners (including RTL-SDR Blog V4) and the Fitipower FC0013.
+//! tuners (including RTL-SDR Blog V4).
 //!
 //! # Key Features
 //!
@@ -38,12 +38,11 @@ pub mod rtlsdr;
 pub mod tuner;
 
 pub use error::{Error, Result};
-pub use fc0013::Fc0013;
 pub use rtlsdr::{
     AsyncReadControlHandle, AsyncReadHandle, BoardVariant, DEF_RTL_XTAL_FREQ, DeviceDescriptor,
     DeviceDescriptors, DeviceId, NUM_TRANSFERS, RECOMMENDED_QUEUE_DEPTH, RtlSdr, TRANSFER_BUF_SIZE,
 };
-pub use tuner::{GAIN_VALUES, R82XX_IF_FREQ, TunerType, probe};
+pub use tuner::{GAIN_VALUES, R82XX_IF_FREQ, TunerType};
 
 /// RTL-SDR USB Vendor ID (Realtek).
 pub const RTL_USB_VID: u16 = 0x0bda;

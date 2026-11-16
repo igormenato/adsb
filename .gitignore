@@ -1,4 +1,5 @@
 /target
+/vendor/rs-rtl/target
 /tests/data/
 /esp32/host/test_trck_frame
 /esp32/pio/.pio
