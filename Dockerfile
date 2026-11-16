@@ -33,59 +33,61 @@ ENV PATH="/opt/zig:${PATH}"
 COPY rust-toolchain.toml .
 RUN rustup component add rustfmt clippy \
  && rustup target add aarch64-unknown-linux-musl
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo install cargo-zigbuild --version "${CARGO_ZIGBUILD_VERSION}" --locked
+RUN cargo install cargo-zigbuild --version "${CARGO_ZIGBUILD_VERSION}" --locked \
+ && rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 RUN groupadd --gid 1000 trck \
  && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash trck \
  && mkdir -p /src/target /home/trck/.platformio /usr/local/cargo/registry /usr/local/cargo/git \
  && chown -R trck:trck /src /home/trck/.platformio /usr/local/cargo/registry /usr/local/cargo/git
 USER trck
 
-FROM base AS deps
-COPY --chown=trck:trck rust-toolchain.toml Cargo.toml Cargo.lock ./
-RUN mkdir src \
- && printf 'fn main() {}\n' > src/main.rs \
- && printf '\n' > src/lib.rs
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,uid=1000,gid=1000,sharing=locked \
-    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,uid=1000,gid=1000,sharing=locked \
-    cargo fetch --locked
+FROM base AS chef
+ARG CARGO_CHEF_VERSION=0.1.78
+USER root
+RUN cargo install cargo-chef --version "${CARGO_CHEF_VERSION}" --locked \
+ && rm -rf /usr/local/cargo/registry /usr/local/cargo/git \
+ && mkdir -p /usr/local/cargo/registry /usr/local/cargo/git \
+ && chown -R trck:trck /usr/local/cargo/registry /usr/local/cargo/git
+USER trck
+
+FROM chef AS planner
+COPY --chown=trck:trck . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS deps
+COPY --from=planner /src/recipe.json recipe.json
+RUN cargo chef cook --recipe-path recipe.json --locked --all-targets \
+ && cargo chef cook --recipe-path recipe.json --locked --release --zigbuild --target aarch64-unknown-linux-musl
 
 FROM deps AS build
 RUN rm -rf src
+COPY --chown=trck:trck rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY --chown=trck:trck src ./src
 RUN mkdir out
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,uid=1000,gid=1000,sharing=locked \
-    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,uid=1000,gid=1000,sharing=locked \
-    --mount=type=cache,id=cargo-target,target=/src/target,uid=1000,gid=1000,sharing=locked \
-    cargo zigbuild --release --locked --target aarch64-unknown-linux-musl \
+RUN cargo zigbuild --release --locked --target aarch64-unknown-linux-musl \
  && cp target/aarch64-unknown-linux-musl/release/trck /src/out/trck
 
 FROM deps AS test
 RUN rm -rf src
 COPY --chown=trck:trck . .
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,uid=1000,gid=1000,sharing=locked \
-    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,uid=1000,gid=1000,sharing=locked \
-    --mount=type=cache,id=cargo-target,target=/src/target,uid=1000,gid=1000,sharing=locked \
-    cargo fmt --check \
+RUN cargo fmt --check \
  && cargo clippy --locked --all-targets -- -D warnings \
  && cargo test --locked \
  && make -C esp32/host test
 
-FROM base AS pio
+FROM base AS pio-tools
 ARG PIO_VERSION=6.2.0
 USER root
 RUN pip3 install --break-system-packages --no-cache-dir "platformio==${PIO_VERSION}"
 USER trck
-COPY --chown=trck:trck esp32/pio ./esp32/pio
-RUN --mount=type=cache,id=pio,target=/home/trck/.platformio,uid=1000,gid=1000,sharing=locked \
-    pio run -d esp32/pio
 
-FROM base AS dev
-ARG PIO_VERSION=6.2.0
-USER root
-RUN pip3 install --break-system-packages --no-cache-dir "platformio==${PIO_VERSION}"
-USER trck
+FROM pio-tools AS pio
+COPY --chown=trck:trck esp32/pio/platformio.ini ./esp32/pio/platformio.ini
+RUN pio pkg install -d esp32/pio
+COPY --chown=trck:trck esp32/pio ./esp32/pio
+RUN pio run -d esp32/pio
+
+FROM pio-tools AS dev
 CMD ["bash"]
 
 FROM scratch AS artifact
