@@ -10,7 +10,7 @@ In this order:
 2. `cargo clippy --locked --all-targets -- -D warnings`
 3. `cargo test --locked`
 
-The Pi binary, on an aarch64 host:
+The Pi binary. Install musl-tools, then on an aarch64 host:
 
 `cargo build --release --locked --target aarch64-unknown-linux-musl`
 

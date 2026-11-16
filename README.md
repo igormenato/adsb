@@ -14,7 +14,7 @@ Wire 3.3 V UART with a common ground. Do not use a 5 V adapter. Leave the serial
 
 ## Build
 
-On an aarch64 host:
+Install musl-tools, then on an aarch64 host:
 
 ```
 cargo build --release --locked --target aarch64-unknown-linux-musl

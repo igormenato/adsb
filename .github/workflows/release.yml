@@ -62,9 +62,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: rustup target add aarch64-unknown-linux-musl
       - run: cargo build --release --locked --target aarch64-unknown-linux-musl
-        env:
-          CC_aarch64_unknown_linux_musl: musl-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       - run: cp target/aarch64-unknown-linux-musl/release/trck trck-aarch64
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
