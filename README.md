@@ -4,12 +4,6 @@
 
 ## Hardware
 
-```
-./trck doctor
-```
-
-The command prints one line per host check and exits non-zero if a required check fails. It does not send UART frames.
-
 Wire 3.3 V UART with a common ground. Do not use a 5 V adapter. Leave the serial login shell off so the console does not share `/dev/serial0`.
 
 | Pi | ESP32-S3 |
@@ -24,9 +18,15 @@ Wire 3.3 V UART with a common ground. Do not use a 5 V adapter. Leave the serial
 cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
 ```
 
-Install Zig, then `cargo install --locked cargo-zigbuild`. Copy `target/aarch64-unknown-linux-musl/release/trck`. That static musl binary is the Zero 2 W and the Pi 3B on 64-bit Lite. The release asset is `trck-aarch64`.
+Install Zig, then `cargo install --locked cargo-zigbuild`. Copy `target/aarch64-unknown-linux-musl/release/trck`. The static musl binary runs on the Zero 2 W and the Pi 3B with 64-bit Pi OS Lite. The release asset is `trck-aarch64`.
 
 ## Run on the Pi
+
+```
+./trck doctor
+```
+
+The command prints one line per host check and exits non-zero if a required check fails. It does not send UART frames.
 
 ```
 ./trck
