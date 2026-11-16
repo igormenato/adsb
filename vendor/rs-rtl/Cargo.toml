@@ -1,0 +1,19 @@
+[package]
+name = "rs-rtl"
+version = "0.5.2"
+edition = "2024"
+authors = ["Xavier Olive <git@xoolive.org>"]
+description = "A pure Rust library for RTL-SDR devices using nusb"
+license = "MIT"
+homepage = "https://github.com/xoolive/desperado"
+repository = "https://github.com/xoolive/desperado"
+keywords = ["rtlsdr", "sdr", "radio", "rtl2832u"]
+readme = "readme.md"
+
+[dependencies]
+nusb = "0.2"
+thiserror = "2.0"
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

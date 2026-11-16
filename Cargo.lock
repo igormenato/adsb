@@ -1293,8 +1293,6 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rs-rtl"
 version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2260a79b7705ad9da2b8c4acfa84f0a09f28a02031b768f88bdf32e3faa33c6"
 dependencies = [
  "nusb",
  "thiserror",
@@ -1774,6 +1772,7 @@ dependencies = [
  "hex",
  "nix 0.31.3",
  "num-complex",
+ "rs-rtl",
  "rs1090",
  "serde",
  "serde_json",
