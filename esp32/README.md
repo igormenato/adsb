@@ -1,6 +1,6 @@
 # ESP32-S3 UART ingest
 
-Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, `shutdown`, `pause`, `resume`, or `restart` on that Serial to send a 7-byte `TCMD` frame to the Pi. Replies are 21-byte `TACK` frames. Type `stats` to print frames received, `crc_fail`, and `resync` (compare `frames` with `frames_sent` from `status` to measure loss). UART1 RX runs in its own FreeRTOS task. After a `TCMD`, the sketch waits up to 1 s for the matching `TACK` and retries ping/status/pause/resume once. For reboot/shutdown/restart it sends `status` instead of repeating the command. Both attempts failing prints `no reply`.
+Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, `shutdown`, `pause`, `resume`, or `restart` on that Serial to send a 7-byte `TCMD` frame to the Pi. Replies are 21-byte `TACK` frames. Type `stats` to print frames received, `crc_fail`, `resync`, and `qdrop` (compare `frames` with `frames_sent` from `status` to measure wire loss; `qdrop` is events dropped when the print queue is full). UART1 RX runs in its own FreeRTOS task. After a `TCMD`, the sketch waits up to 1 s for the matching `TACK` and retries ping/status/pause/resume once. For reboot/shutdown/restart it sends `status` instead of repeating the command. Both attempts failing prints `no reply`.
 
 Open `esp32/trck_uart/trck_uart.ino`. Protocol is `esp32/trck_uart/trck_frame.h`. Host check: `make -C esp32/host test`.
 
@@ -52,7 +52,7 @@ On the USB Serial Monitor, send one word and a newline.
 | `restart` | Reply, drain the UART, then `exec` the same binary and args |
 | `reboot` | `systemctl reboot` if `trck` was started with `--allow-power-commands` |
 | `shutdown` | `systemctl poweroff` with the same flag |
-| `stats` | ESP32 only: print `frames`, `crc_fail`, `resync`. No UART command |
+| `stats` | ESP32 only: print `frames`, `crc_fail`, `resync`, `qdrop`. No UART command |
 
 Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. `trck` must run as a user that may call those `systemctl` verbs, typically root. There is no systemd unit in this repo. Pause, resume, and restart do not need the flag. Restart uses `exec` so the process comes back without a unit. While paused, new positions are discarded at the UART/CSV entry. `last_fix_age` keeps growing. Resume does not flood the wire.
 

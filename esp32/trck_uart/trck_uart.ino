@@ -33,6 +33,7 @@ static size_t gLineN;
 static std::atomic<unsigned long> gFrames{0};
 static std::atomic<unsigned long> gCrcFail{0};
 static std::atomic<unsigned long> gResync{0};
+static std::atomic<unsigned long> gQDrop{0};
 
 static void print_fix(const TrckFix *fix) {
     int n = TRCK_CALLSIGN_LEN;
@@ -85,8 +86,9 @@ static void print_evt(const UartEvt *ev) {
 }
 
 static void print_stats(void) {
-    Serial.printf("frames=%lu crc_fail=%lu resync=%lu\n", gFrames.load(std::memory_order_relaxed),
-                  gCrcFail.load(std::memory_order_relaxed), gResync.load(std::memory_order_relaxed));
+    Serial.printf("frames=%lu crc_fail=%lu resync=%lu qdrop=%lu\n",
+                  gFrames.load(std::memory_order_relaxed), gCrcFail.load(std::memory_order_relaxed),
+                  gResync.load(std::memory_order_relaxed), gQDrop.load(std::memory_order_relaxed));
 }
 
 static void write_cmd(uint8_t cmd) {
@@ -177,13 +179,17 @@ static void uart_rx_task(void *arg) {
             gFrames.fetch_add(1, std::memory_order_relaxed);
             ev.kind = kEvtFix;
             ev.fix = fix;
-            (void)xQueueSend(gQ, &ev, 0);
+            if (xQueueSend(gQ, &ev, 0) != pdTRUE) {
+                gQDrop.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         TrckAck ack;
         if (trck_ack_feed(&ack_scan, (uint8_t)n, &ack)) {
             ev.kind = kEvtAck;
             ev.ack = ack;
-            (void)xQueueSend(gQ, &ev, 0);
+            if (xQueueSend(gQ, &ev, 0) != pdTRUE) {
+                gQDrop.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         gCrcFail.store(scan.crc_fail, std::memory_order_relaxed);
         gResync.store(scan.resync, std::memory_order_relaxed);
