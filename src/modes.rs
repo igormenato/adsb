@@ -261,7 +261,7 @@ fn pack56(fields: &[(u8, u32)]) -> [u8; 7] {
     ]
 }
 
-fn cpr_nl(lat: f64) -> u32 {
+pub(crate) fn cpr_nl(lat: f64) -> u32 {
     let lat = lat.abs();
     for (i, bound) in NL_BOUND.iter().enumerate() {
         if lat < *bound {

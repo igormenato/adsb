@@ -1,4 +1,4 @@
-//! Turn Mode S frames into a [`Fix`] when an airborne position solves.
+//! Turn Mode S frames into a [`Fix`] when a CPR position solves.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -7,17 +7,20 @@ use std::fmt;
 use rs1090::decode::adsb::ME;
 use rs1090::decode::bds::bds09::AirborneVelocitySubType;
 use rs1090::decode::bds::bds61::{AircraftStatusType, EmergencyState};
-use rs1090::decode::cpr::{AircraftState, decode_position};
+use rs1090::decode::cpr::CPRFormat;
 use rs1090::decode::{DF, ICAO, Message};
 
+use crate::cpr::{
+    CprBits, GlobalFail, LatLon, airborne_global, local_in_range, pair_window_s, relative, speed_ok,
+};
 use crate::frame::{Aircraft, Callsign, EmergencyKind, Fix, Icao, deg_e7};
 
 /// ICAOs a contest receiver keeps for CPR and ident.
 /// A Pi contest station sees far fewer. Too small a value drops live pairs.
 const TRACKER_CAP: usize = 256;
 
-/// Local CPR in rs1090 is useful for this many seconds.
-const CPR_LOCAL_MAX_AGE_S: f64 = 180.0;
+/// Drop ICAOs idle this long when the map is over capacity.
+const CPR_IDLE_S: f64 = 180.0;
 
 /// One ICAO's identification, velocity, and emergency between position frames.
 #[derive(Clone, Debug, Default)]
@@ -28,24 +31,37 @@ struct Cached {
     emergency: Option<EmergencyKind>,
 }
 
-/// Recency for trim. Not ident: `decode_position` owns CPR in its own map.
+#[derive(Clone, Copy)]
+struct CprSample {
+    bits: CprBits,
+    t: f64,
+}
+
+#[derive(Clone, Copy)]
+struct Solved {
+    pos: LatLon,
+    t: f64,
+    valid: bool,
+}
+
 #[derive(Default)]
-struct Seen {
+struct Track {
     ident: Cached,
     last_seen: f64,
+    even: Option<CprSample>,
+    odd: Option<CprSample>,
+    pos: Option<Solved>,
 }
 
 /// Per-aircraft CPR history plus the fields a position frame does not carry.
 pub struct Tracker {
-    cpr: BTreeMap<ICAO, AircraftState>,
-    fields: BTreeMap<ICAO, Seen>,
-    reference: Option<rs1090::decode::cpr::Position>,
+    aircraft: BTreeMap<ICAO, Track>,
 }
 
 impl fmt::Debug for Tracker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Tracker")
-            .field("aircraft", &self.fields.len())
+            .field("aircraft", &self.aircraft.len())
             .finish_non_exhaustive()
     }
 }
@@ -59,29 +75,20 @@ impl Default for Tracker {
 impl Tracker {
     pub fn new() -> Self {
         Self {
-            cpr: BTreeMap::new(),
-            fields: BTreeMap::new(),
-            reference: None,
+            aircraft: BTreeMap::new(),
         }
     }
 
-    /// Decode one Mode S frame. A [`Fix`] is the airborne position that just solved.
+    /// Decode one Mode S frame. A [`Fix`] is the position that just solved.
     pub fn ingest(&mut self, timestamp: f64, frame: &[u8]) -> Option<Fix> {
-        let mut message = Message::try_from(frame).ok()?;
-        let (icao, fix, known) = match &mut message.df {
+        let message = Message::try_from(frame).ok()?;
+        let (icao, fix, known) = match &message.df {
             DF::ExtendedSquitterADSB(adsb) => {
                 let icao24 = adsb.icao24;
                 let known = self.known(icao24);
-                let no_update = None;
-                decode_position(
-                    &mut adsb.message,
-                    timestamp,
-                    &icao24,
-                    &mut self.cpr,
-                    &mut self.reference,
-                    &no_update,
-                );
-                (icao24, self.apply_adsb(icao24, &adsb.message), known)
+                self.cache_adsb(icao24, &adsb.message);
+                let fix = self.try_position(icao24, timestamp, &adsb.message);
+                (icao24, fix, known)
             }
             DF::SurveillanceIdentityReply { id, ap, .. } => {
                 let icao = ICAO::from(*ap);
@@ -99,63 +106,52 @@ impl Tracker {
             | DF::CommBIdentityReply { .. }
             | DF::CommDExtended { .. } => return None,
         };
-        self.fields.entry(icao).or_default().last_seen = timestamp;
+        self.aircraft.entry(icao).or_default().last_seen = timestamp;
         self.trim(timestamp, icao, known);
         fix
     }
 
     fn known(&self, icao: ICAO) -> bool {
-        self.fields.contains_key(&icao) || self.cpr.contains_key(&icao)
+        self.aircraft.contains_key(&icao)
     }
 
     fn ident_mut(&mut self, icao: ICAO) -> &mut Cached {
-        &mut self.fields.entry(icao).or_default().ident
+        &mut self.aircraft.entry(icao).or_default().ident
     }
 
     fn trim(&mut self, now: f64, keep: ICAO, known: bool) {
-        if self.cpr.len() <= TRACKER_CAP && self.fields.len() <= TRACKER_CAP {
+        if self.aircraft.len() <= TRACKER_CAP {
             return;
         }
-        self.fields
-            .retain(|icao, seen| *icao == keep || now - seen.last_seen <= CPR_LOCAL_MAX_AGE_S);
-        self.cpr.retain(|icao, _| self.fields.contains_key(icao));
-        while self.cpr.len() > TRACKER_CAP || self.fields.len() > TRACKER_CAP {
+        self.aircraft
+            .retain(|icao, track| *icao == keep || now - track.last_seen <= CPR_IDLE_S);
+        while self.aircraft.len() > TRACKER_CAP {
             if let Some(icao) = self.oldest_solved(keep) {
-                self.evict(icao);
+                self.aircraft.remove(&icao);
                 continue;
             }
             if !known && self.known(keep) {
-                self.evict(keep);
+                self.aircraft.remove(&keep);
                 continue;
             }
             let Some(icao) = self.oldest(keep) else {
                 break;
             };
-            self.evict(icao);
+            self.aircraft.remove(&icao);
         }
     }
 
-    fn evict(&mut self, icao: ICAO) {
-        self.cpr.remove(&icao);
-        self.fields.remove(&icao);
-    }
-
-    fn recency(left_icao: &ICAO, left: &Seen, right_icao: &ICAO, right: &Seen) -> Ordering {
+    fn recency(left_icao: &ICAO, left: &Track, right_icao: &ICAO, right: &Track) -> Ordering {
         left.last_seen
             .total_cmp(&right.last_seen)
             .then(left_icao.cmp(right_icao))
     }
 
     fn oldest_solved(&self, keep: ICAO) -> Option<ICAO> {
-        self.fields
+        self.aircraft
             .iter()
             .filter(|(icao, _)| **icao != keep)
-            .filter(|(icao, _)| {
-                self.cpr
-                    .get(*icao)
-                    .and_then(AircraftState::last_position)
-                    .is_some()
-            })
+            .filter(|(_, track)| track.pos.is_some_and(|p| p.valid))
             .min_by(|(left_icao, left), (right_icao, right)| {
                 Self::recency(left_icao, left, right_icao, right)
             })
@@ -163,7 +159,7 @@ impl Tracker {
     }
 
     fn oldest(&self, keep: ICAO) -> Option<ICAO> {
-        self.fields
+        self.aircraft
             .iter()
             .filter(|(icao, _)| **icao != keep)
             .min_by(|(left_icao, left), (right_icao, right)| {
@@ -172,13 +168,12 @@ impl Tracker {
             .map(|(icao, _)| *icao)
     }
 
-    fn apply_adsb(&mut self, icao24: ICAO, me: &ME) -> Option<Fix> {
+    fn cache_adsb(&mut self, icao24: ICAO, me: &ME) {
         match me {
             ME::BDS08 { inner, .. } => {
                 if !inner.callsign.contains('#') {
                     self.ident_mut(icao24).callsign = Callsign::pad(&inner.callsign);
                 }
-                None
             }
             ME::BDS09(velocity) => {
                 if let AirborneVelocitySubType::GroundSpeedDecoding(speed) = &velocity.velocity {
@@ -186,7 +181,6 @@ impl Tracker {
                     ident.ground_speed_kt = knots(speed.groundspeed);
                     ident.track_deg = track(speed.track);
                 }
-                None
             }
             ME::BDS61(status) => {
                 let ident = self.ident_mut(icao24);
@@ -202,37 +196,106 @@ impl Tracker {
                         }
                     }
                 }
-                None
             }
-            ME::BDS05 { inner, .. } => {
-                let latitude = inner.latitude?;
-                let longitude = inner.longitude?;
-                if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
-                    return None;
-                }
-                let icao = Icao::from_u24(icao24.0)?;
-                let ident = self.ident_mut(icao24).clone();
-                Some(Fix {
-                    aircraft: Aircraft {
-                        icao,
-                        callsign: ident.callsign,
-                        latitude_e7: deg_e7(latitude),
-                        longitude_e7: deg_e7(longitude),
-                        altitude_ft: inner.alt,
-                        ground_speed_kt: ident.ground_speed_kt,
-                        track_deg: ident.track_deg,
-                        emergency: ident.emergency,
-                    },
-                })
-            }
-            ME::NoPosition(_)
+            ME::BDS05 { .. }
             | ME::BDS06 { .. }
+            | ME::NoPosition(_)
             | ME::Reserved0(_)
             | ME::SurfaceSystemStatus(_)
             | ME::Reserved1 { .. }
             | ME::BDS62(_)
             | ME::AircraftOperationalCoordination(_)
-            | ME::BDS65(_) => None,
+            | ME::BDS65(_) => {}
+        }
+    }
+
+    fn try_position(&mut self, icao24: ICAO, timestamp: f64, me: &ME) -> Option<Fix> {
+        let (bits, alt) = cpr_from_me(me)?;
+        let pos = self.solve_cpr(icao24, timestamp, bits)?;
+        if !(-90.0..=90.0).contains(&pos.lat) || !(-180.0..=180.0).contains(&pos.lon) {
+            return None;
+        }
+        let icao = Icao::from_u24(icao24.0)?;
+        let ident = self.ident_mut(icao24).clone();
+        Some(Fix {
+            aircraft: Aircraft {
+                icao,
+                callsign: ident.callsign,
+                latitude_e7: deg_e7(pos.lat),
+                longitude_e7: deg_e7(pos.lon),
+                altitude_ft: alt,
+                ground_speed_kt: ident.ground_speed_kt,
+                track_deg: ident.track_deg,
+                emergency: ident.emergency,
+            },
+        })
+    }
+
+    fn solve_cpr(&mut self, icao: ICAO, t: f64, bits: CprBits) -> Option<LatLon> {
+        let sample = CprSample { bits, t };
+        let track = self.aircraft.entry(icao).or_default();
+        if bits.odd {
+            track.odd = Some(sample);
+        } else {
+            track.even = Some(sample);
+        }
+        let gs = track.ident.ground_speed_kt;
+        let window = pair_window_s(bits.surface, gs);
+        let mut decoded = None;
+        let mut drop_pair = false;
+        if let (Some(even), Some(odd)) = (track.even, track.odd)
+            && even.bits.surface == odd.bits.surface
+            && even.bits.surface == bits.surface
+            && (even.t - odd.t).abs() <= window
+        {
+            if bits.surface {
+                if let Some(prev) = track.pos.filter(|p| p.valid) {
+                    decoded = relative(prev.pos, bits).filter(|&pos| local_in_range(prev.pos, pos));
+                }
+            } else {
+                match airborne_global(even.bits, odd.bits, bits.odd) {
+                    Ok(pos) => decoded = Some(pos),
+                    Err(GlobalFail::Zone) => decoded = None,
+                    Err(GlobalFail::Bad) => drop_pair = true,
+                }
+            }
+        }
+        if !drop_pair
+            && decoded.is_none()
+            && let Some(prev) = track.pos.filter(|p| p.valid)
+        {
+            decoded = relative(prev.pos, bits).filter(|&pos| local_in_range(prev.pos, pos));
+        }
+        if drop_pair {
+            Self::reject_pair(track);
+            return None;
+        }
+        let mut pos = decoded?;
+        if let Some(prev) = track.pos.filter(|p| p.valid)
+            && !speed_ok(prev.pos, pos, (t - prev.t).abs(), bits.surface, gs)
+        {
+            // Global even-latest vs odd-latest of one pair can sit ~1 km
+            // apart. Fall back to a local decode against the last fix.
+            match relative(prev.pos, bits).filter(|&p| local_in_range(prev.pos, p)) {
+                Some(local) if speed_ok(prev.pos, local, (t - prev.t).abs(), bits.surface, gs) => {
+                    pos = local;
+                }
+                _ => return None,
+            }
+        }
+        track.pos = Some(Solved {
+            pos,
+            t,
+            valid: true,
+        });
+        Some(pos)
+    }
+
+    fn reject_pair(track: &mut Track) {
+        track.even = None;
+        track.odd = None;
+        if let Some(pos) = &mut track.pos {
+            pos.valid = false;
         }
     }
 
@@ -245,6 +308,30 @@ impl Tracker {
         {
             ident.emergency = Some(kind);
         }
+    }
+}
+
+fn cpr_from_me(me: &ME) -> Option<(CprBits, Option<i32>)> {
+    match me {
+        ME::BDS05 { inner, .. } => Some((
+            CprBits {
+                odd: inner.parity == CPRFormat::Odd,
+                surface: false,
+                lat: inner.lat_cpr,
+                lon: inner.lon_cpr,
+            },
+            inner.alt,
+        )),
+        ME::BDS06 { inner, .. } => Some((
+            CprBits {
+                odd: inner.parity == CPRFormat::Odd,
+                surface: true,
+                lat: inner.lat_cpr,
+                lon: inner.lon_cpr,
+            },
+            None,
+        )),
+        _ => None,
     }
 }
 
@@ -342,7 +429,7 @@ pub fn parse_hex_frame(bytes: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    use crate::modes::{EVEN, ODD, STATUS, hex14, with_icao};
+    use crate::modes::{EVEN, ODD, STATUS, airborne_position, hex14, with_icao};
     use crate::pack_frame;
 
     const IDENT: &str = "8d406b902015a678d4d220aa4bda";
@@ -365,6 +452,39 @@ mod tests {
         assert_eq!(fix.aircraft.callsign.as_bytes(), *b"        ");
         assert_eq!(fix.aircraft.ground_speed_kt, None);
         assert_eq!(fix.aircraft.emergency, None);
+    }
+
+    #[test]
+    fn local_decode_follows_a_solved_pair() {
+        let icao = 0x40058B;
+        let lat = 49.81755;
+        let lon = 6.08442;
+        let mut tracker = Tracker::new();
+        assert!(
+            tracker
+                .ingest(1.0, &airborne_position(icao, lat, lon, 39_000, false))
+                .is_none()
+        );
+        let first = tracker
+            .ingest(2.0, &airborne_position(icao, lat, lon, 39_000, true))
+            .expect("global");
+        let later = airborne_position(icao, lat + 0.002, lon + 0.002, 39_000, false);
+        let again = tracker.ingest(13.0, &later).expect("local after 11 s");
+        let dlat = (first.aircraft.latitude_e7 - again.aircraft.latitude_e7).abs();
+        let dlon = (first.aircraft.longitude_e7 - again.aircraft.longitude_e7).abs();
+        assert!(dlat < 50_000, "dlat={dlat}");
+        assert!(dlon < 50_000, "dlon={dlon}");
+    }
+
+    #[test]
+    fn bogus_jump_is_rejected() {
+        let mut tracker = Tracker::new();
+        assert!(tracker.ingest(1.0, &EVEN).is_none());
+        assert!(tracker.ingest(2.0, &ODD).is_some());
+        let even = airborne_position(0x40058B, 0.0, 0.0, 30_000, false);
+        let odd = airborne_position(0x40058B, 0.0, 0.0, 30_000, true);
+        assert!(tracker.ingest(3.0, &even).is_none());
+        assert!(tracker.ingest(3.5, &odd).is_none());
     }
 
     #[test]
