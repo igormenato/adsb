@@ -29,7 +29,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::device::{self, Device};
 use crate::error::{Error, Result};
-use crate::tuner::{self, R82xx, Tuner, TunerType};
+use crate::tuner::{self, nearest_gain, R82xx, Tuner, TunerType};
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -609,6 +609,7 @@ impl RtlSdr {
         self.dev.set_i2c_repeater(true)?;
         self.tuner.set_gain_auto(&self.dev)?;
         self.dev.set_i2c_repeater(false)?;
+        eprintln!("{} gain auto", self.tuner.tuner_type());
         Ok(())
     }
 
@@ -617,9 +618,15 @@ impl RtlSdr {
     /// Use [`Self::gains`] to get the list of supported values. The nearest
     /// supported value will be used.
     pub fn set_gain_manual(&mut self, gain_tenth_db: i32) -> Result<()> {
+        let applied = nearest_gain(self.gains(), gain_tenth_db);
         self.dev.set_i2c_repeater(true)?;
-        self.tuner.set_gain_manual(&self.dev, gain_tenth_db)?;
+        self.tuner.set_gain_manual(&self.dev, applied)?;
         self.dev.set_i2c_repeater(false)?;
+        eprintln!(
+            "{} gain {:.1} dB",
+            self.tuner.tuner_type(),
+            f64::from(applied) / 10.0
+        );
         Ok(())
     }
 

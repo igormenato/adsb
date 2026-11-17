@@ -16,6 +16,8 @@
 /// Data read from the R82xx has **bit-reversed** byte order. Every byte read
 /// must be passed through [`bit_reverse`] before use. Writes are normal order.
 /// Maximum I2C message length is 8 bytes.
+use std::fmt;
+
 use tracing::{debug, trace, warn};
 
 use crate::device::{Device, I2cBus};
@@ -44,7 +46,30 @@ pub struct DemodPath {
     pub if_hz: u32,
 }
 
+impl fmt::Display for TunerType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::R820T => "r820t",
+            Self::R828D => "r828d",
+            Self::Fc0013 => "fc0013",
+        })
+    }
+}
+
 impl TunerType {
+    /// Advertised gain table for this silicon, tenths of a dB.
+    pub fn gains(self) -> &'static [i32] {
+        match self {
+            Self::Fc0013 => fc0013::GAIN_VALUES,
+            Self::R820T | Self::R828D => GAIN_VALUES,
+        }
+    }
+
+    /// Highest advertised table step, tenths of a dB.
+    pub fn max_gain(self) -> i32 {
+        self.gains().iter().copied().max().unwrap_or(0)
+    }
+
     pub fn demod_path(self) -> DemodPath {
         match self {
             Self::Fc0013 => DemodPath {
@@ -156,6 +181,15 @@ pub const GAIN_VALUES: &[i32] = &[
     0, 9, 14, 27, 37, 77, 87, 125, 144, 157, 166, 197, 207, 229, 254, 280, 297, 328, 338, 364, 372,
     386, 402, 421, 434, 439, 445, 480, 496,
 ];
+
+/// Closest advertised table step to `want`, tenths of a dB.
+pub fn nearest_gain(gains: &[i32], want: i32) -> i32 {
+    gains
+        .iter()
+        .copied()
+        .min_by_key(|g| (i64::from(*g) - i64::from(want)).unsigned_abs())
+        .unwrap_or(want)
+}
 
 /// LNA gain steps (16 entries, index 0-15). Each is the incremental dB×10
 /// added at that index.
@@ -1235,10 +1269,7 @@ impl Tuner {
     }
 
     pub fn gains(&self) -> &[i32] {
-        match self {
-            Self::R82xx(t) => t.gains(),
-            Self::Fc0013(t) => t.gains(),
-        }
+        self.tuner_type().gains()
     }
 
     pub fn init(&mut self, dev: &Device) -> Result<()> {

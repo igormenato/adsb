@@ -18,8 +18,6 @@ use super::Stop;
 
 const CENTER_HZ: u32 = 1_090_000_000;
 pub const SAMPLE_HZ: u32 = 2_400_000;
-/// Tenths of a dB. `496` is 49.6 dB, the jet1090 default.
-pub const GAIN_TENTHS_DB: i32 = 496;
 const OPEN_RETRY: Duration = Duration::from_secs(2);
 const LOOKAHEAD: usize = 326;
 const FILE_CHUNK: usize = 32_768;

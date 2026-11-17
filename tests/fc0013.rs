@@ -10,7 +10,6 @@ use rs_rtl::tuner::{self, TunerType, probe};
 const ADSB_HZ: u32 = 1_090_000_000;
 const SAMPLE_HZ: u32 = 2_400_000;
 const XTAL_HZ: u32 = 28_800_000;
-const DEFAULT_GAIN: i32 = 496;
 
 #[derive(Default)]
 struct FakeI2c {
@@ -141,8 +140,34 @@ fn default_gain_maps_to_highest_fc0013_step() {
     let bus = fc0013_bus();
     let mut tuner = Fc0013::new(XTAL_HZ);
     tuner.init(&bus).unwrap();
-    tuner.set_gain_manual(&bus, DEFAULT_GAIN).unwrap();
+    let max = TunerType::Fc0013.max_gain();
+    assert_eq!(max, 197);
+    assert_eq!(
+        rs_rtl::nearest_gain(tuner.gains(), i32::MAX),
+        max,
+        "CLI default (tuner max) snaps to the last FC0013 table step"
+    );
+    tuner.set_gain_manual(&bus, max).unwrap();
     assert_eq!(bus.get(fc0013::I2C_ADDR, 0x14) & 0x1f, 0x10);
+    assert_eq!(
+        format!("{} gain {:.1} dB", TunerType::Fc0013, f64::from(max) / 10.0),
+        "fc0013 gain 19.7 dB"
+    );
+}
+
+#[test]
+fn r820t_default_gain_is_highest_table_step() {
+    let max = TunerType::R820T.max_gain();
+    assert_eq!(max, 496);
+    assert_eq!(
+        rs_rtl::nearest_gain(TunerType::R820T.gains(), i32::MAX),
+        max
+    );
+    assert_eq!(
+        format!("{} gain {:.1} dB", TunerType::R820T, f64::from(max) / 10.0),
+        "r820t gain 49.6 dB"
+    );
+    assert_eq!(TunerType::R828D.max_gain(), 496);
 }
 
 #[test]

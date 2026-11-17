@@ -34,7 +34,7 @@ The command prints one line per host check and exits non-zero if a required chec
 ./trck
 ```
 
-Tuner gain defaults to 49.6 dB. `--gain auto` is tuner AGC. `--uart -` writes frames to stdout. `--table` defaults to `aircraft.csv`. `--allow-power-commands` lets a UART `REBOOT` or `SHUTDOWN` run `systemctl reboot` or `systemctl poweroff`.
+Tuner gain defaults to the tuner's maximum table step (49.6 dB on R820T/R828D, 19.7 dB on FC0013). `--gain auto` is tuner AGC. `--uart -` writes frames to stdout. `--table` defaults to `aircraft.csv`. `--allow-power-commands` lets a UART `REBOOT` or `SHUTDOWN` run `systemctl reboot` or `systemctl poweroff`.
 
 ```
 ./trck --check

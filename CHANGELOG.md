@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `--gain` defaults to the tuner's maximum advertised table step instead of a hardcoded 49.6 dB.
+
 ### Added
 
 - 1-bit Mode S CRC correction on the IQ path (DF17/DF18, and known-ICAO DF11). `--no-fix` turns it off.
