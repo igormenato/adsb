@@ -49,8 +49,8 @@ fn replay_max_matches_golden() {
     assert!(stderr.contains("frames read=62"), "{stderr}");
     assert!(stderr.contains("decoded=61"), "{stderr}");
     assert!(stderr.contains("malformed=4"), "{stderr}");
-    assert!(stderr.contains("fixes=14"), "{stderr}");
-    assert!(stderr.contains("UART frames written=14"), "{stderr}");
+    assert!(stderr.contains("fixes=20"), "{stderr}");
+    assert!(stderr.contains("UART frames written=20"), "{stderr}");
     let mut by_icao: HashMap<u32, Vec<Aircraft>> = HashMap::new();
     for frame in out.stdout.as_chunks::<FRAME_LEN>().0 {
         let aircraft = frame_aircraft(frame);
