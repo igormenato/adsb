@@ -45,6 +45,7 @@ pub enum CmdStatus {
     Ok = 0,
     Disabled = 1,
     Unknown = 2,
+    Failed = 3,
 }
 
 /// Fields filled on every reply. Cheap to copy onto PING too.
@@ -108,7 +109,7 @@ pub fn decide(cmd: u8, allow_power: bool, paused: bool, stats: CmdStats) -> (Cmd
         Some(Cmd::Ping | Cmd::Status) => (CmdStatus::Ok, paused, AfterReply::None),
         Some(Cmd::Pause) => (CmdStatus::Ok, true, AfterReply::None),
         Some(Cmd::Resume) => (CmdStatus::Ok, false, AfterReply::None),
-        Some(Cmd::Restart) => (CmdStatus::Ok, paused, AfterReply::Restart),
+        Some(Cmd::Restart) => (CmdStatus::Ok, false, AfterReply::Restart),
         Some(Cmd::Reboot) if allow_power => {
             (CmdStatus::Ok, paused, AfterReply::Power(PowerOp::Reboot))
         }
@@ -189,8 +190,7 @@ fn magic_prefix(buf: &[u8], n: usize) -> bool {
     buf[..m] == CMD_MAGIC[..m]
 }
 
-#[cfg(test)]
-fn pack_cmd(cmd: Cmd) -> [u8; CMD_LEN] {
+pub fn pack_cmd(cmd: Cmd) -> [u8; CMD_LEN] {
     let mut raw = [0u8; CMD_LEN];
     raw[0..4].copy_from_slice(CMD_MAGIC);
     raw[4] = cmd as u8;
@@ -213,6 +213,7 @@ fn unpack_reply(bytes: &[u8]) -> Option<CmdReply> {
         0 => CmdStatus::Ok,
         1 => CmdStatus::Disabled,
         2 => CmdStatus::Unknown,
+        3 => CmdStatus::Failed,
         _ => return None,
     };
     Some(CmdReply {
@@ -263,6 +264,13 @@ mod tests {
         };
         let raw = pack_reply(&reply);
         assert_eq!(unpack_reply(&raw), Some(reply));
+        let fail = CmdReply {
+            status: CmdStatus::Failed,
+            paused: false,
+            ..reply
+        };
+        let raw = pack_reply(&fail);
+        assert_eq!(unpack_reply(&raw), Some(fail));
     }
 
     #[test]
@@ -336,7 +344,7 @@ mod tests {
 
         let (reply, after) = decide(Cmd::Restart as u8, false, true, STATS);
         assert_eq!(reply.status, CmdStatus::Ok);
-        assert!(reply.paused);
+        assert!(!reply.paused);
         assert_eq!(after, AfterReply::Restart);
         let (reply, after) = decide(Cmd::Restart as u8, false, false, STATS);
         assert!(!reply.paused);

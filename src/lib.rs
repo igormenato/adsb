@@ -15,8 +15,8 @@ mod table;
 
 #[doc(inline)]
 pub use cmd::{
-    ACK_LEN, AfterReply, Cmd, CmdFeed, CmdScan, CmdStats, CmdStatus, LAST_FIX_NONE, PowerOp,
-    decide, pack_reply,
+    ACK_LEN, AfterReply, CMD_LEN, Cmd, CmdFeed, CmdScan, CmdStats, CmdStatus, LAST_FIX_NONE,
+    PowerOp, decide, pack_cmd, pack_reply,
 };
 #[doc(inline)]
 pub use decode::{Tracker, is_mode_s, parse_hex_frame};

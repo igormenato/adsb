@@ -1,5 +1,6 @@
 //! UART sink, position queue, and the write loop.
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::os::fd::BorrowedFd;
 use std::os::unix::process::CommandExt;
@@ -44,16 +45,6 @@ struct PendingReply {
     after: AfterReply,
 }
 
-fn offer_reply(slot: &mut Option<PendingReply>, next: PendingReply) -> bool {
-    if let Some(cur) = slot.as_ref()
-        && (cur.sent > 0 || cur.after != AfterReply::None)
-    {
-        return false;
-    }
-    *slot = Some(next);
-    true
-}
-
 pub(crate) struct Shared {
     queue: Mutex<Queue>,
     pub(crate) ready: Condvar,
@@ -61,7 +52,7 @@ pub(crate) struct Shared {
     started: Instant,
     frames_written: AtomicUsize,
     last_fix: Mutex<Option<Instant>>,
-    pending_reply: Mutex<Option<PendingReply>>,
+    pending_reply: Mutex<VecDeque<PendingReply>>,
     allow_power: bool,
     paused: AtomicBool,
 }
@@ -75,7 +66,7 @@ impl Shared {
             started: Instant::now(),
             frames_written: AtomicUsize::new(0),
             last_fix: Mutex::new(None),
-            pending_reply: Mutex::new(None),
+            pending_reply: Mutex::new(VecDeque::new()),
             allow_power,
             paused: AtomicBool::new(false),
         })
@@ -90,12 +81,14 @@ impl Shared {
     }
 
     fn push_at(&self, fix: Fix, now: SystemTime) -> Option<Fix> {
+        let mut q = self.lock();
         if self.paused.load(Ordering::Relaxed) {
             return None;
         }
         *self.last_fix.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
         self.append_row_at(&fix, now);
-        let dropped = self.lock().push(fix);
+        let dropped = q.push(fix);
+        drop(q);
         self.ready.notify_one();
         dropped
     }
@@ -105,10 +98,12 @@ impl Shared {
     }
 
     fn set_paused(&self, paused: bool) {
+        let mut q = self.lock();
         self.paused.store(paused, Ordering::Relaxed);
         if paused {
-            self.lock().drop_waiting();
+            q.drop_waiting();
         }
+        drop(q);
         self.ready.notify_one();
     }
 
@@ -130,29 +125,42 @@ impl Shared {
     }
 
     fn has_reply(&self) -> bool {
-        self.pending_reply
+        !self
+            .pending_reply
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .is_some()
+            .is_empty()
     }
 
     fn queue_reply(&self, bytes: [u8; ACK_LEN], after: AfterReply) {
-        let mut slot = self
-            .pending_reply
+        self.pending_reply
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !offer_reply(
-            &mut slot,
-            PendingReply {
+            .unwrap_or_else(PoisonError::into_inner)
+            .push_back(PendingReply {
                 bytes,
                 sent: 0,
                 after,
-            },
-        ) {
-            eprintln!("cmd dropped, reply in flight");
-        }
-        drop(slot);
+            });
         self.ready.notify_one();
+    }
+
+    fn handle_cmd(&self, cmd: u8) {
+        let (mut reply, mut after) = decide(cmd, self.allow_power, self.is_paused(), self.stats());
+        if reply.status == CmdStatus::Disabled {
+            eprintln!("power command disabled");
+        }
+        if let AfterReply::Power(op) = after {
+            match try_power(op) {
+                Ok(()) => after = AfterReply::None,
+                Err(err) => {
+                    eprintln!("{err}");
+                    reply.status = CmdStatus::Failed;
+                    after = AfterReply::None;
+                }
+            }
+        }
+        self.set_paused(reply.paused);
+        self.queue_reply(pack_reply(&reply), after);
     }
 
     fn append_row_at(&self, fix: &Fix, now: SystemTime) {
@@ -253,7 +261,7 @@ impl Writer {
             .pending_reply
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let Some(pending) = slot.as_mut() else {
+        let Some(pending) = slot.front_mut() else {
             return Ok(false);
         };
         match write_sink(&mut self.sink, &pending.bytes[pending.sent..]) {
@@ -267,12 +275,11 @@ impl Writer {
                     return Ok(false);
                 }
                 let after = pending.after;
-                *slot = None;
+                slot.pop_front();
                 drop(slot);
                 drain_sink(&self.sink);
                 match after {
-                    AfterReply::None => {}
-                    AfterReply::Power(op) => power(op),
+                    AfterReply::None | AfterReply::Power(_) => {}
                     AfterReply::Restart => {
                         drop(std::mem::replace(&mut self.sink, Sink::Stdout));
                         restart();
@@ -355,15 +362,29 @@ fn restart() -> ! {
     std::process::exit(78);
 }
 
-fn power(op: PowerOp) {
-    let arg = match op {
+fn power_arg(op: PowerOp) -> &'static str {
+    match op {
         PowerOp::Reboot => "reboot",
         PowerOp::Shutdown => "poweroff",
-    };
+    }
+}
+
+fn systemctl_power(arg: &str) -> io::Result<bool> {
     match Command::new("systemctl").arg(arg).status() {
-        Ok(status) if status.success() => {}
-        Ok(status) => eprintln!("systemctl {arg} failed: {status}"),
-        Err(err) => eprintln!("systemctl {arg}: {err}"),
+        Ok(status) => Ok(status.success()),
+        Err(err) => Err(err),
+    }
+}
+
+static POWER: Mutex<fn(&str) -> io::Result<bool>> = Mutex::new(systemctl_power);
+
+fn try_power(op: PowerOp) -> Result<(), String> {
+    let arg = power_arg(op);
+    let run = *POWER.lock().unwrap_or_else(PoisonError::into_inner);
+    match run(arg) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!("systemctl {arg} failed")),
+        Err(err) => Err(format!("systemctl {arg}: {err}")),
     }
 }
 
@@ -373,44 +394,49 @@ fn read_cmds(reader: TTYPort, shared: Arc<Shared>, stop: Arc<Stop>) {
     while !stop.is_set() {
         match sys::read(sys::as_fd(&reader), &mut tmp) {
             Ok(0) => {
-                if poll_in(&reader).is_err() {
-                    return;
-                }
+                hangup(&stop, "uart hangup");
+                return;
             }
             Ok(n) => {
                 for &byte in &tmp[..n] {
                     match scan.feed(byte) {
                         CmdFeed::None => {}
                         CmdFeed::BadCrc => eprintln!("cmd crc mismatch"),
-                        CmdFeed::Cmd(cmd) => {
-                            let (reply, after) =
-                                decide(cmd, shared.allow_power, shared.is_paused(), shared.stats());
-                            if reply.status == CmdStatus::Disabled {
-                                eprintln!("power command disabled");
-                            }
-                            shared.set_paused(reply.paused);
-                            shared.queue_reply(pack_reply(&reply), after);
-                        }
+                        CmdFeed::Cmd(cmd) => shared.handle_cmd(cmd),
                     }
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                if poll_in(&reader).is_err() {
+                if let Err(err) = poll_cmds(&reader) {
+                    hangup(&stop, &format!("uart {err}"));
                     return;
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err) => {
-                eprintln!("uart read: {err}");
+                hangup(&stop, &format!("uart read: {err}"));
                 return;
             }
         }
     }
 }
 
-fn poll_in(reader: &TTYPort) -> io::Result<i32> {
-    let mut poll_fd = PollFd::new(sys::as_fd(reader), PollFlags::POLLIN);
-    sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE)
+fn hangup(stop: &Stop, msg: &str) {
+    eprintln!("{msg}");
+    stop.request();
+}
+
+fn poll_cmds(reader: &TTYPort) -> io::Result<()> {
+    let mut poll_fd = PollFd::new(
+        sys::as_fd(reader),
+        PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+    );
+    sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE)?;
+    let ev = poll_fd.revents().unwrap_or_else(PollFlags::empty);
+    if ev.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL) {
+        return Err(io::Error::new(io::ErrorKind::BrokenPipe, "hangup"));
+    }
+    Ok(())
 }
 
 pub(crate) fn open_table(path: &Path) -> Option<Table> {
@@ -444,6 +470,7 @@ fn open_uart(
     let reader = port
         .try_clone_native()
         .with_context(|| format!("cannot clone {path}"))?;
+    sys::set_nonblocking(sys::as_fd(&reader)).with_context(|| format!("cannot clone {path}"))?;
     sys::set_cloexec(sys::as_fd(&reader)).with_context(|| format!("cannot clone {path}"))?;
     {
         let shared = Arc::clone(&shared);
@@ -582,46 +609,106 @@ mod tests {
     use super::*;
     use trck::Cmd;
 
-    fn ping() -> PendingReply {
-        PendingReply {
-            bytes: [0; ACK_LEN],
-            sent: 0,
-            after: AfterReply::None,
+    fn ack_status(bytes: &[u8; ACK_LEN]) -> CmdStatus {
+        match bytes[5] {
+            0 => CmdStatus::Ok,
+            1 => CmdStatus::Disabled,
+            2 => CmdStatus::Unknown,
+            3 => CmdStatus::Failed,
+            other => panic!("status {other}"),
         }
     }
 
-    fn reboot() -> PendingReply {
-        PendingReply {
-            bytes: [1; ACK_LEN],
-            sent: 0,
-            after: AfterReply::Power(PowerOp::Reboot),
-        }
+    fn pending(shared: &Shared) -> Vec<PendingReply> {
+        shared
+            .pending_reply
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    fn with_power(run: fn(&str) -> io::Result<bool>, body: impl FnOnce()) {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let prev = {
+            let mut slot = POWER.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::replace(&mut *slot, run)
+        };
+        body();
+        *POWER.lock().unwrap_or_else(PoisonError::into_inner) = prev;
     }
 
     #[test]
-    fn in_flight_reply_is_not_replaced() {
-        let mut slot = Some(PendingReply { sent: 4, ..ping() });
-        assert!(!offer_reply(&mut slot, reboot()));
-        let got = slot.unwrap();
-        assert_eq!(got.sent, 4);
-        assert_eq!(got.after, AfterReply::None);
-
-        let mut slot = Some(PendingReply {
-            sent: 4,
-            ..reboot()
+    fn pause_and_push_share_the_queue_lock() {
+        let shared = Shared::new(None, false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..2_000 {
+                    let _ = shared.push(check_positions()[0]);
+                }
+            });
+            scope.spawn(|| {
+                for _ in 0..2_000 {
+                    shared.set_paused(true);
+                    shared.set_paused(false);
+                }
+            });
         });
-        assert!(!offer_reply(&mut slot, ping()));
-        let got = slot.unwrap();
-        assert_eq!(got.after, AfterReply::Power(PowerOp::Reboot));
-        assert_eq!(got.sent, 4);
+        shared.set_paused(true);
+        assert!(!shared.lock().has_pending());
+        assert!(shared.push(check_positions()[0]).is_none());
+        assert!(!shared.lock().has_pending());
+    }
 
-        let mut slot = Some(reboot());
-        assert!(!offer_reply(&mut slot, ping()));
-        assert_eq!(slot.unwrap().after, AfterReply::Power(PowerOp::Reboot));
+    #[test]
+    fn reboot_acks_after_systemctl() {
+        with_power(
+            |_| Ok(true),
+            || {
+                let shared = Shared::new(None, true);
+                shared.handle_cmd(Cmd::Reboot as u8);
+                let got = pending(&shared);
+                assert_eq!(got.len(), 1);
+                assert_eq!(ack_status(&got[0].bytes), CmdStatus::Ok);
+                assert_eq!(got[0].after, AfterReply::None);
+            },
+        );
+        with_power(
+            |_| Ok(false),
+            || {
+                let shared = Shared::new(None, true);
+                shared.handle_cmd(Cmd::Reboot as u8);
+                let got = pending(&shared);
+                assert_eq!(got.len(), 1);
+                assert_eq!(ack_status(&got[0].bytes), CmdStatus::Failed);
+                assert_eq!(got[0].after, AfterReply::None);
+            },
+        );
+        with_power(
+            |_| Err(io::Error::other("missing")),
+            || {
+                let shared = Shared::new(None, true);
+                shared.handle_cmd(Cmd::Shutdown as u8);
+                let got = pending(&shared);
+                assert_eq!(ack_status(&got[0].bytes), CmdStatus::Failed);
+            },
+        );
+    }
 
-        let mut slot = Some(ping());
-        assert!(offer_reply(&mut slot, reboot()));
-        assert_eq!(slot.unwrap().after, AfterReply::Power(PowerOp::Reboot));
+    #[test]
+    fn second_command_is_queued() {
+        let shared = Shared::new(None, false);
+        shared.handle_cmd(Cmd::Pause as u8);
+        shared.handle_cmd(Cmd::Status as u8);
+        let got = pending(&shared);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].bytes[4], Cmd::Pause as u8);
+        assert_eq!(got[0].bytes[18], 1);
+        assert_eq!(got[1].bytes[4], Cmd::Status as u8);
+        assert_eq!(got[1].bytes[18], 1);
+        assert!(shared.is_paused());
     }
 
     fn buf_writer(table: Option<Table>) -> Writer {
@@ -647,6 +734,19 @@ mod tests {
             .filter(|line| !line.is_empty())
             .map(str::to_string)
             .collect()
+    }
+
+    #[test]
+    fn hangup_on_master_close_sets_stop() {
+        let (master, slave) = TTYPort::pair().expect("pty");
+        sys::set_nonblocking(sys::as_fd(&slave)).expect("nonblock");
+        let stop = Stop::new();
+        let shared = Shared::new(None, false);
+        let stop_thread = Arc::clone(&stop);
+        let thread = thread::spawn(move || read_cmds(slave, shared, stop_thread));
+        drop(master);
+        thread.join().expect("reader");
+        assert!(stop.is_set());
     }
 
     #[test]

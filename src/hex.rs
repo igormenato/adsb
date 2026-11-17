@@ -243,17 +243,28 @@ fn pump_hex<R: Read + AsRawFd>(
         }
         let (socket_revents, uart_ready) = {
             let reader = sys::as_fd(&lines.reader);
-            let uart = writer.has_pending().then(|| writer.uart_fd()).flatten();
+            let uart = writer.uart_fd();
             let mut fds_two;
             let mut fds_one;
+            let uart_flags = if writer.has_pending() {
+                PollFlags::POLLOUT | PollFlags::POLLHUP | PollFlags::POLLERR
+            } else {
+                PollFlags::POLLHUP | PollFlags::POLLERR
+            };
             let fds: &mut [PollFd<'_>] = if let Some(uart) = uart {
                 fds_two = [
-                    PollFd::new(reader, PollFlags::POLLIN),
-                    PollFd::new(uart, PollFlags::POLLOUT),
+                    PollFd::new(
+                        reader,
+                        PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+                    ),
+                    PollFd::new(uart, uart_flags),
                 ];
                 &mut fds_two
             } else {
-                fds_one = [PollFd::new(reader, PollFlags::POLLIN)];
+                fds_one = [PollFd::new(
+                    reader,
+                    PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+                )];
                 &mut fds_one
             };
             if let Err(err) = sys::poll(fds, POLL_SLICE) {
@@ -261,11 +272,17 @@ fn pump_hex<R: Read + AsRawFd>(
                 return end_socket(writer);
             }
             let socket_revents = fds[0].revents().unwrap_or_else(PollFlags::empty);
-            let uart_ready = fds.get(1).is_some_and(|fd| {
-                fd.revents()
-                    .unwrap_or_else(PollFlags::empty)
-                    .intersects(PollFlags::POLLOUT | PollFlags::POLLERR | PollFlags::POLLHUP)
-            });
+            let uart_revents = fds
+                .get(1)
+                .map(|fd| fd.revents().unwrap_or_else(PollFlags::empty))
+                .unwrap_or_else(PollFlags::empty);
+            if uart_revents
+                .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
+            {
+                eprintln!("uart hangup");
+                return Pump::Stopped;
+            }
+            let uart_ready = uart_revents.intersects(PollFlags::POLLOUT);
             (socket_revents, uart_ready)
         };
         if stop.is_set() {

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nix::errno::Errno;
-use nix::fcntl::{FcntlArg, FlockArg, OFlag, fcntl};
+use nix::fcntl::{FcntlArg, FdFlag, FlockArg, OFlag, fcntl};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::unistd::{self, read};
 use rs1090::decode::cpr::{Position, distance_nm};
@@ -227,6 +227,8 @@ impl Pty {
         #[allow(deprecated)]
         let _ = nix::fcntl::flock(slave_fd, FlockArg::Unlock);
         set_nonblocking(&slave);
+        set_cloexec(&master);
+        set_cloexec(&slave);
         Self { master, slave }
     }
 
@@ -252,6 +254,10 @@ pub fn set_nonblocking(fd: &impl AsRawFd) {
     let fd = as_fd(fd);
     let flags = OFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFL).expect("F_GETFL"));
     fcntl(fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).expect("F_SETFL");
+}
+
+pub fn set_cloexec(fd: &impl AsRawFd) {
+    fcntl(as_fd(fd), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).expect("F_SETFD");
 }
 
 pub fn write_until_would_block(fd: RawFd) {
