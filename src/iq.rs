@@ -155,8 +155,9 @@ impl Rng {
 
 #[cfg(test)]
 mod tests {
-    use rs1090::source::demod::demod2400::demodulate2400;
     use rs1090::source::demod::magnitude_u16;
+
+    use trck::demod::demodulate2400;
 
     use super::*;
     use trck::modes::EVEN;
@@ -174,7 +175,7 @@ mod tests {
 
     fn recovered(bytes: &[u8]) -> Vec<[u8; 14]> {
         let iq = cu8_to_complex(bytes);
-        demodulate2400(&magnitude_u16(&iq))
+        demodulate2400(&magnitude_u16(&iq), true)
             .into_iter()
             .map(|m| m.msg)
             .collect()
@@ -241,13 +242,11 @@ mod tests {
             if (0..8).any(|j| mag.len() > j + 18 && preamble_at_zero(&mag[j..])) {
                 preamble += 1;
             }
-            if demodulate2400(&mag).iter().any(|m| m.msg == EVEN) {
+            if demodulate2400(&mag, true).iter().any(|m| m.msg == EVEN) {
                 crc += 1;
             }
         }
-        eprintln!(
-            "10 dB preamble {preamble}/32 crc-perfect {crc}/32 (rs1090 dump1090-2400 has no bit correction)"
-        );
+        eprintln!("10 dB preamble {preamble}/32 recovered {crc}/32");
         assert!(
             preamble >= 24,
             "10 dB preamble {preamble}/32 — generator failed the 3.5 dB check"
