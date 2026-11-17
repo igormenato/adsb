@@ -106,7 +106,6 @@ enum Cmd {
 struct Stop {
     flag: Mutex<bool>,
     wake: Condvar,
-    notify: tokio::sync::Notify,
 }
 
 impl Stop {
@@ -114,30 +113,16 @@ impl Stop {
         Arc::new(Self {
             flag: Mutex::new(false),
             wake: Condvar::new(),
-            notify: tokio::sync::Notify::new(),
         })
     }
 
     fn request(&self) {
         *self.flag.lock().unwrap_or_else(PoisonError::into_inner) = true;
         self.wake.notify_all();
-        self.notify.notify_waiters();
     }
 
     fn is_set(&self) -> bool {
         *self.flag.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    async fn wait(&self) {
-        loop {
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.is_set() {
-                return;
-            }
-            notified.await;
-        }
     }
 }
 
@@ -515,24 +500,18 @@ fn run_radio(
     let radio_stop = Arc::clone(&stop);
     let radio = thread::spawn(move || {
         let enqueue_shared = Arc::clone(&shared);
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt.block_on(radio::run_rtlsdr(
-                device,
-                gain,
-                move |decoded| {
-                    writer::log_fix(&decoded);
-                    if let Some(dropped) = enqueue_shared.push(decoded) {
-                        writer::log_drop(&dropped);
-                    }
-                },
-                &radio_stop,
-                fix,
-            )),
-            Err(err) => eprintln!("rtlsdr runtime: {err}"),
-        }
+        radio::run_rtlsdr(
+            device,
+            gain,
+            move |decoded| {
+                writer::log_fix(&decoded);
+                if let Some(dropped) = enqueue_shared.push(decoded) {
+                    writer::log_drop(&dropped);
+                }
+            },
+            &radio_stop,
+            fix,
+        );
         radio_stop.request();
         shared.ready.notify_one();
     });

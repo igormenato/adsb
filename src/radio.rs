@@ -1,20 +1,18 @@
 //! RTL-SDR at 1090 MHz. readsb 2.4 MS/s demod with 1-bit PI CRC correction.
 
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-
-use desperado::{IqAsyncSource, IqFormat, IqSource};
-use futures_util::StreamExt;
-use num_complex::Complex;
-use rs1090::source::demod::magnitude_u16;
+use rs_rtl::{DeviceId, RtlSdr};
 
 use trck::demod::{demodulate2400, msg_octets};
-
+use trck::mag::{cu8_to_f32, mag_cu8_into, mag_iq};
 use trck::{Fix, Tracker};
 
-use super::Stop;
+use super::{POLL_SLICE, Stop, sleep_until_stop};
 
 const CENTER_HZ: u32 = 1_090_000_000;
 pub const SAMPLE_HZ: u32 = 2_400_000;
@@ -48,11 +46,22 @@ impl Demod {
         }
     }
 
-    fn push(&mut self, iq: &[Complex<f32>], enqueue: &impl Fn(Fix), log_msg: bool) {
-        if iq.is_empty() {
+    fn push_cu8(&mut self, cu8: &[u8], enqueue: &impl Fn(Fix), log_msg: bool) {
+        let n = cu8.len() / 2;
+        if n == 0 {
             return;
         }
-        self.mag.extend_from_slice(&magnitude_u16(iq));
+        let start = self.mag.len();
+        self.mag.resize(start + n, 0);
+        mag_cu8_into(&cu8[..n * 2], &mut self.mag[start..]);
+        self.decode(enqueue, log_msg);
+    }
+
+    fn push_mag(&mut self, mag: &[u16], enqueue: &impl Fn(Fix), log_msg: bool) {
+        if mag.is_empty() {
+            return;
+        }
+        self.mag.extend_from_slice(mag);
         self.decode(enqueue, log_msg);
     }
 
@@ -87,67 +96,70 @@ impl Demod {
             enqueue(fix);
         }
         let scanned = self.mag.len() - LOOKAHEAD;
-        self.mag.drain(..scanned);
+        self.mag.copy_within(scanned.., 0);
+        self.mag.truncate(self.mag.len() - scanned);
         self.offset += scanned as u64;
     }
 }
 
-pub async fn run_rtlsdr(
-    device: usize,
-    gain: Option<i32>,
-    enqueue: impl Fn(Fix),
-    stop: &Stop,
-    fix: bool,
-) {
+pub fn run_rtlsdr(device: usize, gain: Option<i32>, enqueue: impl Fn(Fix), stop: &Stop, fix: bool) {
     let mut delay = OPEN_RETRY;
     while !stop.is_set() {
-        match IqAsyncSource::from_rtlsdr(device, CENTER_HZ, SAMPLE_HZ, gain).await {
-            Ok(mut source) => {
+        match open_rtlsdr(device, gain) {
+            Ok(mut sdr) => {
                 eprintln!("rtlsdr {device} open");
                 delay = OPEN_RETRY;
-                demodulate(&mut source, &enqueue, stop, fix).await;
-                if let Err(err) = source.stop().await {
-                    eprintln!("rtlsdr {device} stop: {err}");
+                match sdr.start_streaming() {
+                    Ok(reader) => drain_rtlsdr(&reader, &enqueue, stop, fix),
+                    Err(err) => eprintln!("rtlsdr {device} stream: {err}"),
                 }
             }
-            Err(err) => {
-                eprintln!("rtlsdr {device}: {err}");
-            }
+            Err(err) => eprintln!("rtlsdr {device}: {err}"),
         }
         if stop.is_set() {
             break;
         }
-        tokio::select! {
-            biased;
-            () = stop.wait() => break,
-            () = tokio::time::sleep(delay) => {}
-        }
+        sleep_until_stop(stop, delay);
         delay = delay.saturating_mul(2).min(Duration::from_secs(30));
     }
 }
 
-async fn demodulate(source: &mut IqAsyncSource, enqueue: &impl Fn(Fix), stop: &Stop, fix: bool) {
+fn open_rtlsdr(device: usize, gain: Option<i32>) -> Result<RtlSdr, rs_rtl::Error> {
+    let mut sdr = RtlSdr::open(DeviceId::Index(device))?;
+    sdr.set_center_freq(CENTER_HZ)?;
+    sdr.set_sample_rate(SAMPLE_HZ)?;
+    match gain {
+        Some(g) => sdr.set_gain_manual(g)?,
+        None => sdr.set_gain_auto()?,
+    }
+    Ok(sdr)
+}
+
+fn drain_rtlsdr(reader: &rs_rtl::AsyncReadHandle, enqueue: &impl Fn(Fix), stop: &Stop, fix: bool) {
     let mut demod = Demod::new(fix);
+    let mut last_drop = 0u64;
     while !stop.is_set() {
-        let chunk = tokio::select! {
-            biased;
-            () = stop.wait() => return,
-            chunk = source.next() => chunk,
-        };
-        let Some(chunk) = chunk else {
-            demod.finish(enqueue, false);
-            eprintln!("rtlsdr ended");
-            return;
-        };
-        let buf = match chunk {
-            Ok(buf) => buf,
+        match reader.recv_timeout(POLL_SLICE) {
+            Ok(rs_rtl::TryRecv::Item(buf)) => demod.push_cu8(&buf, enqueue, false),
+            Ok(rs_rtl::TryRecv::Empty) => {}
+            Ok(rs_rtl::TryRecv::End) => {
+                demod.finish(enqueue, false);
+                eprintln!("rtlsdr ended");
+                break;
+            }
             Err(err) => {
                 eprintln!("rtlsdr read: {err}");
-                return;
+                break;
             }
-        };
-        demod.push(&buf, enqueue, false);
+        }
+        let dropped = reader.dropped_chunks();
+        if dropped != last_drop {
+            // TACK is 21 bytes with no spare field. USB drops stay on stderr.
+            eprintln!("rtlsdr usb_dropped={dropped}");
+            last_drop = dropped;
+        }
     }
+    reader.stop();
 }
 
 pub fn run_iq(
@@ -160,18 +172,27 @@ pub fn run_iq(
     if sample_hz == 0 {
         bail!("iq-rate must be > 0");
     }
-    let mut source = IqSource::from_file(path, CENTER_HZ, sample_hz, FILE_CHUNK, IqFormat::Cu8)
-        .with_context(|| path.display().to_string())?;
+    let mut file = File::open(path).with_context(|| path.display().to_string())?;
+    let mut buf = vec![0u8; FILE_CHUNK * 2];
     let mut demod = Demod::new(fix);
     let mut resamp = (sample_hz != SAMPLE_HZ).then(|| Resamp::new(sample_hz));
-    for chunk in &mut source {
+    loop {
         if stop.is_set() {
             return Ok(demod.stats);
         }
-        let buf = chunk.with_context(|| path.display().to_string())?;
+        let n = file
+            .read(&mut buf)
+            .with_context(|| path.display().to_string())?;
+        if n == 0 {
+            break;
+        }
+        let n = n & !1;
+        if n == 0 {
+            continue;
+        }
         match resamp.as_mut() {
-            Some(resamp) => demod.push(&resamp.push(&buf), &enqueue, true),
-            None => demod.push(&buf, &enqueue, true),
+            Some(resamp) => demod.push_mag(resamp.push(&buf[..n]), &enqueue, true),
+            None => demod.push_cu8(&buf[..n], &enqueue, true),
         }
     }
     if !stop.is_set() {
@@ -181,10 +202,11 @@ pub fn run_iq(
 }
 
 struct Resamp {
-    prev: Option<Complex<f32>>,
+    prev: Option<(f32, f32)>,
     t: f64,
     seen: i64,
     step: f64,
+    mag: Vec<u16>,
 }
 
 impl Resamp {
@@ -194,22 +216,26 @@ impl Resamp {
             t: 0.0,
             seen: 0,
             step: f64::from(in_hz) / f64::from(SAMPLE_HZ),
+            mag: Vec::new(),
         }
     }
 
-    fn at(&self, chunk: &[Complex<f32>], idx: i64) -> Option<Complex<f32>> {
+    fn at(&self, chunk: &[u8], idx: i64) -> Option<(f32, f32)> {
         let local = idx - self.seen;
         if local == -1 {
             self.prev
         } else if local >= 0 {
-            chunk.get(local as usize).copied()
+            let i = local as usize;
+            let pair = chunk.get(2 * i..2 * i + 2)?;
+            Some((cu8_to_f32(pair[0]), cu8_to_f32(pair[1])))
         } else {
             None
         }
     }
 
-    fn push(&mut self, chunk: &[Complex<f32>]) -> Vec<Complex<f32>> {
-        let mut out = Vec::new();
+    fn push(&mut self, chunk: &[u8]) -> &[u16] {
+        self.mag.clear();
+        let samples = (chunk.len() / 2) as i64;
         loop {
             let i0 = self.t.floor() as i64;
             let frac = (self.t - i0 as f64) as f32;
@@ -219,16 +245,16 @@ impl Resamp {
             let Some(b) = self.at(chunk, i0 + 1) else {
                 break;
             };
-            out.push(Complex {
-                re: a.re + (b.re - a.re) * frac,
-                im: a.im + (b.im - a.im) * frac,
-            });
+            let i = a.0 + (b.0 - a.0) * frac;
+            let q = a.1 + (b.1 - a.1) * frac;
+            self.mag.push(mag_iq(i, q));
             self.t += self.step;
         }
-        if let Some(last) = chunk.last() {
-            self.prev = Some(*last);
+        if samples > 0 {
+            let last = (samples as usize - 1) * 2;
+            self.prev = Some((cu8_to_f32(chunk[last]), cu8_to_f32(chunk[last + 1])));
         }
-        self.seen += chunk.len() as i64;
-        out
+        self.seen += samples;
+        &self.mag
     }
 }

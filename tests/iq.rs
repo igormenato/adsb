@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use trck::{FRAME_LEN, Tracker, parse_hex_frame, unpack_frame};
 
@@ -291,6 +291,24 @@ fn iq_decode_rate_vs_snr() {
 }
 
 #[test]
+fn iq_1s_quiet_rtf() {
+    let samples = 2_400_000usize;
+    let iq = unique_path("quiet-1s.cu8");
+    fs::write(&iq, vec![127u8; samples * 2]).expect("cu8");
+    let table = table_arg();
+    let t0 = Instant::now();
+    let (status, _, stderr) = run_iq_file(&iq, 2_400_000, &table);
+    let wall = t0.elapsed().as_secs_f64();
+    assert!(status.success(), "{stderr}");
+    let capture = samples as f64 / 2_400_000.0;
+    let rtf = wall / capture;
+    let messages = iq_count(&stderr, "messages");
+    eprintln!("iq 1s 2.4MS/s quiet rtf={rtf:.4} wall={wall:.4}s messages={messages}");
+    let _ = fs::remove_file(&iq);
+    let _ = fs::remove_file(&table);
+}
+
+#[test]
 fn iq_2msps_still_decodes() {
     let iq = unique_path("2msps.cu8");
     let frames_path = unique_path("2msps-frames.csv");
@@ -347,8 +365,17 @@ fn iq_awec2026_recording() {
     let msg_csv = find_under(&dir, "messages.csv").expect("messages.csv");
     let pos_csv = find_under(&dir, "positions.csv").expect("positions.csv");
     let table = table_arg();
+    let t0 = Instant::now();
     let (status, stdout, stderr) = run_iq_file(&recording, 2_000_000, &table);
+    let wall = t0.elapsed().as_secs_f64();
     assert!(status.success(), "{stderr}");
+    let bytes = fs::metadata(&recording).expect("meta").len() as f64;
+    let capture = bytes / (2.0 * 2_000_000.0);
+    let rtf = wall / capture;
+    eprintln!(
+        "iq awec2026 rtf={rtf:.4} wall={wall:.4}s capture={capture:.3}s messages={}",
+        iq_count(&stderr, "messages")
+    );
     let got_hex: std::collections::HashSet<String> = iq_msg_hex(&stderr).into_iter().collect();
     let msg_text = fs::read_to_string(&msg_csv).expect("messages csv");
     let (header, rows) = parse_csv_table(&msg_text);

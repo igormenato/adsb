@@ -9,8 +9,8 @@
 //! - **No libusb dependency** — pure Rust USB via nusb
 //! - **Multi-transfer streaming** — keeps 15 USB transfers in-flight simultaneously,
 //!   eliminating the inter-transfer gap that causes RTL2832U FIFO overflow
-//! - **Backpressure-safe** — blocking channel delivery ensures no IQ samples are
-//!   silently dropped
+//! - **Overflow counting** — a full sample queue increments `dropped_chunks` and
+//!   USB transfers keep running so the RTL2832U FIFO is less likely to overrun
 //! - **Full R82xx support** — frequency tuning, gain control, bandwidth selection,
 //!   bias-T, Blog V4 upconversion
 //!
@@ -41,6 +41,7 @@ pub use error::{Error, Result};
 pub use rtlsdr::{
     AsyncReadControlHandle, AsyncReadHandle, BoardVariant, DEF_RTL_XTAL_FREQ, DeviceDescriptor,
     DeviceDescriptors, DeviceId, NUM_TRANSFERS, RECOMMENDED_QUEUE_DEPTH, RtlSdr, TRANSFER_BUF_SIZE,
+    TryRecv, deliver_samples,
 };
 pub use tuner::{GAIN_VALUES, R82XX_IF_FREQ, TunerType, nearest_gain};
 

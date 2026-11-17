@@ -7,6 +7,7 @@ mod decode;
 pub mod demod;
 mod frame;
 mod lines;
+pub mod mag;
 pub mod modes;
 mod queue;
 mod replay;

@@ -156,35 +156,23 @@ impl Rng {
 #[cfg(test)]
 mod tests {
     use rs1090::decode::crc::modes_checksum;
-    use rs1090::source::demod::magnitude_u16;
 
     use trck::demod::{demodulate2400, msg_octets};
+    use trck::mag::mag_cu8;
     use trck::{EmergencyKind, Tracker, pack_frame};
 
     use super::*;
     use trck::modes::{EVEN, ODD, df5_identity};
-    fn cu8_to_complex(bytes: &[u8]) -> Vec<num_complex::Complex<f32>> {
-        bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| num_complex::Complex {
-                re: (f32::from(pair[0]) - 127.5) / 128.0,
-                im: (f32::from(pair[1]) - 127.5) / 128.0,
-            })
-            .collect()
-    }
 
     fn recovered(bytes: &[u8]) -> Vec<[u8; 14]> {
-        let iq = cu8_to_complex(bytes);
-        demodulate2400(&magnitude_u16(&iq), true)
+        demodulate2400(&mag_cu8(bytes), true)
             .into_iter()
             .map(|m| m.msg)
             .collect()
     }
 
     fn mag_of(bytes: &[u8]) -> Vec<u16> {
-        magnitude_u16(&cu8_to_complex(bytes))
+        mag_cu8(bytes)
     }
 
     /// dump1090-2400 phase-4 preamble + 3.5 dB + quiet-slot checks at sample 0.
