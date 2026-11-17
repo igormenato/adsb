@@ -169,30 +169,48 @@ pub fn run_iq(
     stop: &Stop,
     fix: bool,
 ) -> Result<IqStats> {
+    let file = File::open(path).with_context(|| path.display().to_string())?;
+    iq_from_read(file, sample_hz, enqueue, stop, fix)
+}
+
+fn iq_from_read(
+    mut src: impl Read,
+    sample_hz: u32,
+    enqueue: impl Fn(Fix),
+    stop: &Stop,
+    fix: bool,
+) -> Result<IqStats> {
     if sample_hz == 0 {
         bail!("iq-rate must be > 0");
     }
-    let mut file = File::open(path).with_context(|| path.display().to_string())?;
     let mut buf = vec![0u8; FILE_CHUNK * 2];
     let mut demod = Demod::new(fix);
     let mut resamp = (sample_hz != SAMPLE_HZ).then(|| Resamp::new(sample_hz));
+    let mut leftover = None;
     loop {
         if stop.is_set() {
             return Ok(demod.stats);
         }
-        let n = file
-            .read(&mut buf)
-            .with_context(|| path.display().to_string())?;
+        let mut off = 0;
+        if let Some(byte) = leftover.take() {
+            buf[0] = byte;
+            off = 1;
+        }
+        let n = src.read(&mut buf[off..])?;
         if n == 0 {
             break;
         }
-        let n = n & !1;
-        if n == 0 {
+        let mut total = off + n;
+        if total % 2 == 1 {
+            leftover = Some(buf[total - 1]);
+            total -= 1;
+        }
+        if total < 2 {
             continue;
         }
         match resamp.as_mut() {
-            Some(resamp) => demod.push_mag(resamp.push(&buf[..n]), &enqueue, true),
-            None => demod.push_cu8(&buf[..n], &enqueue, true),
+            Some(resamp) => demod.push_mag(resamp.push(&buf[..total]), &enqueue, true),
+            None => demod.push_cu8(&buf[..total], &enqueue, true),
         }
     }
     if !stop.is_set() {
@@ -256,5 +274,67 @@ impl Resamp {
         }
         self.seen += samples;
         &self.mag
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Cursor};
+
+    use crate::iq::{Synth, encode_cu8};
+    use trck::modes::EVEN;
+
+    struct OddReads {
+        inner: Cursor<Vec<u8>>,
+        odd: bool,
+    }
+
+    impl Read for OddReads {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let want = if self.odd { 1 } else { 3 };
+            self.odd = !self.odd;
+            let n = want.min(buf.len());
+            let mut tmp = [0u8; 3];
+            let got = self.inner.read(&mut tmp[..n])?;
+            buf[..got].copy_from_slice(&tmp[..got]);
+            Ok(got)
+        }
+    }
+
+    fn stats(src: impl Read, hz: u32) -> IqStats {
+        let stop = Stop::new();
+        iq_from_read(src, hz, |_| {}, &stop, true).expect("iq")
+    }
+
+    #[test]
+    fn odd_short_reads_match_whole_file() {
+        let bytes = encode_cu8(&[EVEN], Synth::default()).expect("iq");
+        let whole = stats(Cursor::new(bytes.clone()), SAMPLE_HZ);
+        let odd = stats(
+            OddReads {
+                inner: Cursor::new(bytes.clone()),
+                odd: true,
+            },
+            SAMPLE_HZ,
+        );
+        assert!(whole.messages > 0, "{whole:?}");
+        assert_eq!(whole.messages, odd.messages);
+        assert_eq!(whole.fixed, odd.fixed);
+
+        let slow = 2_000_000;
+        let whole = stats(Cursor::new(bytes.clone()), slow);
+        let odd = stats(
+            OddReads {
+                inner: Cursor::new(bytes),
+                odd: true,
+            },
+            slow,
+        );
+        assert_eq!(whole.messages, odd.messages);
+        assert_eq!(whole.fixed, odd.fixed);
     }
 }
