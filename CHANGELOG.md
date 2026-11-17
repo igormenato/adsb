@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `trck update` installs `trck-aarch64` from GitHub Releases. `--version X.Y.Z` selects that tag.
+
 ### Fixed
 
 - FC0013 `--gain` now switches the tuner out of AGC (0x0d bit 3 and IF 0x13 = 0x0a) before writing LNA, matching librtlsdr.
