@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/igormenato/adsb/compare/v0.3.4...v0.3.5) - 2026-11-17
+
+### Added
+
+- *(trck)* add trck update from GitHub Releases ([#108](https://github.com/igormenato/adsb/pull/108))
+
+### Other
+
+- Default --gain to the tuner's maximum table step ([#109](https://github.com/igormenato/adsb/pull/109))
+- Fix FC0013 manual gain AGC (ADSB-35) ([#106](https://github.com/igormenato/adsb/pull/106))
+
 ### Changed
 
 - `--gain` defaults to the tuner's maximum advertised table step instead of a hardcoded 49.6 dB.
