@@ -1,19 +1,19 @@
 //! Replace this binary with a GitHub release of `igormenato/adsb`.
 
-use std::fs;
-use std::io::{self, ErrorKind};
+use std::fs::{self, OpenOptions};
+use std::io::{self, ErrorKind, Read as _};
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode, Output};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Parser;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 const REPO: &str = "igormenato/adsb";
 const ASSET_NAME: &str = "trck-aarch64";
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
+const USER_AGENT: &str = concat!("User-Agent: trck/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Parser, Debug)]
 pub struct Args {
@@ -73,7 +73,7 @@ struct Asset {
     name: String,
     size: u64,
     url: String,
-    sha256: Option<[u8; 32]>,
+    sha256: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,10 +120,8 @@ fn run_inner(args: Args) -> Result<()> {
     }
     let asset = pick_asset(&assets)
         .ok_or_else(|| anyhow!("release {} has no {ASSET_NAME} asset", target.tag()))?;
-    let bytes = http_bytes(&asset.url)?;
-    verify(&bytes, asset)?;
     let dest = std::env::current_exe().context("cannot resolve this binary")?;
-    replace_atomically(&dest, &bytes)?;
+    install(&dest, asset)?;
     println!("{current} -> {target}");
     println!("replaced {}", dest.display());
     Ok(())
@@ -133,32 +131,26 @@ fn pick_asset(assets: &[Asset]) -> Option<&Asset> {
     assets.iter().find(|a| a.name == ASSET_NAME)
 }
 
-fn verify(bytes: &[u8], asset: &Asset) -> Result<()> {
-    if bytes.len() as u64 != asset.size {
-        bail!(
-            "{ASSET_NAME} is {} bytes, GitHub lists {}",
-            bytes.len(),
-            asset.size
-        );
+fn install(dest: &Path, asset: &Asset) -> Result<()> {
+    let tmp = sibling_new(dest)?;
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)
+        .map_err(|err| write_fail(dest, err))?;
+    if let Err(err) = curl_file(&asset.url, &tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
     }
-    if bytes.len() < 4 || bytes[..4] != *b"\x7fELF" {
-        bail!("{ASSET_NAME} is not an ELF binary");
+    if let Err(err) = verify(&tmp, asset) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
     }
-    if let Some(expect) = asset.sha256 {
-        let got: [u8; 32] = Sha256::digest(bytes).into();
-        if got != expect {
-            bail!("{ASSET_NAME} sha256 does not match GitHub");
-        }
-    }
-    Ok(())
-}
-
-fn replace_atomically(dest: &Path, bytes: &[u8]) -> Result<()> {
-    let name = dest
-        .file_name()
-        .ok_or_else(|| anyhow!("binary path {} has no file name", dest.display()))?;
-    let tmp = dest.with_file_name(format!("{}.new", name.to_string_lossy()));
-    write_executable(&tmp, bytes).map_err(|err| write_fail(dest, err))?;
+    make_executable(&tmp).map_err(|err| {
+        let _ = fs::remove_file(&tmp);
+        write_fail(dest, err)
+    })?;
     fs::rename(&tmp, dest).map_err(|err| {
         let _ = fs::remove_file(&tmp);
         write_fail(dest, err)
@@ -166,12 +158,65 @@ fn replace_atomically(dest: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn write_executable(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    fs::write(path, bytes)?;
+fn sibling_new(dest: &Path) -> Result<PathBuf> {
+    let name = dest
+        .file_name()
+        .ok_or_else(|| anyhow!("binary path {} has no file name", dest.display()))?;
+    Ok(dest.with_file_name(format!("{}.new", name.to_string_lossy())))
+}
+
+fn verify(path: &Path, asset: &Asset) -> Result<()> {
+    let meta = fs::metadata(path).with_context(|| format!("cannot read {}", path.display()))?;
+    if meta.len() != asset.size {
+        bail!(
+            "{ASSET_NAME} is {} bytes, GitHub lists {}",
+            meta.len(),
+            asset.size
+        );
+    }
+    let mut magic = [0u8; 4];
+    fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    if magic != *b"\x7fELF" {
+        bail!("{ASSET_NAME} is not an ELF binary");
+    }
+    if let Some(expect) = asset.sha256.as_deref() {
+        let got = sha256_hex(path)?;
+        if got != expect {
+            bail!("{ASSET_NAME} sha256 does not match GitHub");
+        }
+    }
+    Ok(())
+}
+
+fn sha256_hex(path: &Path) -> Result<String> {
+    let out = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .map_err(|err| {
+            if err.kind() == ErrorKind::NotFound {
+                anyhow!("{ASSET_NAME} has a GitHub digest, but sha256sum is missing")
+            } else {
+                anyhow!("cannot run sha256sum: {err}")
+            }
+        })?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("{}", err.trim());
+    }
+    let text = String::from_utf8(out.stdout).context("sha256sum output")?;
+    let hex = text
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow!("sha256sum output was empty"))?;
+    Ok(hex.to_ascii_lowercase())
+}
+
+fn make_executable(path: &Path) -> io::Result<()> {
     let mut perms = fs::metadata(path)?.permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(path, perms)?;
-    Ok(())
+    fs::set_permissions(path, perms)
 }
 
 fn write_fail(dest: &Path, err: io::Error) -> anyhow::Error {
@@ -198,8 +243,7 @@ fn fetch_tag(tag: &str) -> Result<(Version, Vec<Asset>)> {
 }
 
 fn fetch_release(url: &str) -> Result<(Version, Vec<Asset>)> {
-    let body = http_text(url)?;
-    parse_release(&body)
+    parse_release(&curl_text(url)?)
 }
 
 fn parse_release(body: &str) -> Result<(Version, Vec<Asset>)> {
@@ -223,60 +267,68 @@ fn parse_release(body: &str) -> Result<(Version, Vec<Asset>)> {
     Ok((version, assets))
 }
 
-fn parse_digest(text: &str) -> Result<[u8; 32]> {
+fn parse_digest(text: &str) -> Result<String> {
     let hex = text
         .strip_prefix("sha256:")
         .ok_or_else(|| anyhow!("unsupported GitHub digest {text}"))?;
-    let mut out = [0u8; 32];
-    hex::decode_to_slice(hex, &mut out).map_err(|_| anyhow!("invalid GitHub sha256 digest"))?;
-    Ok(out)
-}
-
-fn http_text(url: &str) -> Result<String> {
-    let mut resp = get(url)?;
-    resp.body_mut()
-        .read_to_string()
-        .map_err(|err| net_fail(&err))
-}
-
-fn http_bytes(url: &str) -> Result<Vec<u8>> {
-    let mut resp = get(url)?;
-    resp.body_mut().read_to_vec().map_err(|err| net_fail(&err))
-}
-
-fn get(url: &str) -> Result<ureq::http::Response<ureq::Body>> {
-    ureq::get(url)
-        .header("User-Agent", concat!("trck/", env!("CARGO_PKG_VERSION")))
-        .call()
-        .map_err(http_fail)
-}
-
-fn http_fail(err: ureq::Error) -> anyhow::Error {
-    match &err {
-        ureq::Error::StatusCode(404) => anyhow!("no GitHub release at that tag"),
-        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed | ureq::Error::Timeout(_) => {
-            anyhow!("cannot reach GitHub: {err}")
-        }
-        ureq::Error::Io(io)
-            if io.kind() == ErrorKind::ConnectionRefused
-                || io.kind() == ErrorKind::ConnectionReset
-                || io.kind() == ErrorKind::TimedOut
-                || io.kind() == ErrorKind::NetworkUnreachable
-                || io.kind() == ErrorKind::HostUnreachable =>
-        {
-            anyhow!("cannot reach GitHub: {err}")
-        }
-        other => anyhow!("{other}"),
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("invalid GitHub sha256 digest");
     }
+    Ok(hex.to_ascii_lowercase())
 }
 
-fn net_fail(err: &impl std::fmt::Display) -> anyhow::Error {
-    anyhow!("cannot reach GitHub: {err}")
+fn curl_text(url: &str) -> Result<String> {
+    let out = curl(&["-fsSL", "-H", USER_AGENT, url])?;
+    String::from_utf8(out.stdout).context("GitHub release JSON")
+}
+
+fn curl_file(url: &str, dest: &Path) -> Result<()> {
+    let dest = dest
+        .to_str()
+        .ok_or_else(|| anyhow!("binary path {} is not UTF-8", dest.display()))?;
+    curl(&["-fsSL", "-o", dest, url]).map(|_| ())
+}
+
+fn curl(args: &[&str]) -> Result<Output> {
+    let out = Command::new("curl")
+        .args(args)
+        .output()
+        .map_err(curl_spawn)?;
+    if out.status.success() {
+        return Ok(out);
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let err = err.trim();
+    if err.is_empty() {
+        bail!("curl failed");
+    }
+    bail!("{err}")
+}
+
+fn curl_spawn(err: io::Error) -> anyhow::Error {
+    if err.kind() == ErrorKind::NotFound {
+        anyhow!("trck update needs curl: sudo apt install curl")
+    } else {
+        anyhow!("cannot run curl: {err}")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trck-update-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn version_parse_and_order() {
@@ -315,31 +367,37 @@ mod tests {
 
     #[test]
     fn verify_size_elf_and_sha256() {
+        let dir = temp_dir();
+        let path = dir.join("blob");
         let mut elf = b"\x7fELF".to_vec();
         elf.extend_from_slice(&[0u8; 12]);
-        let sha: [u8; 32] = Sha256::digest(&elf).into();
+        fs::write(&path, &elf).unwrap();
+        let sha = sha256_hex(&path).unwrap();
         let asset = Asset {
             name: ASSET_NAME.into(),
             size: elf.len() as u64,
             url: String::new(),
             sha256: Some(sha),
         };
-        verify(&elf, &asset).unwrap();
+        verify(&path, &asset).unwrap();
 
         let mut bad_hash = asset.clone();
-        bad_hash.sha256 = Some([0; 32]);
-        assert!(verify(&elf, &bad_hash).is_err());
+        bad_hash.sha256 = Some("0".repeat(64));
+        assert!(verify(&path, &bad_hash).is_err());
 
         let mut bad_size = asset.clone();
         bad_size.size = 3;
-        assert!(verify(&elf, &bad_size).is_err());
+        bad_size.sha256 = None;
+        assert!(verify(&path, &bad_size).is_err());
 
+        fs::write(&path, b"PK\x03\x04").unwrap();
         let not_elf = Asset {
             sha256: None,
             size: 4,
             ..asset
         };
-        assert!(verify(b"PK\x03\x04", &not_elf).is_err());
+        assert!(verify(&path, &not_elf).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -350,23 +408,28 @@ mod tests {
                 "name": "trck-aarch64",
                 "size": 16,
                 "browser_download_url": "https://example/trck-aarch64",
-                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "digest": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
             }]
         }"#;
         let (ver, assets) = parse_release(json).unwrap();
         assert_eq!(ver.to_string(), "0.3.4");
         let asset = pick_asset(&assets).unwrap();
         assert_eq!(asset.size, 16);
-        assert!(asset.sha256.is_some());
+        assert_eq!(
+            asset.sha256.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
     }
 
     #[test]
     fn atomic_replace_overwrites_temp_file() {
-        let dir = std::env::temp_dir().join(format!("trck-update-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir();
         let dest = dir.join("trck");
         fs::write(&dest, b"old").unwrap();
-        replace_atomically(&dest, b"\x7fELFnew").unwrap();
+        let tmp = sibling_new(&dest).unwrap();
+        fs::write(&tmp, b"\x7fELFnew").unwrap();
+        make_executable(&tmp).unwrap();
+        fs::rename(&tmp, &dest).unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"\x7fELFnew");
         assert!(!dir.join("trck.new").exists());
         let mode = fs::metadata(&dest).unwrap().permissions().mode() & 0o111;
@@ -380,5 +443,11 @@ mod tests {
         let msg = write_fail(Path::new("/usr/local/bin/trck"), err).to_string();
         assert!(msg.contains("permission denied"));
         assert!(msg.contains("sudo"));
+    }
+
+    #[test]
+    fn missing_curl_names_apt() {
+        let msg = curl_spawn(io::Error::new(ErrorKind::NotFound, "nope")).to_string();
+        assert_eq!(msg, "trck update needs curl: sudo apt install curl");
     }
 }

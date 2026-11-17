@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `trck update` installs `trck-aarch64` from GitHub Releases. `--version X.Y.Z` selects that tag.
+- `trck update` installs `trck-aarch64` from GitHub Releases with `curl`. `--version X.Y.Z` selects that tag.
 
 ### Fixed
 
