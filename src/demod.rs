@@ -1,14 +1,20 @@
-//! dump1090-2400 demodulation with optional 1-bit PI CRC correction.
+//! 2.4 MS/s Mode S demodulator with optional 1-bit PI CRC correction.
 //!
-//! Derived from rs1090 0.8.1 `src/source/demod/demod2400.rs` under MIT.
-//! Copyright (c) Xavier Olive.
-//! The CRC gate goes through `score_message` instead of calling `validate_modes_message` on the raw bits.
+//! Preamble search, `slice_phase0`–`slice_phase4`, DF bitset early-out, and
+//! the post-accept skip are ported from readsb `demod_2400.c`
+//! (wiedehopf/readsb, itself a fork of dump1090-fa).
+//! The CRC gate is `score_message` (trck 1-bit PI fix), not readsb
+//! `scoreModesMessage`.
 
 use rs1090::source::demod::{MODES_LONG_MSG_BYTES, icao_filter_test, validate_modes_message};
 
 use crate::crc_fix::{aa_bit, correct_pi};
 
 const MIN_TRAILING_SAMPLES: usize = 326;
+/// readsb `PREAMBLE_THRESHOLD_DEFAULT`.
+const PREAMBLE_THRESHOLD: i32 = 58;
+const DF_SHORT: u32 = (1 << 0) | (1 << 4) | (1 << 5) | (1 << 11);
+const DF_LONG: u32 = (1 << 16) | (1 << 17) | (1 << 18) | (1 << 20) | (1 << 21);
 
 #[derive(Clone, Debug)]
 pub struct ModeSMessage {
@@ -33,79 +39,247 @@ pub fn demodulate2400(samples: &[u16], fix: bool) -> Vec<ModeSMessage> {
     if samples.len() < MIN_TRAILING_SAMPLES {
         return results;
     }
-
-    for j in 0..(samples.len() - MIN_TRAILING_SAMPLES) {
-        let Some((high, base_signal, base_noise)) = check_preamble(&samples[j..j + 14]) else {
-            continue;
-        };
-        if base_signal * 2 < 3 * base_noise {
-            continue;
-        }
-        if i32::from(samples[j + 5]) >= high
-            || i32::from(samples[j + 6]) >= high
-            || i32::from(samples[j + 7]) >= high
-            || i32::from(samples[j + 8]) >= high
-            || i32::from(samples[j + 14]) >= high
-            || i32::from(samples[j + 15]) >= high
-            || i32::from(samples[j + 16]) >= high
-            || i32::from(samples[j + 17]) >= high
-            || i32::from(samples[j + 18]) >= high
+    let df_long = if fix {
+        DF_LONG | df17_one_bit_damage()
+    } else {
+        DF_LONG
+    };
+    let last = samples.len() - MIN_TRAILING_SAMPLES;
+    let mut j = 0;
+    while j < last {
+        if !(samples[j + 1] > samples[j + 7]
+            && samples[j + 12] > samples[j + 14]
+            && samples[j + 12] > samples[j + 15])
         {
+            j += 1;
             continue;
         }
-
-        let mut bestmsg = ModeSMessage {
-            msg: [0_u8; MODES_LONG_MSG_BYTES],
-            signal_level: 0.,
-            score: -2,
+        let pa = &samples[j..];
+        let base_noise = i32::from(pa[5])
+            + i32::from(pa[8])
+            + i32::from(pa[16])
+            + i32::from(pa[17])
+            + i32::from(pa[18]);
+        let ref_level = (base_noise * PREAMBLE_THRESHOLD) >> 5;
+        let mut best_msg = [0_u8; MODES_LONG_MSG_BYTES];
+        let mut best_score = -42;
+        let mut best_corrected = 0_u8;
+        let diff_2_3 = i32::from(pa[2]) - i32::from(pa[3]);
+        let sum_1_4 = i32::from(pa[1]) + i32::from(pa[4]);
+        let diff_10_11 = i32::from(pa[10]) - i32::from(pa[11]);
+        let common = sum_1_4 - diff_2_3 + i32::from(pa[9]) + i32::from(pa[12]);
+        if common - diff_10_11 >= ref_level {
+            score_phase(
+                4,
+                pa,
+                df_long,
+                fix,
+                &mut best_msg,
+                &mut best_score,
+                &mut best_corrected,
+            );
+            score_phase(
+                5,
+                pa,
+                df_long,
+                fix,
+                &mut best_msg,
+                &mut best_score,
+                &mut best_corrected,
+            );
+        }
+        if common + diff_10_11 >= ref_level {
+            score_phase(
+                6,
+                pa,
+                df_long,
+                fix,
+                &mut best_msg,
+                &mut best_score,
+                &mut best_corrected,
+            );
+            score_phase(
+                7,
+                pa,
+                df_long,
+                fix,
+                &mut best_msg,
+                &mut best_score,
+                &mut best_corrected,
+            );
+        }
+        if sum_1_4 + 2 * diff_2_3 + diff_10_11 + i32::from(pa[12]) >= ref_level {
+            score_phase(
+                8,
+                pa,
+                df_long,
+                fix,
+                &mut best_msg,
+                &mut best_score,
+                &mut best_corrected,
+            );
+        }
+        if best_score < 0 {
+            j += 1;
+            continue;
+        }
+        let bits: usize = if best_msg[0] >> 3 >= 16 { 112 } else { 56 };
+        let signal_len = bits * 12 / 5;
+        let mut scaled_signal_power = 0_u64;
+        for k in 0..signal_len {
+            let mag = u64::from(pa[19 + k]);
+            scaled_signal_power += mag * mag;
+        }
+        let signal_power = scaled_signal_power as f64 / 65535.0 / 65535.0;
+        results.push(ModeSMessage {
+            msg: best_msg,
+            signal_level: signal_power / signal_len as f64,
+            score: best_score,
             sample_position: j,
-            corrected_bits: 0,
-        };
-        let mut msg = [0_u8; MODES_LONG_MSG_BYTES];
-
-        for try_phase in 4..9 {
-            let mut slice_loc: usize = j + 19 + (try_phase / 5);
-            let mut phase = Phase::from(try_phase);
-
-            for slot in msg.iter_mut().take(MODES_LONG_MSG_BYTES) {
-                let slice_this_byte: &[u16] = &samples[slice_loc..];
-                let starting_phase = phase;
-                let mut the_byte = 0x00;
-                let mut index = 0;
-                for i in 0..8 {
-                    if phase.calculate_bit(&slice_this_byte[index..index + 4]) > 0 {
-                        the_byte |= 1 << (7 - i);
-                    }
-                    index = phase.increment_index(index);
-                    phase = phase.next();
-                }
-                *slot = the_byte;
-                slice_loc += index;
-                phase = starting_phase.next_start();
-            }
-
-            let (score, corrected_bits) = score_message(&mut msg, fix);
-            if score > bestmsg.score {
-                bestmsg.msg.clone_from_slice(&msg);
-                bestmsg.score = score;
-                bestmsg.corrected_bits = corrected_bits;
-                let mut scaled_signal_power = 0_u64;
-                let signal_len = msg.len() * 12 / 5;
-                for k in 0..signal_len {
-                    let mag = samples[j + 19 + k] as u64;
-                    scaled_signal_power += mag * mag;
-                }
-                let signal_power = scaled_signal_power as f64 / 65535.0 / 65535.0;
-                bestmsg.signal_level = signal_power / signal_len as f64;
-            }
-        }
-
-        if bestmsg.score >= 0 {
-            results.push(bestmsg);
-        }
+            corrected_bits: best_corrected,
+        });
+        // readsb: `pa += msglen * 8 / 4` (msglen in bits).
+        j += bits * 2;
+        j += 1;
     }
-
     results
+}
+
+fn df17_one_bit_damage() -> u32 {
+    let df = 17u32;
+    let mut bits = 1 << df;
+    for bit in 0..5 {
+        bits |= 1 << (df ^ (1 << bit));
+    }
+    bits
+}
+
+fn score_phase(
+    try_phase: usize,
+    pa: &[u16],
+    df_long: u32,
+    fix: bool,
+    best_msg: &mut [u8; 14],
+    best_score: &mut i32,
+    best_corrected: &mut u8,
+) {
+    let mut offset = 19 + try_phase / 5;
+    let mut phase = try_phase % 5;
+    let mut msg = [0_u8; MODES_LONG_MSG_BYTES];
+    msg[0] = slice_byte(pa, &mut offset, &mut phase);
+    let df = u32::from(msg[0] >> 3);
+    let bytelen = if df_long & (1 << df) != 0 {
+        14
+    } else if DF_SHORT & (1 << df) != 0 {
+        7
+    } else {
+        if -2 > *best_score {
+            *best_score = -2;
+        }
+        return;
+    };
+    for slot in msg.iter_mut().take(bytelen).skip(1) {
+        *slot = slice_byte(pa, &mut offset, &mut phase);
+    }
+    let (score, corrected) = score_message(&mut msg, fix);
+    if score > *best_score {
+        *best_msg = msg;
+        *best_score = score;
+        *best_corrected = corrected;
+    }
+}
+
+fn slice_byte(m: &[u16], offset: &mut usize, phase: &mut usize) -> u8 {
+    let p = *offset;
+    let (byte, next_phase, advance) = match *phase {
+        0 => (
+            bit(slice_phase0(&m[p..]), 0x80)
+                | bit(slice_phase2(&m[p + 2..]), 0x40)
+                | bit(slice_phase4(&m[p + 4..]), 0x20)
+                | bit(slice_phase1(&m[p + 7..]), 0x10)
+                | bit(slice_phase3(&m[p + 9..]), 0x08)
+                | bit(slice_phase0(&m[p + 12..]), 0x04)
+                | bit(slice_phase2(&m[p + 14..]), 0x02)
+                | bit(slice_phase4(&m[p + 16..]), 0x01),
+            1,
+            19,
+        ),
+        1 => (
+            bit(slice_phase1(&m[p..]), 0x80)
+                | bit(slice_phase3(&m[p + 2..]), 0x40)
+                | bit(slice_phase0(&m[p + 5..]), 0x20)
+                | bit(slice_phase2(&m[p + 7..]), 0x10)
+                | bit(slice_phase4(&m[p + 9..]), 0x08)
+                | bit(slice_phase1(&m[p + 12..]), 0x04)
+                | bit(slice_phase3(&m[p + 14..]), 0x02)
+                | bit(slice_phase0(&m[p + 17..]), 0x01),
+            2,
+            19,
+        ),
+        2 => (
+            bit(slice_phase2(&m[p..]), 0x80)
+                | bit(slice_phase4(&m[p + 2..]), 0x40)
+                | bit(slice_phase1(&m[p + 5..]), 0x20)
+                | bit(slice_phase3(&m[p + 7..]), 0x10)
+                | bit(slice_phase0(&m[p + 10..]), 0x08)
+                | bit(slice_phase2(&m[p + 12..]), 0x04)
+                | bit(slice_phase4(&m[p + 14..]), 0x02)
+                | bit(slice_phase1(&m[p + 17..]), 0x01),
+            3,
+            19,
+        ),
+        3 => (
+            bit(slice_phase3(&m[p..]), 0x80)
+                | bit(slice_phase0(&m[p + 3..]), 0x40)
+                | bit(slice_phase2(&m[p + 5..]), 0x20)
+                | bit(slice_phase4(&m[p + 7..]), 0x10)
+                | bit(slice_phase1(&m[p + 10..]), 0x08)
+                | bit(slice_phase3(&m[p + 12..]), 0x04)
+                | bit(slice_phase0(&m[p + 15..]), 0x02)
+                | bit(slice_phase2(&m[p + 17..]), 0x01),
+            4,
+            19,
+        ),
+        _ => (
+            bit(slice_phase4(&m[p..]), 0x80)
+                | bit(slice_phase1(&m[p + 3..]), 0x40)
+                | bit(slice_phase3(&m[p + 5..]), 0x20)
+                | bit(slice_phase0(&m[p + 8..]), 0x10)
+                | bit(slice_phase2(&m[p + 10..]), 0x08)
+                | bit(slice_phase4(&m[p + 12..]), 0x04)
+                | bit(slice_phase1(&m[p + 15..]), 0x02)
+                | bit(slice_phase3(&m[p + 17..]), 0x01),
+            0,
+            20,
+        ),
+    };
+    *phase = next_phase;
+    *offset += advance;
+    byte
+}
+
+fn bit(corr: i32, mask: u8) -> u8 {
+    if corr > 0 { mask } else { 0 }
+}
+
+fn slice_phase0(m: &[u16]) -> i32 {
+    18 * i32::from(m[0]) - 15 * i32::from(m[1]) - 3 * i32::from(m[2])
+}
+
+fn slice_phase1(m: &[u16]) -> i32 {
+    14 * i32::from(m[0]) - 5 * i32::from(m[1]) - 9 * i32::from(m[2])
+}
+
+fn slice_phase2(m: &[u16]) -> i32 {
+    16 * i32::from(m[0]) + 5 * i32::from(m[1]) - 20 * i32::from(m[2])
+}
+
+fn slice_phase3(m: &[u16]) -> i32 {
+    7 * i32::from(m[0]) + 11 * i32::from(m[1]) - 18 * i32::from(m[2])
+}
+
+fn slice_phase4(m: &[u16]) -> i32 {
+    4 * i32::from(m[0]) + 15 * i32::from(m[1]) - 20 * i32::from(m[2]) + i32::from(m[3])
 }
 
 fn addr(msg: &[u8]) -> u32 {
@@ -128,174 +302,6 @@ fn score_message(msg: &mut [u8; 14], fix: bool) -> (i32, u8) {
                 return (-2, 0);
             }
             (validate_modes_message(msg), 1)
-        }
-    }
-}
-
-fn check_preamble(preamble: &[u16]) -> Option<(i32, u32, u32)> {
-    debug_assert_eq!(preamble.len(), 14);
-
-    if !(preamble[0] < preamble[1] && preamble[12] > preamble[13]) {
-        return None;
-    }
-
-    if preamble[1] > preamble[2]
-        && preamble[2] < preamble[3]
-        && preamble[3] > preamble[4]
-        && preamble[8] < preamble[9]
-        && preamble[9] > preamble[10]
-        && preamble[10] < preamble[11]
-    {
-        let high = (i32::from(preamble[1])
-            + i32::from(preamble[3])
-            + i32::from(preamble[9])
-            + i32::from(preamble[11])
-            + i32::from(preamble[12]))
-            / 4;
-        let base_signal = u32::from(preamble[1]) + u32::from(preamble[3]) + u32::from(preamble[9]);
-        let base_noise = u32::from(preamble[5]) + u32::from(preamble[6]) + u32::from(preamble[7]);
-        Some((high, base_signal, base_noise))
-    } else if preamble[1] > preamble[2]
-        && preamble[2] < preamble[3]
-        && preamble[3] > preamble[4]
-        && preamble[8] < preamble[9]
-        && preamble[9] > preamble[10]
-        && preamble[11] < preamble[12]
-    {
-        let high = (i32::from(preamble[1])
-            + i32::from(preamble[3])
-            + i32::from(preamble[9])
-            + i32::from(preamble[12]))
-            / 4;
-        let base_signal = u32::from(preamble[1])
-            + u32::from(preamble[3])
-            + u32::from(preamble[9])
-            + u32::from(preamble[12]);
-        let base_noise = u32::from(preamble[5])
-            + u32::from(preamble[6])
-            + u32::from(preamble[7])
-            + u32::from(preamble[8]);
-        Some((high, base_signal, base_noise))
-    } else if preamble[1] > preamble[2]
-        && preamble[2] < preamble[3]
-        && preamble[4] > preamble[5]
-        && preamble[8] < preamble[9]
-        && preamble[10] > preamble[11]
-        && preamble[11] < preamble[12]
-    {
-        let high = (i32::from(preamble[1])
-            + i32::from(preamble[3])
-            + i32::from(preamble[4])
-            + i32::from(preamble[9])
-            + i32::from(preamble[10])
-            + i32::from(preamble[12]))
-            / 4;
-        let base_signal = u32::from(preamble[1]) + u32::from(preamble[12]);
-        let base_noise = u32::from(preamble[6]) + u32::from(preamble[7]);
-        Some((high, base_signal, base_noise))
-    } else if preamble[1] > preamble[2]
-        && preamble[3] < preamble[4]
-        && preamble[4] > preamble[5]
-        && preamble[9] < preamble[10]
-        && preamble[10] > preamble[11]
-        && preamble[11] < preamble[12]
-    {
-        let high = (i32::from(preamble[1])
-            + i32::from(preamble[4])
-            + i32::from(preamble[10])
-            + i32::from(preamble[12]))
-            / 4;
-        let base_signal = u32::from(preamble[1])
-            + u32::from(preamble[4])
-            + u32::from(preamble[10])
-            + u32::from(preamble[12]);
-        let base_noise = u32::from(preamble[5])
-            + u32::from(preamble[6])
-            + u32::from(preamble[7])
-            + u32::from(preamble[8]);
-        Some((high, base_signal, base_noise))
-    } else if preamble[2] > preamble[3]
-        && preamble[3] < preamble[4]
-        && preamble[4] > preamble[5]
-        && preamble[9] < preamble[10]
-        && preamble[10] > preamble[11]
-        && preamble[11] < preamble[12]
-    {
-        let high = (i32::from(preamble[1])
-            + i32::from(preamble[2])
-            + i32::from(preamble[4])
-            + i32::from(preamble[10])
-            + i32::from(preamble[12]))
-            / 4;
-        let base_signal =
-            u32::from(preamble[4]) + u32::from(preamble[10]) + u32::from(preamble[12]);
-        let base_noise = u32::from(preamble[6]) + u32::from(preamble[7]) + u32::from(preamble[8]);
-        Some((high, base_signal, base_noise))
-    } else {
-        None
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Phase {
-    Zero,
-    One,
-    Two,
-    Three,
-    Four,
-}
-
-impl From<usize> for Phase {
-    fn from(num: usize) -> Self {
-        match num % 5 {
-            0 => Self::Zero,
-            1 => Self::One,
-            2 => Self::Two,
-            3 => Self::Three,
-            _ => Self::Four,
-        }
-    }
-}
-
-impl Phase {
-    fn next_start(self) -> Self {
-        match self {
-            Self::Zero => Self::One,
-            Self::One => Self::Two,
-            Self::Two => Self::Three,
-            Self::Three => Self::Four,
-            Self::Four => Self::Zero,
-        }
-    }
-
-    fn next(self) -> Self {
-        match self {
-            Self::Zero => Self::Two,
-            Self::Two => Self::Four,
-            Self::Four => Self::One,
-            Self::One => Self::Three,
-            Self::Three => Self::Zero,
-        }
-    }
-
-    fn increment_index(self, index: usize) -> usize {
-        index
-            + match self {
-                Self::Zero | Self::Two | Self::One => 2,
-                Self::Four | Self::Three => 3,
-            }
-    }
-
-    fn calculate_bit(self, m: &[u16]) -> i32 {
-        let m0 = i32::from(m[0]);
-        let m1 = i32::from(m[1]);
-        let m2 = i32::from(m[2]);
-        match self {
-            Self::Zero => 5 * m0 - 3 * m1 - 2 * m2,
-            Self::One => 4 * m0 - m1 - 3 * m2,
-            Self::Two => 3 * m0 + m1 - 4 * m2,
-            Self::Three => 2 * m0 + 3 * m1 - 5 * m2,
-            Self::Four => m0 + 5 * m1 - 5 * m2 - i32::from(m[3]),
         }
     }
 }

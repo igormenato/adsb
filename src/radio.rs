@@ -1,4 +1,4 @@
-//! RTL-SDR at 1090 MHz. dump1090-2400 demod with 1-bit PI CRC correction.
+//! RTL-SDR at 1090 MHz. readsb 2.4 MS/s demod with 1-bit PI CRC correction.
 
 use std::path::Path;
 use std::time::Duration;

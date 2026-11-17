@@ -281,6 +281,16 @@ mod tests {
     }
 
     #[test]
+    fn skip_does_not_repeat_a_frame() {
+        let odd = trck::modes::ODD;
+        let bytes = encode_cu8(&[EVEN, odd], Synth::default()).expect("iq");
+        let msgs = recovered(&bytes);
+        assert!(msgs.len() <= 4, "n={} {msgs:02x?}", msgs.len());
+        assert!(msgs.iter().any(|m| m == &EVEN), "{msgs:02x?}");
+        assert!(msgs.iter().any(|m| m == &odd), "{msgs:02x?}");
+    }
+
+    #[test]
     fn a_clean_frame_demodulates() {
         let bytes = encode_cu8(&[EVEN], Synth::default()).expect("iq");
         let mag = mag_of(&bytes);
