@@ -145,7 +145,13 @@ impl Fc0013 {
     }
 
     /// Manual LNA gain: closest table step to `gain_tenth_db`.
+    ///
+    /// Mode bits match librtlsdr `fc0013_set_gain_mode(dev, 1)`: set 0x0d bit 3
+    /// and fix IF VGA at 0x13 = 0x0a, then write the LNA code into 0x14.
     pub fn set_gain_manual(&mut self, bus: &impl I2cBus, gain_tenth_db: i32) -> Result<()> {
+        let d = rd(bus, 0x0d)?;
+        wr(bus, 0x0d, d | 0x08)?;
+        wr(bus, 0x13, 0x0a)?;
         let code = nearest_lna(gain_tenth_db);
         let cur = rd(bus, 0x14)?;
         wr(bus, 0x14, (cur & 0xe0) | code)?;
