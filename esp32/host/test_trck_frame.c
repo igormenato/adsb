@@ -90,23 +90,33 @@ int main(int argc, char **argv) {
     uint8_t *raw = read_file(argv[1], &raw_len);
     assert(raw_len % TRCK_FRAME_LEN == 0);
     size_t nframes = raw_len / TRCK_FRAME_LEN;
-    assert(nframes == 14);
+    assert(nframes == 20);
 
     TrckScan scan;
     trck_scan_init(&scan);
-    TrckFix got[16];
-    assert(feed_bytes(&scan, raw, raw_len, got, 16) == nframes);
+    TrckFix got[32];
+    assert(feed_bytes(&scan, raw, raw_len, got, 32) == nframes);
     assert(scan.crc_fail == 0);
     assert(scan.resync == 0);
     assert(got[0].icao == 0x406B90u);
     assert(memcmp(got[0].callsign, "EZY85MH ", TRCK_CALLSIGN_LEN) == 0);
     assert(got[0].emergency == 0);
-    assert(got[10].icao == 0x40058Bu);
-    assert(got[10].emergency == 1);
-    assert(got[12].icao == 0x4D224Fu);
-    assert(memcmp(got[12].callsign, "        ", TRCK_CALLSIGN_LEN) == 0);
-    assert(got[12].gs_kt == TRCK_SPEED_UNKNOWN);
-    assert(got[12].track_deg == TRCK_TRACK_UNKNOWN);
+    size_t test123 = 0;
+    size_t empty_cs = 0;
+    for (size_t i = 0; i < nframes; i++) {
+        if (got[i].icao == 0x40058Bu) {
+            test123++;
+            assert(got[i].emergency == 1);
+        }
+        if (got[i].icao == 0x4D224Fu) {
+            empty_cs++;
+            assert(memcmp(got[i].callsign, "        ", TRCK_CALLSIGN_LEN) == 0);
+            assert(got[i].gs_kt == TRCK_SPEED_UNKNOWN);
+            assert(got[i].track_deg == TRCK_TRACK_UNKNOWN);
+        }
+    }
+    assert(test123 >= 2);
+    assert(empty_cs >= 2);
     for (size_t i = 0; i < nframes; i++) {
         TrckFix fix;
         assert(trck_unpack(raw + i * TRCK_FRAME_LEN, TRCK_FRAME_LEN, &fix));
