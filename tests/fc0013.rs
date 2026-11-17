@@ -175,7 +175,9 @@ fn manual_gain_enables_mode_and_fixed_if() {
     let bus = fc0013_bus();
     let mut tuner = Fc0013::new(XTAL_HZ);
     tuner.init(&bus).unwrap();
-    tuner.set_gain_manual(&bus, DEFAULT_GAIN).unwrap();
+    tuner
+        .set_gain_manual(&bus, TunerType::Fc0013.max_gain())
+        .unwrap();
     assert_eq!(bus.get(fc0013::I2C_ADDR, 0x0d) & 0x08, 0x08);
     assert_eq!(bus.get(fc0013::I2C_ADDR, 0x13), 0x0a);
     assert_eq!(bus.get(fc0013::I2C_ADDR, 0x14) & 0x1f, 0x10);
