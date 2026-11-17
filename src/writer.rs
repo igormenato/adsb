@@ -21,9 +21,12 @@ use trck::{
 };
 
 use super::sys;
-use super::{CHECK_PAUSE, POLL_SLICE, Stop};
+use super::{CHECK_PAUSE, POLL_SLICE, Stop, sleep_until_stop};
 
 const QUEUE_CAP: usize = 64;
+const REPLY_CAP: usize = 8;
+const UART_RETRY_MIN: Duration = Duration::from_millis(50);
+const UART_RETRY_MAX: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub(crate) enum ChunkError {
@@ -33,6 +36,7 @@ pub(crate) enum ChunkError {
 
 enum Sink {
     Uart(TTYPort),
+    Closed,
     Stdout,
     #[cfg(test)]
     Buf(Vec<u8>),
@@ -132,19 +136,37 @@ impl Shared {
             .is_empty()
     }
 
-    fn queue_reply(&self, bytes: [u8; ACK_LEN], after: AfterReply) {
+    fn can_queue(&self) -> bool {
         self.pending_reply
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push_back(PendingReply {
-                bytes,
-                sent: 0,
-                after,
-            });
+            .len()
+            < REPLY_CAP
+    }
+
+    fn queue_reply(&self, bytes: [u8; ACK_LEN], after: AfterReply) -> bool {
+        let mut q = self
+            .pending_reply
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if q.len() >= REPLY_CAP {
+            return false;
+        }
+        q.push_back(PendingReply {
+            bytes,
+            sent: 0,
+            after,
+        });
+        drop(q);
         self.ready.notify_one();
+        true
     }
 
     fn handle_cmd(&self, cmd: u8) {
+        if !self.can_queue() {
+            eprintln!("cmd dropped, reply queue full");
+            return;
+        }
         let (mut reply, mut after) = decide(cmd, self.allow_power, self.is_paused(), self.stats());
         if reply.status == CmdStatus::Disabled {
             eprintln!("power command disabled");
@@ -160,7 +182,7 @@ impl Shared {
             }
         }
         self.set_paused(reply.paused);
-        self.queue_reply(pack_reply(&reply), after);
+        let _ = self.queue_reply(pack_reply(&reply), after);
     }
 
     fn append_row_at(&self, fix: &Fix, now: SystemTime) {
@@ -176,6 +198,9 @@ impl Shared {
 
 pub(crate) struct Writer {
     sink: Sink,
+    uart: Option<(String, u32)>,
+    retry_wait: Duration,
+    retry_at: Instant,
     stop: Arc<Stop>,
     pub(crate) shared: Arc<Shared>,
 }
@@ -188,9 +213,38 @@ impl Writer {
     pub(crate) fn uart_fd(&self) -> Option<BorrowedFd<'_>> {
         match &self.sink {
             Sink::Uart(port) => Some(sys::as_fd(port)),
-            Sink::Stdout => None,
+            Sink::Closed | Sink::Stdout => None,
             #[cfg(test)]
             Sink::Buf(_) => None,
+        }
+    }
+
+    pub(crate) fn recover_uart(&mut self, why: &str) {
+        if matches!(self.sink, Sink::Uart(_)) {
+            eprintln!("{why}");
+            self.sink = Sink::Closed;
+            self.retry_at = Instant::now() + self.retry_wait;
+        }
+    }
+
+    pub(crate) fn try_reopen_uart(&mut self) {
+        let Some((path, baud)) = self.uart.clone() else {
+            return;
+        };
+        if !matches!(self.sink, Sink::Closed) || Instant::now() < self.retry_at {
+            return;
+        }
+        match open_port(&path, baud) {
+            Ok(port) => {
+                eprintln!("uart reopened");
+                self.sink = Sink::Uart(port);
+                self.retry_wait = UART_RETRY_MIN;
+            }
+            Err(err) => {
+                eprintln!("uart reopen: {err:#}");
+                self.retry_wait = (self.retry_wait * 2).min(UART_RETRY_MAX);
+                self.retry_at = Instant::now() + self.retry_wait;
+            }
         }
     }
 
@@ -209,6 +263,10 @@ impl Writer {
     }
 
     pub(crate) fn write_some(&mut self) -> Result<(), ChunkError> {
+        self.try_reopen_uart();
+        if matches!(self.sink, Sink::Closed) {
+            return Ok(());
+        }
         loop {
             if self.stop.is_set() {
                 return Err(ChunkError::Stopped);
@@ -239,10 +297,10 @@ impl Writer {
             rest.len()
         };
         match write_sink(&mut self.sink, &buf[..n]) {
-            Ok(0) => Err(ChunkError::Failed(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "uart write wrote nothing",
-            ))),
+            Ok(0) => {
+                self.recover_uart("uart write wrote nothing");
+                Ok(false)
+            }
             Ok(wrote) => {
                 if self.shared.lock().advance(wrote) {
                     self.shared.frames_written.fetch_add(1, Ordering::Relaxed);
@@ -251,7 +309,10 @@ impl Writer {
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(false),
             Err(err) if err.kind() == io::ErrorKind::Interrupted => Ok(true),
-            Err(err) => Err(ChunkError::Failed(err)),
+            Err(err) => {
+                self.recover_uart(&format!("uart write failed: {err}"));
+                Ok(false)
+            }
         }
     }
 
@@ -265,10 +326,11 @@ impl Writer {
             return Ok(false);
         };
         match write_sink(&mut self.sink, &pending.bytes[pending.sent..]) {
-            Ok(0) => Err(ChunkError::Failed(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "uart write wrote nothing",
-            ))),
+            Ok(0) => {
+                drop(slot);
+                self.recover_uart("uart write wrote nothing");
+                Ok(false)
+            }
             Ok(n) => {
                 pending.sent += n;
                 if pending.sent < ACK_LEN {
@@ -289,7 +351,11 @@ impl Writer {
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(false),
             Err(err) if err.kind() == io::ErrorKind::Interrupted => Ok(true),
-            Err(err) => Err(ChunkError::Failed(err)),
+            Err(err) => {
+                drop(slot);
+                self.recover_uart(&format!("uart write failed: {err}"));
+                Ok(false)
+            }
         }
     }
 
@@ -325,6 +391,7 @@ pub(crate) fn log_fix(fix: &Fix) {
 fn write_sink(sink: &mut Sink, bytes: &[u8]) -> io::Result<usize> {
     match sink {
         Sink::Uart(port) => sys::write(sys::as_fd(port), bytes),
+        Sink::Closed => Err(io::Error::new(io::ErrorKind::BrokenPipe, "uart closed")),
         Sink::Stdout => {
             let mut out = io::stdout().lock();
             out.write_all(bytes)?;
@@ -388,15 +455,13 @@ fn try_power(op: PowerOp) -> Result<(), String> {
     }
 }
 
-fn read_cmds(reader: TTYPort, shared: Arc<Shared>, stop: Arc<Stop>) {
+fn read_cmds(mut reader: TTYPort, shared: Arc<Shared>, stop: Arc<Stop>, path: String, baud: u32) {
     let mut scan = CmdScan::new();
     let mut tmp = [0u8; 64];
+    let mut wait = UART_RETRY_MIN;
     while !stop.is_set() {
-        match sys::read(sys::as_fd(&reader), &mut tmp) {
-            Ok(0) => {
-                hangup(&stop, "uart hangup");
-                return;
-            }
+        let lost = match sys::read(sys::as_fd(&reader), &mut tmp) {
+            Ok(0) => Some("uart hangup"),
             Ok(n) => {
                 for &byte in &tmp[..n] {
                     match scan.feed(byte) {
@@ -405,25 +470,36 @@ fn read_cmds(reader: TTYPort, shared: Arc<Shared>, stop: Arc<Stop>) {
                         CmdFeed::Cmd(cmd) => shared.handle_cmd(cmd),
                     }
                 }
+                None
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = poll_cmds(&reader) {
-                    hangup(&stop, &format!("uart {err}"));
-                    return;
-                }
+                poll_cmds(&reader).err().map(|_| "uart hangup")
             }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err) => {
-                hangup(&stop, &format!("uart read: {err}"));
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => None,
+            Err(_) => Some("uart read"),
+        };
+        let Some(why) = lost else {
+            continue;
+        };
+        eprintln!("{why}");
+        drop(reader);
+        loop {
+            if stop.is_set() {
                 return;
+            }
+            sleep_until_stop(&stop, wait);
+            wait = (wait * 2).min(UART_RETRY_MAX);
+            match open_port(&path, baud) {
+                Ok(port) => {
+                    eprintln!("uart reopened");
+                    reader = port;
+                    wait = UART_RETRY_MIN;
+                    break;
+                }
+                Err(err) => eprintln!("uart reopen: {err:#}"),
             }
         }
     }
-}
-
-fn hangup(stop: &Stop, msg: &str) {
-    eprintln!("{msg}");
-    stop.request();
 }
 
 fn poll_cmds(reader: &TTYPort) -> io::Result<()> {
@@ -449,13 +525,9 @@ pub(crate) fn open_table(path: &Path) -> Option<Table> {
     }
 }
 
-fn open_uart(
-    path: &str,
-    baud: u32,
-    stop: Arc<Stop>,
-    shared: Arc<Shared>,
-) -> anyhow::Result<Writer> {
+fn open_port(path: &str, baud: u32) -> anyhow::Result<TTYPort> {
     let port = serialport::new(path, baud)
+        .exclusive(false)
         .data_bits(DataBits::Eight)
         .parity(Parity::None)
         .stop_bits(StopBits::One)
@@ -467,6 +539,16 @@ fn open_uart(
         .with_context(|| format!("cannot open {path}"))?;
     sys::set_nonblocking(sys::as_fd(&port)).with_context(|| format!("cannot open {path}"))?;
     sys::set_cloexec(sys::as_fd(&port)).with_context(|| format!("cannot open {path}"))?;
+    Ok(port)
+}
+
+fn open_uart(
+    path: &str,
+    baud: u32,
+    stop: Arc<Stop>,
+    shared: Arc<Shared>,
+) -> anyhow::Result<Writer> {
+    let port = open_port(path, baud)?;
     let reader = port
         .try_clone_native()
         .with_context(|| format!("cannot clone {path}"))?;
@@ -475,10 +557,14 @@ fn open_uart(
     {
         let shared = Arc::clone(&shared);
         let stop = Arc::clone(&stop);
-        thread::spawn(move || read_cmds(reader, shared, stop));
+        let path = path.to_string();
+        thread::spawn(move || read_cmds(reader, shared, stop, path, baud));
     }
     Ok(Writer {
         sink: Sink::Uart(port),
+        uart: Some((path.to_string(), baud)),
+        retry_wait: UART_RETRY_MIN,
+        retry_at: Instant::now(),
         stop,
         shared,
     })
@@ -495,6 +581,9 @@ pub(crate) fn open_output(
     if path == "-" {
         return Ok(Writer {
             sink: Sink::Stdout,
+            uart: None,
+            retry_wait: UART_RETRY_MIN,
+            retry_at: Instant::now(),
             stop,
             shared,
         });
@@ -529,8 +618,14 @@ pub(crate) fn run_writer(mut writer: Writer, stop: &Stop, done: Option<&AtomicBo
             return ExitCode::SUCCESS;
         }
         if let Err(err) = writer.write_some() {
-            return write_exit(err);
+            match err {
+                ChunkError::Stopped => return write_exit(err),
+                ChunkError::Failed(err) => {
+                    writer.recover_uart(&format!("uart write failed: {err}"))
+                }
+            }
         }
+        writer.try_reopen_uart();
         let finished = done.is_some_and(|flag| flag.load(Ordering::Relaxed));
         if finished && !writer.has_pending() {
             return ExitCode::SUCCESS;
@@ -545,8 +640,7 @@ pub(crate) fn run_writer(mut writer: Writer, stop: &Stop, done: Option<&AtomicBo
             if let Some(fd) = writer.uart_fd() {
                 let mut poll_fd = PollFd::new(fd, PollFlags::POLLOUT);
                 if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), POLL_SLICE) {
-                    eprintln!("uart poll: {err}");
-                    return ExitCode::from(1);
+                    writer.recover_uart(&format!("uart poll: {err}"));
                 }
             }
             continue;
@@ -567,8 +661,14 @@ pub(crate) fn run_check(writer: &mut Writer, stop: &Stop) -> ExitCode {
                 break;
             }
             if let Err(err) = writer.write_some() {
-                return write_exit(err);
+                match err {
+                    ChunkError::Stopped => return write_exit(err),
+                    ChunkError::Failed(err) => {
+                        writer.recover_uart(&format!("uart write failed: {err}"))
+                    }
+                }
             }
+            writer.try_reopen_uart();
             let now = Instant::now();
             if now >= deadline {
                 break;
@@ -578,8 +678,7 @@ pub(crate) fn run_check(writer: &mut Writer, stop: &Stop) -> ExitCode {
                 if let Some(fd) = writer.uart_fd() {
                     let mut poll_fd = PollFd::new(fd, PollFlags::POLLOUT);
                     if let Err(err) = sys::poll(std::slice::from_mut(&mut poll_fd), slice) {
-                        eprintln!("uart poll: {err}");
-                        return ExitCode::from(1);
+                        writer.recover_uart(&format!("uart poll: {err}"));
                     }
                 }
                 continue;
@@ -714,6 +813,9 @@ mod tests {
     fn buf_writer(table: Option<Table>) -> Writer {
         Writer {
             sink: Sink::Buf(Vec::new()),
+            uart: None,
+            retry_wait: UART_RETRY_MIN,
+            retry_at: Instant::now(),
             stop: Stop::new(),
             shared: Shared::new(table, false),
         }
@@ -737,16 +839,46 @@ mod tests {
     }
 
     #[test]
-    fn hangup_on_master_close_sets_stop() {
+    fn hangup_retries_without_stopping() {
+        use serialport::SerialPort;
         let (master, slave) = TTYPort::pair().expect("pty");
+        let path = slave.name().expect("pty name");
         sys::set_nonblocking(sys::as_fd(&slave)).expect("nonblock");
         let stop = Stop::new();
         let shared = Shared::new(None, false);
         let stop_thread = Arc::clone(&stop);
-        let thread = thread::spawn(move || read_cmds(slave, shared, stop_thread));
+        let thread = thread::spawn(move || read_cmds(slave, shared, stop_thread, path, 115_200));
         drop(master);
+        thread::sleep(Duration::from_millis(200));
+        assert!(!stop.is_set());
+        stop.request();
         thread.join().expect("reader");
-        assert!(stop.is_set());
+    }
+
+    #[test]
+    fn extra_commands_are_dropped_when_replies_are_full() {
+        let shared = Shared::new(None, false);
+        for _ in 0..REPLY_CAP {
+            shared.handle_cmd(Cmd::Ping as u8);
+        }
+        let mut got = pending(&shared);
+        assert_eq!(got.len(), REPLY_CAP);
+        got[0].sent = 4;
+        got[1].after = AfterReply::Restart;
+        {
+            let mut q = shared
+                .pending_reply
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            *q = got.into();
+        }
+        shared.handle_cmd(Cmd::Pause as u8);
+        let got = pending(&shared);
+        assert_eq!(got.len(), REPLY_CAP);
+        assert_eq!(got[0].sent, 4);
+        assert_eq!(got[0].bytes[4], Cmd::Ping as u8);
+        assert_eq!(got[1].after, AfterReply::Restart);
+        assert!(!shared.is_paused());
     }
 
     #[test]

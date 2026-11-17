@@ -241,7 +241,8 @@ fn pump_hex<R: Read + AsRawFd>(
         if stop.is_set() {
             return Pump::Stopped;
         }
-        let (socket_revents, uart_ready) = {
+        writer.try_reopen_uart();
+        let (socket_revents, uart_ready, uart_dead) = {
             let reader = sys::as_fd(&lines.reader);
             let uart = writer.uart_fd();
             let mut fds_two;
@@ -276,15 +277,14 @@ fn pump_hex<R: Read + AsRawFd>(
                 .get(1)
                 .map(|fd| fd.revents().unwrap_or_else(PollFlags::empty))
                 .unwrap_or_else(PollFlags::empty);
-            if uart_revents
-                .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
-            {
-                eprintln!("uart hangup");
-                return Pump::Stopped;
-            }
+            let uart_dead = uart_revents
+                .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL);
             let uart_ready = uart_revents.intersects(PollFlags::POLLOUT);
-            (socket_revents, uart_ready)
+            (socket_revents, uart_ready, uart_dead)
         };
+        if uart_dead {
+            writer.recover_uart("uart hangup");
+        }
         if stop.is_set() {
             return Pump::Stopped;
         }
@@ -315,10 +315,10 @@ fn pump_hex<R: Read + AsRawFd>(
             && (fresh || uart_ready || writer.uart_fd().is_none())
             && let Err(err) = writer.write_some()
         {
-            return match err {
-                ChunkError::Stopped => Pump::Stopped,
-                ChunkError::Failed(err) => Pump::Uart(err),
-            };
+            match err {
+                ChunkError::Stopped => return Pump::Stopped,
+                ChunkError::Failed(err) => writer.recover_uart(&format!("uart write: {err}")),
+            }
         }
     }
 }

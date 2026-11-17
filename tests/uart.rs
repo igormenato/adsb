@@ -215,12 +215,27 @@ fn pause_then_status_both_ack() {
 }
 
 #[test]
-fn uart_hangup_stops_the_process() {
+fn uart_hangup_reopens_and_acks() {
     let (listener, port) = listen();
-    let pty = Pty::open();
-    let mut sender = spawn_uart(port, &pty.path());
+    let link = unique_path("uart");
+    let first = Pty::open();
+    std::os::unix::fs::symlink(first.path(), &link).expect("link");
+    let mut sender = spawn_uart(port, link.to_str().expect("utf8"));
     let (_sock, _) = listener.accept().expect("accept");
-    drop(pty);
-    let status = wait_exit(&mut sender.0, Duration::from_secs(3));
-    assert!(status.success() || status.code() == Some(1), "{status}");
+    drop(first);
+    std::thread::sleep(Duration::from_millis(80));
+    let mut second = Pty::open();
+    std::fs::remove_file(&link).expect("unlink");
+    std::os::unix::fs::symlink(second.path(), &link).expect("relink");
+    std::thread::sleep(Duration::from_millis(200));
+    second
+        .master
+        .write_all(&pack_cmd(Cmd::Pause))
+        .expect("pause");
+    second.master.flush().expect("flush");
+    let tacks = wait_tacks(&mut second.master, 1, Duration::from_secs(3));
+    assert_eq!(tacks[0][4], Cmd::Pause as u8);
+    assert_eq!(tacks[0][5], 0);
+    assert!(sender.0.try_wait().unwrap().is_none());
+    let _ = std::fs::remove_file(&link);
 }
