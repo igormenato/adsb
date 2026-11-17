@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 1-bit Mode S CRC correction on the IQ path (DF17/DF18, and known-ICAO DF11). `--no-fix` turns it off.
 - CPR tracking uses a 10 s even/odd global pair, then a local decode from the last good position, and rejects a jump that fails dump1090-fa's speed check.
 - IQ `msg` lines print 7 bytes for short Mode S frames and 14 for long frames. UART frames are unchanged.
+- 2.4 MS/s demodulation follows readsb `demod_2400.c` (phase slicers, DF early-out, skip). 1-bit PI correction is unchanged.
 
 ## [0.3.3](https://github.com/igormenato/adsb/compare/v0.3.2...v0.3.3) - 2026-11-16
 
