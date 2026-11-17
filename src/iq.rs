@@ -175,7 +175,7 @@ mod tests {
 
     fn recovered(bytes: &[u8]) -> Vec<[u8; 14]> {
         let iq = cu8_to_complex(bytes);
-        demodulate2400(&magnitude_u16(&iq))
+        demodulate2400(&magnitude_u16(&iq), true)
             .into_iter()
             .map(|m| m.msg)
             .collect()
@@ -242,7 +242,7 @@ mod tests {
             if (0..8).any(|j| mag.len() > j + 18 && preamble_at_zero(&mag[j..])) {
                 preamble += 1;
             }
-            if demodulate2400(&mag).iter().any(|m| m.msg == EVEN) {
+            if demodulate2400(&mag, true).iter().any(|m| m.msg == EVEN) {
                 crc += 1;
             }
         }

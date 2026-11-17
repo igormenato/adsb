@@ -1,4 +1,8 @@
 //! dump1090-2400 demodulation with optional 1-bit PI CRC correction.
+//!
+//! Derived from rs1090 0.8.1 `src/source/demod/demod2400.rs` under MIT.
+//! Copyright (c) Xavier Olive.
+//! The CRC gate goes through `score_message` instead of calling `validate_modes_message` on the raw bits.
 
 use rs1090::source::demod::{MODES_LONG_MSG_BYTES, icao_filter_test, validate_modes_message};
 
@@ -15,11 +19,7 @@ pub struct ModeSMessage {
     pub corrected_bits: u8,
 }
 
-pub fn demodulate2400(samples: &[u16]) -> Vec<ModeSMessage> {
-    demodulate2400_fix(samples, true)
-}
-
-pub fn demodulate2400_fix(samples: &[u16], fix: bool) -> Vec<ModeSMessage> {
+pub fn demodulate2400(samples: &[u16], fix: bool) -> Vec<ModeSMessage> {
     let mut results = Vec::new();
     if samples.len() < MIN_TRAILING_SAMPLES {
         return results;

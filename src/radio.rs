@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use num_complex::Complex;
 use rs1090::source::demod::magnitude_u16;
 
-use trck::demod::demodulate2400_fix;
+use trck::demod::demodulate2400;
 
 use trck::{Fix, Tracker};
 
@@ -68,7 +68,7 @@ impl Demod {
         if self.mag.len() <= LOOKAHEAD {
             return;
         }
-        for data in demodulate2400_fix(&self.mag, self.fix) {
+        for data in demodulate2400(&self.mag, self.fix) {
             self.stats.messages += 1;
             if data.corrected_bits != 0 {
                 self.stats.fixed += 1;
