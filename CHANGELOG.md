@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/igormenato/adsb/compare/v0.3.3...v0.3.4) - 2026-11-17
+
+### Added
+
+- log short Mode S frames as seven bytes ([#103](https://github.com/igormenato/adsb/pull/103))
+- recover single-bit Mode S CRC errors ([#94](https://github.com/igormenato/adsb/pull/94))
+
+### Other
+
+- Remove PlatformIO job from GitHub Actions ([#105](https://github.com/igormenato/adsb/pull/105))
+- Demodulate 2.4 MS/s with readsb phase slicers ([#104](https://github.com/igormenato/adsb/pull/104))
+- Raise CPR position yield with local decode ([#98](https://github.com/igormenato/adsb/pull/98))
+
 ### Added
 
 - 1-bit Mode S CRC correction on the IQ path (DF17/DF18, and known-ICAO DF11). `--no-fix` turns it off.
