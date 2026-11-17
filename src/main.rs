@@ -22,6 +22,7 @@ mod radio;
 mod sim;
 mod stress;
 mod sys;
+mod update;
 mod writer;
 
 const DEFAULT_UART: &str = "/dev/serial0";
@@ -32,6 +33,7 @@ const POLL_SLICE: Duration = Duration::from_millis(200);
 #[derive(Parser, Debug)]
 #[command(
     about = "Send each decoded ADS-B position to a UART as it arrives.",
+    version,
     args_conflicts_with_subcommands = true
 )]
 struct Args {
@@ -95,6 +97,8 @@ enum Cmd {
         #[arg(long, default_value = "1", value_parser = parse_pace)]
         speed: Pace,
     },
+    /// Replace this binary from GitHub Releases.
+    Update(update::Args),
 }
 
 #[derive(Debug)]
@@ -237,6 +241,7 @@ fn main() -> ExitCode {
             output,
             speed,
         }) => return run_replay(file, &output, speed),
+        Some(Cmd::Update(opts)) => return update::run(opts),
         None => {}
     }
     let stop = Stop::new();
