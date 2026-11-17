@@ -63,9 +63,12 @@ pub fn aa_bit(bit: usize) -> bool {
     AA_BITS.contains(&bit)
 }
 
-/// Flip a single correctable PI bit. Leaves address/parity DFs unchanged.
+/// Flip a single correctable PI bit. Input DF must be 11, 17, or 18.
 pub fn correct_pi(msg: &mut [u8; 14]) -> Option<Correction> {
     let df0 = df(msg);
+    if !matches!(df0, 11 | 17 | 18) {
+        return None;
+    }
     let long = long_crc(msg)?;
     let short = short_crc(msg)?;
 
@@ -121,8 +124,9 @@ mod tests {
     fn one_bit_errors_on_df17_are_restored() {
         for frame in [&EVEN, &ODD, &IDENT, &VELOCITY, &STATUS] {
             assert_eq!(remainder(frame), 0);
-            for bit in 0..LONG_BITS {
+            for bit in 5..LONG_BITS {
                 let mut damaged = flip_copy(frame, bit);
+                assert_eq!(df(&damaged), 17);
                 assert_ne!(remainder(&damaged), 0, "bit {bit}");
                 let got = correct_pi(&mut damaged).expect("correctable");
                 assert_eq!(got.bit, bit);
@@ -155,6 +159,26 @@ mod tests {
     }
 
     #[test]
+    fn df16_syndrome_match_stays_df16() {
+        // Bit 4's 112-bit syndrome is 0xC397DB. A DF16 whose remainder equals
+        // that used to be rewritten as DF17 when --fix ran on any long frame.
+        const SYNDROME: u32 = 0x00C3_97DB;
+        let mut df16 = [0u8; 14];
+        df16[0] = 16 << 3;
+        df16[1] = 0x12;
+        let crc = modes_checksum(&df16, LONG_BITS).expect("df16");
+        let pi = crc ^ SYNDROME;
+        df16[11] = (pi >> 16) as u8;
+        df16[12] = (pi >> 8) as u8;
+        df16[13] = pi as u8;
+        assert_eq!(remainder(&df16), SYNDROME);
+        let original = df16;
+        assert!(correct_pi(&mut df16).is_none());
+        assert_eq!(df16[0] >> 3, 16);
+        assert_eq!(df16, original);
+    }
+
+    #[test]
     fn df11_one_bit_restores_iid_overlay() {
         let mut df11 = [0u8; 14];
         df11[0] = 0x58;
@@ -168,10 +192,11 @@ mod tests {
         assert_eq!(short_crc(&df11).unwrap() & 0x00ff_ff80, 0);
 
         let good = df11;
-        // Bits 49..55 are the 7-bit IID overlay. A flip there still looks like DF11.
-        for bit in 0..49 {
+        // Bits 0..4 are DF. Bits 49..55 are the 7-bit IID overlay.
+        for bit in 5..49 {
             let mut damaged = df11;
             flip(&mut damaged, bit);
+            assert_eq!(df(&damaged), 11);
             let got = correct_pi(&mut damaged).expect("df11 bit");
             assert_eq!(got.bit, bit);
             assert_eq!(damaged[..7], good[..7]);

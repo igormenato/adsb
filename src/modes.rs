@@ -86,16 +86,40 @@ pub fn with_icao(template: &[u8; 14], icao: u32) -> [u8; 14] {
 }
 
 pub fn df17(icao: u32, me: [u8; 7]) -> [u8; 14] {
+    extended_squitter(0x8D, icao, me)
+}
+
+/// DF18 CF=0 (ADS-B ES/NT). Same ME as DF17; PI CRC, not TIS-B.
+pub fn df18_cf0(icao: u32, me: [u8; 7]) -> [u8; 14] {
+    extended_squitter(0x90, icao, me)
+}
+
+fn extended_squitter(df_ca: u8, icao: u32, me: [u8; 7]) -> [u8; 14] {
     let mut frame = [0u8; 14];
-    frame[0] = 0x8D;
+    frame[0] = df_ca;
     frame[1] = (icao >> 16) as u8;
     frame[2] = (icao >> 8) as u8;
     frame[3] = icao as u8;
     frame[4..11].copy_from_slice(&me);
-    let crc = rs1090::decode::crc::modes_checksum(&frame, 112).expect("DF17");
+    let crc = rs1090::decode::crc::modes_checksum(&frame, 112).expect("ES CRC");
     frame[11] = (crc >> 16) as u8;
     frame[12] = (crc >> 8) as u8;
     frame[13] = crc as u8;
+    frame
+}
+
+/// DF5 identity reply. AP overlay so the 56-bit remainder is `icao`.
+pub fn df5_identity(icao: u32, squawk: u16) -> [u8; 7] {
+    let mut frame = [0u8; 7];
+    frame[0] = 5 << 3;
+    let id13 = encode_id13(squawk);
+    frame[2] = ((id13 >> 8) & 0x1F) as u8;
+    frame[3] = id13 as u8;
+    let crc = rs1090::decode::crc::modes_checksum(&frame, 56).expect("DF5");
+    let ap = crc ^ (icao & 0x00ff_ffff);
+    frame[4] = (ap >> 16) as u8;
+    frame[5] = (ap >> 8) as u8;
+    frame[6] = ap as u8;
     frame
 }
 
@@ -346,6 +370,19 @@ mod tests {
         assert!((got_lat - lat).abs() < 0.001, "lat {got_lat}");
         assert!((got_lon - lon).abs() < 0.001, "lon {got_lon}");
         assert_eq!(fix.aircraft.altitude_ft, Some(alt));
+    }
+
+    #[test]
+    fn df5_7700_parses() {
+        let frame = df5_identity(0x40058B, 0x7700);
+        let msg = rs1090::decode::Message::try_from(frame.as_slice()).expect("df5");
+        match msg.df {
+            rs1090::decode::DF::SurveillanceIdentityReply { id, ap, .. } => {
+                assert_eq!(id.0, 0x7700);
+                assert_eq!(ap.0, 0x40058B);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
