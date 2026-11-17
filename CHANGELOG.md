@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native 2 MS/s Mode S demod. `--iq-rate 2000000` no longer resamples. The dongle stays at 2.4 MS/s.
 - 1-bit Mode S CRC correction on the IQ path (DF17/DF18, and known-ICAO DF11). `--no-fix` turns it off.
 
 ## [0.3.3](https://github.com/igormenato/adsb/compare/v0.3.2...v0.3.3) - 2026-11-16

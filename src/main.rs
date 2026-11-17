@@ -46,10 +46,10 @@ struct Args {
     /// Newline hex or AVR Mode S frames. HOST:PORT, or - for stdin.
     #[arg(long, conflicts_with = "check", value_name = "HOST:PORT|-")]
     hex: Option<String>,
-    /// RTL-SDR cu8 I/Q file. Same demodulate2400 path as the dongle.
+    /// RTL-SDR cu8 I/Q file. Native 2.4 or 2.0 MS/s demod. Same 2.4 path as the dongle.
     #[arg(long, conflicts_with_all = ["check", "hex"], value_name = "FILE")]
     iq: Option<PathBuf>,
-    /// Sample rate of --iq. Other rates are resampled to 2.4 MS/s.
+    /// Sample rate of --iq. 2000000 uses the 2 MS/s demod; other rates resample to 2.4 MS/s.
     #[arg(long, value_name = "HZ")]
     iq_rate: Option<u32>,
     /// Disable 1-bit Mode S CRC correction (dump1090-fa `--fix` is the default).

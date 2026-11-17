@@ -157,7 +157,7 @@ impl Rng {
 mod tests {
     use rs1090::source::demod::magnitude_u16;
 
-    use trck::demod::demodulate2400;
+    use trck::demod::{demodulate2000, demodulate2400};
 
     use super::*;
     use trck::modes::EVEN;
@@ -255,6 +255,24 @@ mod tests {
             crc >= 8,
             "10 dB crc-perfect {crc}/32; expected this demod's cliff, not 0"
         );
+    }
+
+    #[test]
+    fn a_clean_2msps_df17_demodulates() {
+        let bytes = encode_cu8(
+            &[EVEN],
+            Synth {
+                sample_hz: 2_000_000,
+                ..Synth::default()
+            },
+        )
+        .expect("iq");
+        let mag = mag_of(&bytes);
+        let msgs: Vec<_> = demodulate2000(&mag, true)
+            .into_iter()
+            .map(|m| m.msg)
+            .collect();
+        assert!(msgs.iter().any(|m| m == &EVEN), "{msgs:02x?}");
     }
 
     #[test]
