@@ -25,11 +25,18 @@ pub fn demodulate2400(samples: &[u16], fix: bool) -> Vec<ModeSMessage> {
         return results;
     }
 
-    for j in 0..(samples.len() - MIN_TRAILING_SAMPLES) {
+    // dump1090-fa `demod_2400.c`: after an accepted message, skip to 8 bits
+    // before its end so a second preamble that clobbers the last bits can
+    // still decode, without scoring every overlapping sample of this frame.
+    let mut j = 0;
+    let last = samples.len() - MIN_TRAILING_SAMPLES;
+    while j < last {
         let Some((high, base_signal, base_noise)) = check_preamble(&samples[j..j + 14]) else {
+            j += 1;
             continue;
         };
         if base_signal * 2 < 3 * base_noise {
+            j += 1;
             continue;
         }
         if i32::from(samples[j + 5]) >= high
@@ -42,6 +49,7 @@ pub fn demodulate2400(samples: &[u16], fix: bool) -> Vec<ModeSMessage> {
             || i32::from(samples[j + 17]) >= high
             || i32::from(samples[j + 18]) >= high
         {
+            j += 1;
             continue;
         }
 
@@ -92,8 +100,11 @@ pub fn demodulate2400(samples: &[u16], fix: bool) -> Vec<ModeSMessage> {
         }
 
         if bestmsg.score >= 0 {
+            let bits: usize = if bestmsg.msg[0] >> 3 >= 16 { 112 } else { 56 };
             results.push(bestmsg);
+            j += bits * 12 / 5;
         }
+        j += 1;
     }
 
     results
