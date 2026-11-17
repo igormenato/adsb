@@ -155,8 +155,9 @@ impl Rng {
 
 #[cfg(test)]
 mod tests {
-    use rs1090::source::demod::demod2400::demodulate2400;
     use rs1090::source::demod::magnitude_u16;
+
+    use trck::demod::demodulate2400;
 
     use super::*;
     use trck::modes::EVEN;
@@ -245,9 +246,7 @@ mod tests {
                 crc += 1;
             }
         }
-        eprintln!(
-            "10 dB preamble {preamble}/32 crc-perfect {crc}/32 (rs1090 dump1090-2400 has no bit correction)"
-        );
+        eprintln!("10 dB preamble {preamble}/32 recovered {crc}/32");
         assert!(
             preamble >= 24,
             "10 dB preamble {preamble}/32 — generator failed the 3.5 dB check"

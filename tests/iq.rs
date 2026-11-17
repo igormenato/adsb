@@ -185,6 +185,7 @@ fn iq_help_lists_the_knobs() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("--iq"), "{text}");
     assert!(text.contains("--iq-rate"), "{text}");
+    assert!(text.contains("--no-fix"), "{text}");
 }
 
 #[test]
@@ -275,8 +276,7 @@ fn iq_decode_rate_vs_snr() {
         "20 dB decode rate {} is below 0.9: {rows:?}",
         rate_at(20.0)
     );
-    // rs1090's dump1090-2400 needs a perfect 112-bit CRC (no 1-bit correction).
-    // That cliff is ~12 dB for this generator; 10 dB still finds the preamble.
+    // 12 dB is above this generator's CRC cliff; 10 dB still finds the preamble.
     assert!(
         rate_at(12.0) >= 0.75,
         "12 dB decode rate {} is below 0.75: {rows:?}",

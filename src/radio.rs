@@ -1,4 +1,4 @@
-//! RTL-SDR at 1090 MHz, demodulated by rs1090.
+//! RTL-SDR at 1090 MHz. dump1090-2400 demod with 1-bit PI CRC correction.
 
 use std::path::Path;
 use std::time::Duration;
@@ -8,8 +8,9 @@ use anyhow::{Context as _, Result, bail};
 use desperado::{IqAsyncSource, IqFormat, IqSource};
 use futures_util::StreamExt;
 use num_complex::Complex;
-use rs1090::source::demod::demod2400::demodulate2400;
 use rs1090::source::demod::magnitude_u16;
+
+use trck::demod::demodulate2400_fix;
 
 use trck::{Fix, Tracker};
 
@@ -27,6 +28,7 @@ const FILE_CHUNK: usize = 32_768;
 pub struct IqStats {
     pub messages: u64,
     pub fixes: u64,
+    pub fixed: u64,
 }
 
 struct Demod {
@@ -34,15 +36,17 @@ struct Demod {
     offset: u64,
     tracker: Tracker,
     stats: IqStats,
+    fix: bool,
 }
 
 impl Demod {
-    fn new() -> Self {
+    fn new(fix: bool) -> Self {
         Self {
             mag: Vec::new(),
             offset: 0,
             tracker: Tracker::new(),
             stats: IqStats::default(),
+            fix,
         }
     }
 
@@ -64,8 +68,11 @@ impl Demod {
         if self.mag.len() <= LOOKAHEAD {
             return;
         }
-        for data in demodulate2400(&self.mag) {
+        for data in demodulate2400_fix(&self.mag, self.fix) {
             self.stats.messages += 1;
+            if data.corrected_bits != 0 {
+                self.stats.fixed += 1;
+            }
             let timestamp =
                 (self.offset + data.sample_position as u64) as f64 / f64::from(SAMPLE_HZ);
             if log_msg {
@@ -87,14 +94,20 @@ impl Demod {
     }
 }
 
-pub async fn run_rtlsdr(device: usize, gain: Option<i32>, enqueue: impl Fn(Fix), stop: &Stop) {
+pub async fn run_rtlsdr(
+    device: usize,
+    gain: Option<i32>,
+    enqueue: impl Fn(Fix),
+    stop: &Stop,
+    fix: bool,
+) {
     let mut delay = OPEN_RETRY;
     while !stop.is_set() {
         match IqAsyncSource::from_rtlsdr(device, CENTER_HZ, SAMPLE_HZ, gain).await {
             Ok(mut source) => {
                 eprintln!("rtlsdr {device} open");
                 delay = OPEN_RETRY;
-                demodulate(&mut source, &enqueue, stop).await;
+                demodulate(&mut source, &enqueue, stop, fix).await;
                 if let Err(err) = source.stop().await {
                     eprintln!("rtlsdr {device} stop: {err}");
                 }
@@ -115,8 +128,8 @@ pub async fn run_rtlsdr(device: usize, gain: Option<i32>, enqueue: impl Fn(Fix),
     }
 }
 
-async fn demodulate(source: &mut IqAsyncSource, enqueue: &impl Fn(Fix), stop: &Stop) {
-    let mut demod = Demod::new();
+async fn demodulate(source: &mut IqAsyncSource, enqueue: &impl Fn(Fix), stop: &Stop, fix: bool) {
+    let mut demod = Demod::new(fix);
     while !stop.is_set() {
         let chunk = tokio::select! {
             biased;
@@ -139,13 +152,19 @@ async fn demodulate(source: &mut IqAsyncSource, enqueue: &impl Fn(Fix), stop: &S
     }
 }
 
-pub fn run_iq(path: &Path, sample_hz: u32, enqueue: impl Fn(Fix), stop: &Stop) -> Result<IqStats> {
+pub fn run_iq(
+    path: &Path,
+    sample_hz: u32,
+    enqueue: impl Fn(Fix),
+    stop: &Stop,
+    fix: bool,
+) -> Result<IqStats> {
     if sample_hz == 0 {
         bail!("iq-rate must be > 0");
     }
     let mut source = IqSource::from_file(path, CENTER_HZ, sample_hz, FILE_CHUNK, IqFormat::Cu8)
         .with_context(|| path.display().to_string())?;
-    let mut demod = Demod::new();
+    let mut demod = Demod::new(fix);
     let mut resamp = (sample_hz != SAMPLE_HZ).then(|| Resamp::new(sample_hz));
     for chunk in &mut source {
         if stop.is_set() {

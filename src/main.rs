@@ -52,6 +52,9 @@ struct Args {
     /// Sample rate of --iq. Other rates are resampled to 2.4 MS/s.
     #[arg(long, value_name = "HZ")]
     iq_rate: Option<u32>,
+    /// Disable 1-bit Mode S CRC correction (dump1090-fa `--fix` is the default).
+    #[arg(long)]
+    no_fix: bool,
     #[command(flatten)]
     output: OutputArgs,
     /// Send the known frames instead of reading the radio, to check the UART.
@@ -273,7 +276,7 @@ fn main() -> ExitCode {
             args.output.baud,
             args.output.table.display()
         );
-        return run_iq(path, rate, writer, stop);
+        return run_iq(path, rate, writer, stop, !args.no_fix);
     }
 
     if let Some(text) = args.hex.as_deref() {
@@ -299,10 +302,10 @@ fn main() -> ExitCode {
         args.output.baud,
         args.output.table.display()
     );
-    run_radio(args.rtlsdr, args.gain.rtlsdr(), writer, stop)
+    run_radio(args.rtlsdr, args.gain.rtlsdr(), writer, stop, !args.no_fix)
 }
 
-fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<Stop>) -> ExitCode {
+fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<Stop>, fix: bool) -> ExitCode {
     let shared = Arc::clone(&writer.shared);
     let csv_on = shared
         .table
@@ -327,17 +330,18 @@ fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<Stop>) -> ExitCode {
             match radio::run_iq(
                 &path,
                 rate,
-                move |fix| {
-                    writer::log_fix(&fix);
+                move |decoded| {
+                    writer::log_fix(&decoded);
                     if csv_on {
                         n_csv.fetch_add(1, Ordering::Relaxed);
                     }
-                    if let Some(dropped) = enqueue_shared.push(fix) {
+                    if let Some(dropped) = enqueue_shared.push(decoded) {
                         n_drop.fetch_add(1, Ordering::Relaxed);
                         writer::log_drop(&dropped);
                     }
                 },
                 &radio_stop,
+                fix,
             ) {
                 Ok(got) => *stats.lock().unwrap_or_else(PoisonError::into_inner) = got,
                 Err(err) => eprintln!("iq: {err:#}"),
@@ -352,8 +356,9 @@ fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<Stop>) -> ExitCode {
     let got = *stats.lock().unwrap_or_else(PoisonError::into_inner);
     let elapsed = started.elapsed().as_secs_f64();
     eprintln!(
-        "iq messages={} fixes={} dropped={} csv={} elapsed={elapsed:.3}s",
+        "iq messages={} fixed={} fixes={} dropped={} csv={} elapsed={elapsed:.3}s",
         got.messages,
+        got.fixed,
         got.fixes,
         n_drop.load(Ordering::Relaxed),
         n_csv.load(Ordering::Relaxed),
@@ -490,7 +495,13 @@ fn unix_time(ts: f64) -> SystemTime {
     UNIX_EPOCH + Duration::new(secs as u64, nanos)
 }
 
-fn run_radio(device: usize, gain: Option<i32>, writer: Writer, stop: Arc<Stop>) -> ExitCode {
+fn run_radio(
+    device: usize,
+    gain: Option<i32>,
+    writer: Writer,
+    stop: Arc<Stop>,
+    fix: bool,
+) -> ExitCode {
     let shared = Arc::clone(&writer.shared);
     let radio_stop = Arc::clone(&stop);
     let radio = thread::spawn(move || {
@@ -502,13 +513,14 @@ fn run_radio(device: usize, gain: Option<i32>, writer: Writer, stop: Arc<Stop>) 
             Ok(rt) => rt.block_on(radio::run_rtlsdr(
                 device,
                 gain,
-                move |fix| {
-                    writer::log_fix(&fix);
-                    if let Some(dropped) = enqueue_shared.push(fix) {
+                move |decoded| {
+                    writer::log_fix(&decoded);
+                    if let Some(dropped) = enqueue_shared.push(decoded) {
                         writer::log_drop(&dropped);
                     }
                 },
                 &radio_stop,
+                fix,
             )),
             Err(err) => eprintln!("rtlsdr runtime: {err}"),
         }
