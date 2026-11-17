@@ -43,6 +43,7 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     rtlsdr: usize,
     /// Tuner gain in dB, or `auto` for tuner AGC (not readsb adaptive gain).
+    /// Default is the tuner's maximum advertised table step.
     #[arg(long, default_value_t, value_parser = parse_gain, value_name = "auto|dB")]
     gain: Gain,
     /// Newline hex or AVR Mode S frames. HOST:PORT, or - for stdin.
@@ -152,22 +153,20 @@ enum Pace {
     Rate(f64),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Gain {
     Auto,
+    /// Highest step in the tuner gain table (unknown until the device is open).
+    #[default]
+    Max,
     Manual(i32),
-}
-
-impl Default for Gain {
-    fn default() -> Self {
-        Self::Manual(radio::GAIN_TENTHS_DB)
-    }
 }
 
 impl std::fmt::Display for Gain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Auto => f.write_str("auto"),
+            Self::Max => f.write_str("max"),
             Self::Manual(t) => write!(f, "{:.1}", f64::from(*t) / 10.0),
         }
     }
@@ -177,6 +176,8 @@ impl Gain {
     fn rtlsdr(self) -> Option<i32> {
         match self {
             Self::Auto => None,
+            // Above every advertised step so the driver snaps to the table max.
+            Self::Max => Some(i32::MAX),
             Self::Manual(t) => Some(t),
         }
     }
@@ -185,6 +186,9 @@ impl Gain {
 fn parse_gain(text: &str) -> Result<Gain, String> {
     if text.eq_ignore_ascii_case("auto") {
         return Ok(Gain::Auto);
+    }
+    if text.eq_ignore_ascii_case("max") {
+        return Ok(Gain::Max);
     }
     let n: f64 = text.parse().map_err(|_| format!("invalid --gain {text}"))?;
     if !n.is_finite() {
@@ -554,17 +558,17 @@ mod tests {
     fn parse_gain_auto() {
         assert_eq!(parse_gain("auto").unwrap(), Gain::Auto);
         assert_eq!(parse_gain("AUTO").unwrap(), Gain::Auto);
+        assert_eq!(parse_gain("max").unwrap(), Gain::Max);
+        assert_eq!(parse_gain("MAX").unwrap(), Gain::Max);
     }
 
     #[test]
     fn parse_gain_db() {
-        assert_eq!(
-            parse_gain("49.6").unwrap(),
-            Gain::Manual(radio::GAIN_TENTHS_DB)
-        );
+        assert_eq!(parse_gain("49.6").unwrap(), Gain::Manual(496));
         assert_eq!(parse_gain("40.2").unwrap(), Gain::Manual(402));
         assert_eq!(parse_gain("0").unwrap(), Gain::Manual(0));
-        assert_eq!(Gain::default(), Gain::Manual(radio::GAIN_TENTHS_DB));
+        assert_eq!(Gain::default(), Gain::Max);
+        assert_eq!(Gain::Max.rtlsdr(), Some(i32::MAX));
     }
 
     #[test]

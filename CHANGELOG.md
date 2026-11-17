@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `--gain` defaults to the tuner's maximum advertised table step instead of a hardcoded 49.6 dB.
+
 ### Added
 
 - `trck update` installs `trck-aarch64` from GitHub Releases with `curl`. `--version X.Y.Z` selects that tag.

@@ -42,7 +42,7 @@ pub use rtlsdr::{
     AsyncReadControlHandle, AsyncReadHandle, BoardVariant, DEF_RTL_XTAL_FREQ, DeviceDescriptor,
     DeviceDescriptors, DeviceId, NUM_TRANSFERS, RECOMMENDED_QUEUE_DEPTH, RtlSdr, TRANSFER_BUF_SIZE,
 };
-pub use tuner::{GAIN_VALUES, R82XX_IF_FREQ, TunerType};
+pub use tuner::{GAIN_VALUES, R82XX_IF_FREQ, TunerType, nearest_gain};
 
 /// RTL-SDR USB Vendor ID (Realtek).
 pub const RTL_USB_VID: u16 = 0x0bda;
