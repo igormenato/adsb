@@ -155,9 +155,10 @@ impl Rng {
 
 #[cfg(test)]
 mod tests {
+    use rs1090::decode::crc::modes_checksum;
     use rs1090::source::demod::magnitude_u16;
 
-    use trck::demod::demodulate2400;
+    use trck::demod::{demodulate2400, msg_octets};
 
     use super::*;
     use trck::modes::EVEN;
@@ -255,6 +256,28 @@ mod tests {
             crc >= 8,
             "10 dB crc-perfect {crc}/32; expected this demod's cliff, not 0"
         );
+    }
+
+    fn df11_frame() -> [u8; 14] {
+        let mut frame = [0_u8; 14];
+        frame[0] = 0x58;
+        frame[1] = 0x40;
+        frame[2] = 0x05;
+        frame[3] = 0x8B;
+        let crc = modes_checksum(&frame[..7], 56).expect("df11 crc");
+        frame[4] = (crc >> 16) as u8;
+        frame[5] = (crc >> 8) as u8;
+        frame[6] = crc as u8;
+        frame
+    }
+
+    #[test]
+    fn df11_recovers_seven_octets() {
+        let frame = df11_frame();
+        let bytes = encode_cu8(&[frame], Synth::default()).expect("iq");
+        let msgs = demodulate2400(&mag_of(&bytes), true);
+        let got = msgs.iter().find(|m| m.msg[0] >> 3 == 11).expect("df11");
+        assert_eq!(msg_octets(&got.msg), &frame[..7]);
     }
 
     #[test]

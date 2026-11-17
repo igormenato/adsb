@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use num_complex::Complex;
 use rs1090::source::demod::magnitude_u16;
 
-use trck::demod::demodulate2400;
+use trck::demod::{demodulate2400, msg_octets};
 
 use trck::{Fix, Tracker};
 
@@ -77,7 +77,7 @@ impl Demod {
                 (self.offset + data.sample_position as u64) as f64 / f64::from(SAMPLE_HZ);
             if log_msg {
                 eprint!("msg ");
-                for byte in data.msg {
+                for byte in msg_octets(&data.msg) {
                     eprint!("{byte:02X}");
                 }
                 eprintln!(" t={timestamp:.6}");

@@ -19,6 +19,15 @@ pub struct ModeSMessage {
     pub corrected_bits: u8,
 }
 
+/// DF bit 7 of byte 0: long frames are 14 bytes, short frames are 7.
+pub fn msg_octets(msg: &[u8; 14]) -> &[u8] {
+    if msg[0] & 0x80 != 0 {
+        &msg[..14]
+    } else {
+        &msg[..7]
+    }
+}
+
 pub fn demodulate2400(samples: &[u16], fix: bool) -> Vec<ModeSMessage> {
     let mut results = Vec::new();
     if samples.len() < MIN_TRAILING_SAMPLES {
@@ -288,5 +297,19 @@ impl Phase {
             Self::Three => 2 * m0 + 3 * m1 - 5 * m2,
             Self::Four => m0 + 5 * m1 - 5 * m2 - i32::from(m[3]),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn df11_is_seven_bytes_and_df17_is_fourteen() {
+        let mut msg = [0_u8; 14];
+        msg[0] = 0x58;
+        assert_eq!(msg_octets(&msg).len(), 7);
+        msg[0] = 0x8D;
+        assert_eq!(msg_octets(&msg).len(), 14);
     }
 }
