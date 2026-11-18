@@ -13,7 +13,7 @@ fn help_lists_install_service() {
     assert!(out.status.success(), "{out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("systemd"), "{text}");
-    assert!(text.contains("ARGS"), "{text}");
+    assert!(!text.contains("ARGS"), "{text}");
 }
 
 #[test]
@@ -25,26 +25,16 @@ fn install_service_needs_root() {
     assert!(!out.status.success(), "{out:?}");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("root"), "{err}");
+}
 
+#[test]
+fn install_service_takes_no_run_args() {
     let out = Command::new(env!("CARGO_BIN_EXE_trck"))
         .args(["install-service", "--", "--gain", "19.7"])
         .output()
         .expect("install-service args");
     assert!(!out.status.success(), "{out:?}");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("root"), "{err}");
-    assert!(!err.contains("unexpected"), "{err}");
-}
-
-#[test]
-fn install_service_rejects_unknown_run_args() {
-    let out = Command::new(env!("CARGO_BIN_EXE_trck"))
-        .args(["install-service", "--", "--gian", "19.7"])
-        .output()
-        .expect("install-service typo");
-    assert!(!out.status.success(), "{out:?}");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("--gian"), "{err}");
     assert!(err.contains("unexpected argument"), "{err}");
     assert!(!err.contains("root"), "{err}");
 }
@@ -59,7 +49,10 @@ fn systemd_analyze_verify_rewritten_unit() {
         .replace("/usr/local/bin/trck", exe)
         .replace("/var/lib/trck", dir.to_str().expect("utf8"));
     assert!(unit.contains("StartLimitIntervalSec=0"), "{unit}");
-    assert!(unit.contains("--allow-power-commands"), "{unit}");
+    assert!(
+        unit.contains("ExecStart=") && unit.contains("--allow-power-commands"),
+        "{unit}"
+    );
     let path = dir.join("trck-adsb.service");
     fs::write(&path, &unit).expect("unit");
     let out = Command::new("systemd-analyze")

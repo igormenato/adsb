@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
-use clap::{CommandFactory as _, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 
 use trck::{DEFAULT_PATH, Replay, ReplayLine, Tracker, is_mode_s};
 
@@ -102,15 +102,7 @@ enum Cmd {
     /// Replace this binary from GitHub Releases.
     Update(update::Args),
     /// Install and enable the systemd unit.
-    InstallService {
-        /// Flags for ExecStart after the binary. `--allow-power-commands` is always added.
-        #[arg(
-            trailing_var_arg = true,
-            allow_hyphen_values = true,
-            value_name = "ARGS"
-        )]
-        args: Vec<String>,
-    },
+    InstallService,
 }
 
 #[derive(Debug)]
@@ -223,21 +215,6 @@ fn fail(err: impl std::fmt::Display) -> ExitCode {
     ExitCode::from(1)
 }
 
-fn parse_run_args(args: &[String]) -> Result<(), clap::Error> {
-    let parsed =
-        Args::try_parse_from(std::iter::once("trck".to_string()).chain(args.iter().cloned()))?;
-    if parsed.command.is_some() {
-        return Err(Args::command().error(
-            clap::error::ErrorKind::UnknownArgument,
-            format!(
-                "unexpected argument '{}'",
-                args.first().map(String::as_str).unwrap_or("subcommand")
-            ),
-        ));
-    }
-    Ok(())
-}
-
 fn now_unix() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -257,7 +234,7 @@ fn main() -> ExitCode {
             speed,
         }) => return run_replay(file, &output, speed),
         Some(Cmd::Update(opts)) => return update::run(opts),
-        Some(Cmd::InstallService { args }) => return service::run(&args),
+        Some(Cmd::InstallService) => return service::run(),
         None => {}
     }
     let stop = Stop::new();
@@ -583,13 +560,5 @@ mod tests {
         assert!(parse_gain("").is_err());
         assert!(parse_gain("nan").is_err());
         assert!(parse_gain("inf").is_err());
-    }
-
-    #[test]
-    fn parse_run_args_rejects_typos() {
-        assert!(parse_run_args(&["--gain".into(), "19.7".into()]).is_ok());
-        let err = parse_run_args(&["--gian".into(), "19.7".into()]).unwrap_err();
-        assert!(err.to_string().contains("--gian"), "{err}");
-        assert!(parse_run_args(&["doctor".into()]).is_err());
     }
 }

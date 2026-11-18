@@ -14,14 +14,9 @@ const UNIT: &str = include_str!("../packaging/trck.service");
 const UNIT_PATH: &str = "/etc/systemd/system/trck.service";
 const BIN_PATH: &str = "/usr/local/bin/trck";
 const WORK_DIR: &str = "/var/lib/trck";
-const ALLOW_POWER: &str = "--allow-power-commands";
 
-pub fn run(args: &[String]) -> ExitCode {
-    if let Err(err) = super::parse_run_args(args) {
-        let _ = err.print();
-        return ExitCode::from(1);
-    }
-    match install(args) {
+pub fn run() -> ExitCode {
+    match install() {
         Ok(()) => {
             println!("enabled trck.service");
             ExitCode::SUCCESS
@@ -33,7 +28,7 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 }
 
-fn install(args: &[String]) -> Result<()> {
+fn install() -> Result<()> {
     if !Uid::effective().is_root() {
         bail!("trck install-service needs root");
     }
@@ -41,65 +36,13 @@ fn install(args: &[String]) -> Result<()> {
     fs::create_dir_all(WORK_DIR).with_context(|| format!("cannot create {WORK_DIR}"))?;
     let had_unit = Path::new(UNIT_PATH).exists();
     let bin_changed = place_bin(&exe, Path::new(BIN_PATH))?;
-    let unit = render_unit(args);
-    let unit_changed = write_unit(Path::new(UNIT_PATH), &unit)?;
+    let unit_changed = write_unit(Path::new(UNIT_PATH), UNIT)?;
     run_host(&["systemctl", "daemon-reload"])?;
     run_host(&["systemctl", "enable", "--now", "trck"])?;
     if had_unit && (bin_changed || unit_changed) {
         run_host(&["systemctl", "restart", "trck"])?;
     }
     Ok(())
-}
-
-fn render_unit(args: &[String]) -> String {
-    UNIT.lines()
-        .map(|line| {
-            if line.starts_with("ExecStart=") {
-                exec_start(args)
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n"
-}
-
-fn exec_start(args: &[String]) -> String {
-    let mut parts = vec![BIN_PATH.to_string(), ALLOW_POWER.to_string()];
-    for arg in args {
-        if arg == ALLOW_POWER {
-            continue;
-        }
-        parts.push(systemd_quote(arg));
-    }
-    format!("ExecStart={}", parts.join(" "))
-}
-
-fn systemd_quote(arg: &str) -> String {
-    let plain = arg.bytes().all(|b| {
-        b.is_ascii_alphanumeric()
-            || matches!(
-                b,
-                b'-' | b'_' | b'.' | b'/' | b':' | b'@' | b'+' | b'=' | b','
-            )
-    });
-    if plain && !arg.is_empty() {
-        return arg.to_string();
-    }
-    let mut out = String::from("\"");
-    for c in arg.chars() {
-        match c {
-            '\\' | '"' | '$' | '`' => {
-                out.push('\\');
-                out.push(c);
-            }
-            '%' => out.push_str("%%"),
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 fn place_bin(src: &Path, dest: &Path) -> Result<bool> {
@@ -186,47 +129,12 @@ mod tests {
     }
 
     #[test]
-    fn exec_start_always_allows_power_and_quotes() {
-        let none = exec_start(&[]);
-        assert_eq!(none, "ExecStart=/usr/local/bin/trck --allow-power-commands");
-        let args = [
-            "--ppm".into(),
-            "-8".into(),
-            "--gain".into(),
-            "19.7".into(),
-            ALLOW_POWER.into(),
-            "a b".into(),
-            "say\"hi".into(),
-            "%n".into(),
-            "50%".into(),
-        ];
-        let line = exec_start(&args);
-        assert!(line.starts_with("ExecStart=/usr/local/bin/trck --allow-power-commands "));
-        assert_eq!(line.matches(ALLOW_POWER).count(), 1);
-        assert!(line.contains(" --ppm -8 --gain 19.7 "));
-        assert!(line.contains("\"a b\""));
-        assert!(line.contains("\"say\\\"hi\""));
-        assert_eq!(systemd_quote("%n"), "\"%%n\"");
-        assert_eq!(systemd_quote("50%"), "\"50%%\"");
-        assert!(line.contains("\"%%n\""));
-        assert!(line.contains("\"50%%\""));
-        let again = render_unit(&["--gain".into(), "12".into()]);
-        assert_ne!(render_unit(&[]), again);
-        assert!(again.contains("StartLimitIntervalSec=0"));
-        assert!(again.contains("--gain 12"));
-    }
-
-    #[test]
     fn write_unit_is_idempotent() {
         let dir = temp_dir();
         let path = dir.join("trck.service");
-        let text = render_unit(&[]);
-        assert!(write_unit(&path, &text).unwrap());
-        assert!(!write_unit(&path, &text).unwrap());
-        assert!(write_unit(&path, &render_unit(&["--ppm".into(), "-8".into()])).unwrap());
-        let got = fs::read_to_string(&path).unwrap();
-        assert!(got.contains("--ppm -8"));
-        assert!(got.contains("StartLimitIntervalSec=0"));
+        assert!(write_unit(&path, UNIT).unwrap());
+        assert!(!write_unit(&path, UNIT).unwrap());
+        assert!(write_unit(&path, "[Unit]\n").unwrap());
         let _ = fs::remove_dir_all(&dir);
     }
 
