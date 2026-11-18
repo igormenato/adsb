@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context as _;
 use nix::poll::{PollFd, PollFlags};
-use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
+use serialport::{DataBits, FlowControl, Parity, StopBits, TTYPort};
 
 use trck::{
     ACK_LEN, AfterReply, Cmd, CmdFeed, CmdScan, CmdStatus, EmergencyKind, FRAME_LEN, Fix, PowerOp,
@@ -600,8 +600,6 @@ fn open_port(path: &str, baud: u32) -> anyhow::Result<TTYPort> {
         .timeout(Duration::ZERO)
         .open_native()
         .with_context(|| format!("cannot open {path}"))?;
-    port.clear(ClearBuffer::All)
-        .with_context(|| format!("cannot open {path}"))?;
     sys::set_nonblocking(sys::as_fd(&port)).with_context(|| format!("cannot open {path}"))?;
     sys::set_cloexec(sys::as_fd(&port)).with_context(|| format!("cannot open {path}"))?;
     Ok(port)
@@ -780,7 +778,8 @@ pub(crate) fn write_exit(err: ChunkError) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trck::Health;
+    use serialport::SerialPort;
+    use trck::{Health, pack_cmd};
 
     fn ack_health(bytes: &[u8; ACK_LEN]) -> u8 {
         bytes[6]
@@ -917,8 +916,22 @@ mod tests {
     }
 
     #[test]
+    fn reopen_keeps_a_command_already_on_the_line() {
+        let (mut master, slave) = TTYPort::pair().expect("pty");
+        let path = slave.name().expect("pty name");
+        let _held = open_port(&path, 115_200).expect("first");
+        let cmd = pack_cmd(Cmd::Pause);
+        master.write_all(&cmd).expect("pause");
+        master.flush().expect("flush");
+        let port = open_port(&path, 115_200).expect("reopen");
+        let mut buf = [0u8; 32];
+        let n = sys::read(sys::as_fd(&port), &mut buf).expect("read");
+        assert_eq!(&buf[..n], cmd.as_slice());
+        drop(slave);
+    }
+
+    #[test]
     fn hangup_retries_without_stopping() {
-        use serialport::SerialPort;
         let (master, slave) = TTYPort::pair().expect("pty");
         let path = slave.name().expect("pty name");
         sys::set_nonblocking(sys::as_fd(&slave)).expect("nonblock");

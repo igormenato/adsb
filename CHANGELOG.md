@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- UART reopen no longer flushes a command that already arrived on the new port, so hangup then Pause still TACKs.
+
 ### Added
 
 - UART `SIMULATION` (ASCII line and TCMD 7) loops a scenario through the live decoder onto UART/CSV. `sim.toml` in the cwd overrides the built-in UTFPR Curitiba file. Health `sim` is 2. `RESUME` returns to live.
