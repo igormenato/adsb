@@ -38,7 +38,7 @@ On the Pi, as root:
 sudo ./trck install-service
 ```
 
-Writes `/etc/systemd/system/trck.service`, copies this binary to `/usr/local/bin/trck`, creates `/var/lib/trck` for `aircraft.csv`, then `systemctl daemon-reload` and `systemctl enable --now trck`. Safe to run again. The unit runs as root (`Restart=always`, `RestartSec=1`) so UART reboot/shutdown and `trck update` can work. Logs:
+Writes `/etc/systemd/system/trck.service`, copies this binary to `/usr/local/bin/trck`, creates `/var/lib/trck` for `aircraft.csv`, then `systemctl daemon-reload` and `systemctl enable --now trck`. Safe to run again. The unit runs as root (`Restart=always`, `RestartSec=1`, `ProtectHome=yes`, `PrivateTmp=yes`, no `ProtectSystem`) so UART reboot/shutdown and `trck update` can work. Logs:
 
 ```
 journalctl -u trck -f

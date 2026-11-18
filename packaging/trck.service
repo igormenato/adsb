@@ -8,6 +8,8 @@ ExecStart=/usr/local/bin/trck
 WorkingDirectory=/var/lib/trck
 Restart=always
 RestartSec=1
+ProtectHome=yes
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target

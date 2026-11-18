@@ -119,8 +119,11 @@ mod tests {
         assert!(UNIT.contains("RestartSec=1"));
         assert!(UNIT.contains("WantedBy=multi-user.target"));
         assert!(UNIT.contains("ExecStart=/usr/local/bin/trck"));
+        assert!(UNIT.contains("ProtectHome=yes"));
+        assert!(UNIT.contains("PrivateTmp=yes"));
         assert!(!UNIT.contains("User="));
         assert!(!UNIT.contains("WatchdogSec"));
+        assert!(!UNIT.contains("ProtectSystem"));
     }
 
     #[test]
