@@ -227,7 +227,7 @@ fn uart_restart_acks_then_exits() {
     let tacks = wait_tacks(&mut pty.master, 1, Duration::from_secs(3));
     assert_eq!(tacks[0][4], Cmd::Restart as u8);
     assert_eq!(tacks[0][5], 0);
-    assert_eq!(tacks[0][6], Health::NoFix as u8);
+    assert_eq!(tacks[0][6], Health::Ok as u8);
     let status = wait_exit(&mut sender.0, Duration::from_secs(3));
     assert!(!status.success(), "{status}");
 }
@@ -252,7 +252,7 @@ fn ascii_pause_heartbeat_resume_acks() {
     assert_eq!(tacks[1][6], Health::Paused as u8);
     assert_eq!(tacks[2][4], Cmd::Resume as u8);
     assert_eq!(tacks[2][5], 0);
-    assert_eq!(tacks[2][6], Health::NoFix as u8);
+    assert_eq!(tacks[2][6], Health::Ok as u8);
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 

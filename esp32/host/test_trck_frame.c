@@ -180,7 +180,6 @@ int main(int argc, char **argv) {
     assert(ack.health == TACK_HEALTH_PAUSED);
     assert(strcmp(trck_health_word(ack.health), "paused") == 0);
     assert(strcmp(trck_health_word(TACK_HEALTH_OK), "ok") == 0);
-    assert(strcmp(trck_health_word(TACK_HEALTH_NO_FIX), "no_fix") == 0);
     assert(trck_ack_matches(TCMD_STATUS, ack.cmd));
     assert(!trck_ack_matches(TCMD_PAUSE, ack.cmd));
     TrckHb watch;
@@ -189,10 +188,10 @@ int main(int argc, char **argv) {
     assert(trck_hb_on_status(&watch, ack.health, 0) == TRCK_HB_PRINT);
     assert(trck_health(&watch) == TACK_HEALTH_PAUSED);
     assert(trck_hb_on_status(&watch, ack.health, 3000) == TRCK_HB_SILENT);
-    ack_raw[6] = TACK_HEALTH_NO_FIX;
+    ack_raw[6] = TACK_HEALTH_OK;
     trck_wr_u16(ack_raw + TACK_BODY_LEN, trck_crc16(ack_raw, TACK_BODY_LEN));
     assert(trck_unpack_ack(ack_raw, sizeof ack_raw, &ack));
-    assert(ack.health == TACK_HEALTH_NO_FIX);
+    assert(ack.health == TACK_HEALTH_OK);
     assert(trck_hb_on_status(&watch, ack.health, 3000) == TRCK_HB_PRINT);
     uint8_t pause_raw[TACK_LEN];
     memset(pause_raw, 0, sizeof pause_raw);
@@ -215,7 +214,7 @@ int main(int argc, char **argv) {
     trck_wr_u16(ack_raw + TACK_BODY_LEN, trck_crc16(ack_raw, TACK_BODY_LEN));
     assert(trck_unpack_ack(ack_raw, sizeof ack_raw, &ack));
     assert(ack.status == TCMD_FAILED);
-    ack_raw[6] = 3;
+    ack_raw[6] = 2;
     trck_wr_u16(ack_raw + TACK_BODY_LEN, trck_crc16(ack_raw, TACK_BODY_LEN));
     assert(!trck_unpack_ack(ack_raw, sizeof ack_raw, &ack));
 

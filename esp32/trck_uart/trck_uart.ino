@@ -24,7 +24,6 @@
 #define TCMD_FAILED 3
 #define TACK_HEALTH_OK 0
 #define TACK_HEALTH_PAUSED 1
-#define TACK_HEALTH_NO_FIX 2
 #define TACK_HEALTH_DOWN 255
 #define TRCK_HB_LINE "STATUS_ADSB\r\n"
 #define TRCK_HB_DOWN_MS 10000u
@@ -212,7 +211,7 @@ static inline bool trck_unpack_ack(const uint8_t *bytes, size_t len, TrckAck *ou
     if (bytes[5] > TCMD_FAILED) {
         return false;
     }
-    if (bytes[6] > TACK_HEALTH_NO_FIX) {
+    if (bytes[6] > TACK_HEALTH_PAUSED) {
         return false;
     }
     out->cmd = bytes[4];
@@ -244,8 +243,6 @@ static inline const char *trck_health_word(uint8_t health) {
         return "ok";
     case TACK_HEALTH_PAUSED:
         return "paused";
-    case TACK_HEALTH_NO_FIX:
-        return "no_fix";
     case TACK_HEALTH_DOWN:
         return "down";
     default:

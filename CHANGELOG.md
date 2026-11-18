@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- TACK is 9 bytes: `TACK`, cmd, status, health, CRC-16/CCITT-FALSE over bytes 0..6. Health is `ok` (0), `paused` (1), or `no_fix` (2). Uptime, frames sent, last-fix age, and the paused byte are gone. `radio_error` is omitted. RTL-SDR open/read retries stay on stderr and are not a UART field.
-- ESP32 heartbeat STATUS TACKs print only when health changes. USB prints health as `ok`, `paused`, or `no_fix`. `trck_health()` returns the last health, or `down` (255) when no TACK has arrived or when 10 s have passed without one.
+- TACK is 9 bytes: `TACK`, cmd, status, health, CRC-16/CCITT-FALSE over bytes 0..6. Health is `ok` (0) or `paused` (1). Uptime, frames sent, last-fix age, and the paused byte are gone.
+- ESP32 heartbeat STATUS TACKs print only when health changes. USB prints health as `ok` or `paused`. `trck_health()` returns the last health, or `down` (255) when no TACK has arrived or when 10 s have passed without one.
 
 ## [0.4.0](https://github.com/igormenato/adsb/compare/v0.3.5...v0.4.0) - 2026-11-18
 
