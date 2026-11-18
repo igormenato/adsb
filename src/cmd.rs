@@ -135,30 +135,31 @@ const LINE_MAX: usize = 32;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Line {
     Cmd(u8),
-    Quiet,
     Noise,
 }
 
-fn parse_line(bytes: &[u8]) -> Line {
+fn parse_line(bytes: &[u8]) -> Option<Line> {
     let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
-    match bytes {
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(match bytes {
         b"PING" => Line::Cmd(Cmd::Ping as u8),
-        b"STATUS" => Line::Cmd(Cmd::Status as u8),
+        b"STATUS" | b"STATUS_ADSB" => Line::Cmd(Cmd::Status as u8),
         b"REBOOT" => Line::Cmd(Cmd::Reboot as u8),
         b"SHUTDOWN" => Line::Cmd(Cmd::Shutdown as u8),
         b"PAUSE" => Line::Cmd(Cmd::Pause as u8),
         b"RESUME" => Line::Cmd(Cmd::Resume as u8),
         b"RESTART" => Line::Cmd(Cmd::Restart as u8),
-        b"" | b"STATUS_ADSB" => Line::Quiet,
         _ => Line::Noise,
-    }
+    })
 }
 
-fn line_feed(line: Line) -> CmdFeed {
+fn line_feed(line: Option<Line>) -> CmdFeed {
     match line {
-        Line::Cmd(cmd) => CmdFeed::Cmd(cmd),
-        Line::Quiet => CmdFeed::None,
-        Line::Noise => CmdFeed::Noise,
+        Some(Line::Cmd(cmd)) => CmdFeed::Cmd(cmd),
+        Some(Line::Noise) => CmdFeed::Noise,
+        None => CmdFeed::None,
     }
 }
 
@@ -437,17 +438,23 @@ mod tests {
 
     #[test]
     fn parse_line_maps_ascii_commands() {
-        assert_eq!(parse_line(b"PING"), Line::Cmd(Cmd::Ping as u8));
-        assert_eq!(parse_line(b"STATUS"), Line::Cmd(Cmd::Status as u8));
-        assert_eq!(parse_line(b"PAUSE\r"), Line::Cmd(Cmd::Pause as u8));
-        assert_eq!(parse_line(b"RESUME"), Line::Cmd(Cmd::Resume as u8));
-        assert_eq!(parse_line(b"RESTART"), Line::Cmd(Cmd::Restart as u8));
-        assert_eq!(parse_line(b"REBOOT"), Line::Cmd(Cmd::Reboot as u8));
-        assert_eq!(parse_line(b"SHUTDOWN"), Line::Cmd(Cmd::Shutdown as u8));
-        assert_eq!(parse_line(b"STATUS_ADSB"), Line::Quiet);
-        assert_eq!(parse_line(b""), Line::Quiet);
-        assert_eq!(parse_line(b"ping"), Line::Noise);
-        assert_eq!(parse_line(b"NOPE"), Line::Noise);
+        assert_eq!(parse_line(b"PING"), Some(Line::Cmd(Cmd::Ping as u8)));
+        assert_eq!(parse_line(b"STATUS"), Some(Line::Cmd(Cmd::Status as u8)));
+        assert_eq!(parse_line(b"PAUSE\r"), Some(Line::Cmd(Cmd::Pause as u8)));
+        assert_eq!(parse_line(b"RESUME"), Some(Line::Cmd(Cmd::Resume as u8)));
+        assert_eq!(parse_line(b"RESTART"), Some(Line::Cmd(Cmd::Restart as u8)));
+        assert_eq!(parse_line(b"REBOOT"), Some(Line::Cmd(Cmd::Reboot as u8)));
+        assert_eq!(
+            parse_line(b"SHUTDOWN"),
+            Some(Line::Cmd(Cmd::Shutdown as u8))
+        );
+        assert_eq!(
+            parse_line(b"STATUS_ADSB"),
+            Some(Line::Cmd(Cmd::Status as u8))
+        );
+        assert_eq!(parse_line(b""), None);
+        assert_eq!(parse_line(b"ping"), Some(Line::Noise));
+        assert_eq!(parse_line(b"NOPE"), Some(Line::Noise));
     }
 
     #[test]
@@ -457,7 +464,10 @@ mod tests {
             feeds(&mut scan, b"PAUSE\r\n"),
             [CmdFeed::Cmd(Cmd::Pause as u8)]
         );
-        assert_eq!(feeds(&mut scan, b"STATUS_ADSB\r\n"), []);
+        assert_eq!(
+            feeds(&mut scan, b"STATUS_ADSB\r\n"),
+            [CmdFeed::Cmd(Cmd::Status as u8)]
+        );
         assert_eq!(
             feeds(&mut scan, b"RESUME\n"),
             [CmdFeed::Cmd(Cmd::Resume as u8)]
@@ -483,6 +493,7 @@ mod tests {
             (b"PAUSE", CmdFeed::Cmd(Cmd::Pause as u8)),
             (b"RESUME", CmdFeed::Cmd(Cmd::Resume as u8)),
             (b"RESTART", CmdFeed::Cmd(Cmd::Restart as u8)),
+            (b"STATUS_ADSB", CmdFeed::Cmd(Cmd::Status as u8)),
         ];
         for &(word, expect) in WORDS {
             for ending in [b"\r\n".as_slice(), b"\n".as_slice()] {
@@ -495,7 +506,10 @@ mod tests {
         let mut scan = CmdScan::new();
         assert_eq!(
             feeds(&mut scan, b"STATUS_ADSB\nSTATUS\n"),
-            [CmdFeed::Cmd(Cmd::Status as u8)]
+            [
+                CmdFeed::Cmd(Cmd::Status as u8),
+                CmdFeed::Cmd(Cmd::Status as u8)
+            ]
         );
     }
 
@@ -514,6 +528,7 @@ mod tests {
             [
                 CmdFeed::Cmd(Cmd::Ping as u8),
                 CmdFeed::Cmd(Cmd::Pause as u8),
+                CmdFeed::Cmd(Cmd::Status as u8),
                 CmdFeed::Cmd(Cmd::Status as u8),
                 CmdFeed::Cmd(Cmd::Resume as u8),
                 CmdFeed::Cmd(Cmd::Pause as u8),

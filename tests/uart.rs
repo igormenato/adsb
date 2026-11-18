@@ -242,14 +242,17 @@ fn ascii_pause_heartbeat_resume_acks() {
         .write_all(b"PAUSE\r\nSTATUS_ADSB\r\nRESUME\n")
         .expect("ascii");
     pty.master.flush().expect("flush");
-    let tacks = wait_tacks(&mut pty.master, 2, Duration::from_secs(3));
-    assert_eq!(tacks.len(), 2);
+    let tacks = wait_tacks(&mut pty.master, 3, Duration::from_secs(3));
+    assert_eq!(tacks.len(), 3);
     assert_eq!(tacks[0][4], Cmd::Pause as u8);
     assert_eq!(tacks[0][5], 0);
     assert_eq!(tacks[0][18], 1);
-    assert_eq!(tacks[1][4], Cmd::Resume as u8);
+    assert_eq!(tacks[1][4], Cmd::Status as u8);
     assert_eq!(tacks[1][5], 0);
-    assert_eq!(tacks[1][18], 0);
+    assert_eq!(tacks[1][18], 1);
+    assert_eq!(tacks[2][4], Cmd::Resume as u8);
+    assert_eq!(tacks[2][5], 0);
+    assert_eq!(tacks[2][18], 0);
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 

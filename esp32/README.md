@@ -67,9 +67,9 @@ The RF firmware (ESP32 TX GPIO 10 to Pi RX GPIO 15) sends the same commands as u
 | `RESTART` | Same as TCMD restart |
 | `REBOOT` | Same as TCMD reboot, including `--allow-power-commands` |
 | `SHUTDOWN` | Same as TCMD shutdown, including `--allow-power-commands` |
-| `STATUS_ADSB` | Heartbeat every 3 s. No `TACK`. Not logged per line |
+| `STATUS_ADSB` | Heartbeat every 3 s. Same `TACK` as `STATUS`. ESP treats a missing reply as trck down |
 
-Lines end in `\r\n` or `\n`. Empty lines, unknown lines, and lines longer than 32 bytes are ignored. `trck` may print a rate-limited stderr note. `STATUS_ADSB` does not.
+Lines end in `\r\n` or `\n`. Empty lines, unknown lines, and lines longer than 32 bytes are ignored. `trck` may print a rate-limited stderr note.
 
 Change `kPiRxGpio` / `kPiTxGpio` in the sketch and in `esp32/pio/src/main.cpp` if those pins are not free on the board.
 
