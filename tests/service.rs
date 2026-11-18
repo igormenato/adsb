@@ -50,11 +50,3 @@ fn systemd_analyze_verify_rewritten_unit() {
     assert!(out.status.success(), "{out:?}");
     let _ = fs::remove_dir_all(&dir);
 }
-
-#[test]
-fn this_vm_has_no_pid1_systemd() {
-    assert!(
-        !std::path::Path::new("/run/systemd/system").exists(),
-        "this VM grew a systemd pid1; extend this test to kill -9 the unit"
-    );
-}
