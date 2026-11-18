@@ -88,6 +88,72 @@ Board id is `esp32-s3-devkitc-1`. Arduino IDE settings, Serial words, and firmwa
 make -C esp32/host test
 ```
 
+## Simulate flights
+
+`trck sim` writes `ts,hex` Mode S lines. `trck replay` runs those lines through the live decoder and UART writer. Use this to drive Pi to ESP32 to RF to base with fake aircraft.
+
+### Scenario TOML
+
+Unknown keys fail. `duration` and at least one `[[aircraft]]` are required. Examples: [crossing.toml](examples/scenarios/crossing.toml), [climb.toml](examples/scenarios/climb.toml).
+
+Top-level:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `duration` | float, seconds | yes | Must be finite and `> 0`. |
+
+Each `[[aircraft]]`:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `icao` | string | yes | Six ASCII hex digits. |
+| `callsign` | string | yes | 1 to 8 characters. `A-Z`, `0-9`, space. |
+| `squawk` | string | no | Four octal digits (`0-7`). Omit to skip DF5. |
+| `lat` | float, degrees | yes | Finite, `-90` through `90`. |
+| `lon` | float, degrees | yes | Finite, `-180` through `180`. |
+| `alt_ft` | integer, feet | yes | `-1000` through `50000`. Used until `climb_at`, or the whole run if there is no climb. |
+| `heading_deg` | float, degrees | yes | Finite. Used until `turn_at`, or the whole run if there is no turn. |
+| `speed_kt` | float, knots | yes | Finite, `>= 0`. Constant for the run. |
+| `rate_hz` | float, Hz | yes | Finite, `> 0`. Sample period is `1 / rate_hz`. |
+| `turn_at` | float, seconds | with `heading_to_deg` | Finite, `>= 0`. Both fields or neither. |
+| `heading_to_deg` | float, degrees | with `turn_at` | Finite. Used at and after `turn_at`. |
+| `climb_at` | float, seconds | with `alt_to_ft` | Finite, `>= 0`. Both fields or neither. |
+| `alt_to_ft` | integer, feet | with `climb_at` | `-1000` through `50000`. Used at and after `climb_at`. |
+
+Position advances on a rhumb-style heading and speed. Heading and altitude jump at `turn_at` and `climb_at`. They do not interpolate.
+
+Stdout is `ts,hex` (seconds with three decimals, 14-byte Mode S hex). `--out FILE` writes that instead.
+
+```
+./trck sim examples/scenarios/crossing.toml --out FILE
+```
+
+### Pi UART end to end
+
+The `trck` systemd unit holds `/dev/serial0`. Stop it before replay. Replay defaults are `/dev/serial0` and `115200`. `--uart -` writes frames to stdout. `--speed` scales playback. `0` or `max` is as fast as possible. Default `--speed` is `1`.
+
+```
+sudo systemctl stop trck
+./trck sim examples/scenarios/crossing.toml --out FILE
+./trck replay FILE
+./trck replay FILE --speed max
+sudo systemctl start trck
+```
+
+### readsb traces
+
+`--trace` takes one or more readsb `globe_history` JSON files. Do not pass a scenario with it. `--from` and `--until` are Unix times (`timestamp + dt`). They keep samples at or after `--from` and before `--until`. Both require `--trace`. `--from` must be less than `--until`.
+
+```
+./trck sim --trace examples/traces/trace_full_e4917f.json --from 1794509787 --until 1794509800 --out FILE
+```
+
+Fixtures: [examples/traces/](examples/traces/).
+
+### Other sim outputs
+
+`--truth FILE` writes CSV `ts,icao,lat,lon,alt_ft` for each encoded position pair. `--iq-out FILE` writes RTL-SDR cu8 of the generated frames. `--iq-rate` defaults to `2400000`. `--iq-amp` defaults to `0.8`. `--iq-snr` (dB) adds Gaussian noise and requires `--iq-out`. `--iq-seed` defaults to `1`.
+
 ## Test
 
 ```
@@ -103,13 +169,13 @@ cargo test --locked -- --ignored
 
 The script puts public recordings in gitignored `tests/data/`. Sources are [antirez/dump1090](https://github.com/antirez/dump1090) `testfiles/modes1.bin` and the Porto AWEC 2026 set ([DOI 10.5281/zenodo.23342597](https://doi.org/10.5281/zenodo.23342597)).
 
+Sim and replay flags, scenario fields, and the Pi UART recipe are in [Simulate flights](#simulate-flights).
+
 ```
-./trck sim examples/scenarios/crossing.toml
-./trck replay FILE --uart -
 ./trck stress --uart - --aircraft 32 --rate 0 --seconds 10
 ```
 
-`sim` writes `ts,hex` lines. `replay` runs those lines through the live decoder. `stress` generates Mode S in-process. `--speed` on `replay` scales timing. `0` or `max` is as fast as possible.
+`stress` generates Mode S in-process.
 
 ## Release
 
