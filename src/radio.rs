@@ -80,7 +80,7 @@ impl Demod {
                 }
                 eprintln!(" t={timestamp:.6}");
             }
-            let Some(fix) = self.tracker.ingest(timestamp, &data.msg) else {
+            let Some(fix) = self.tracker.ingest(timestamp, msg_octets(&data.msg)) else {
                 continue;
             };
             self.stats.fixes += 1;

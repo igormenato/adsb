@@ -159,9 +159,10 @@ mod tests {
     use rs1090::source::demod::magnitude_u16;
 
     use trck::demod::{demodulate2400, msg_octets};
+    use trck::{EmergencyKind, Tracker, pack_frame};
 
     use super::*;
-    use trck::modes::EVEN;
+    use trck::modes::{EVEN, ODD, df5_identity};
     fn cu8_to_complex(bytes: &[u8]) -> Vec<num_complex::Complex<f32>> {
         bytes
             .as_chunks::<2>()
@@ -269,6 +270,45 @@ mod tests {
         frame[5] = (crc >> 8) as u8;
         frame[6] = crc as u8;
         frame
+    }
+
+    #[test]
+    fn df5_7700_iq_sets_uart_emergency() {
+        let mut df5 = [0_u8; 14];
+        df5[..7].copy_from_slice(&df5_identity(0x40058B, 0x7700));
+        let bytes = encode_cu8(&[df5, EVEN, ODD], Synth::default()).expect("iq");
+        let msgs = demodulate2400(&mag_of(&bytes), true);
+        assert!(
+            msgs.iter().any(|m| m.msg[0] >> 3 == 5),
+            "df5 missing {msgs:02x?}"
+        );
+        let mut tracker = Tracker::new();
+        let mut emergency = None;
+        for (i, m) in msgs.iter().enumerate() {
+            if let Some(fix) = tracker.ingest(i as f64, msg_octets(&m.msg)) {
+                emergency = Some(pack_frame(&fix)[31]);
+                assert_eq!(fix.aircraft.emergency, Some(EmergencyKind::General));
+            }
+        }
+        assert_eq!(emergency, Some(1), "UART emergency byte");
+    }
+
+    #[test]
+    fn one_bit_df17_needs_fix() {
+        let mut damaged = EVEN;
+        damaged[6] ^= 0x01;
+        let bytes = encode_cu8(&[damaged], Synth::default()).expect("iq");
+        let mag = mag_of(&bytes);
+        let off = demodulate2400(&mag, false);
+        let on = demodulate2400(&mag, true);
+        assert!(
+            !off.iter().any(|m| m.msg == EVEN),
+            "--no-fix decoded the damaged DF17: {off:02x?}"
+        );
+        assert!(
+            on.iter().any(|m| m.msg == EVEN && m.corrected_bits == 1),
+            "--fix missed the 1-bit DF17: {on:02x?}"
+        );
     }
 
     #[test]

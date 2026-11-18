@@ -8,7 +8,7 @@ use rs1090::decode::adsb::ME;
 use rs1090::decode::bds::bds09::AirborneVelocitySubType;
 use rs1090::decode::bds::bds61::{AircraftStatusType, EmergencyState};
 use rs1090::decode::cpr::CPRFormat;
-use rs1090::decode::{DF, ICAO, Message};
+use rs1090::decode::{ControlFieldType, DF, ICAO, Message};
 
 use crate::cpr::{
     CprBits, GlobalFail, LatLon, airborne_global, local_in_range, pair_window_s, relative, speed_ok,
@@ -22,6 +22,11 @@ const TRACKER_CAP: usize = 256;
 /// Drop ICAOs idle this long when the map is over capacity.
 const CPR_IDLE_S: f64 = 180.0;
 
+/// Clear a cached emergency if no status/squawk refresh arrives in this time.
+/// dump1090-fa `TRACK_STALE` is 15 s; `TRACK_EXPIRE` is 60 s. 30 s sits
+/// between those and matches the ADSB-38 ticket.
+const EMERGENCY_IDLE_S: f64 = 30.0;
+
 /// One ICAO's identification, velocity, and emergency between position frames.
 #[derive(Clone, Debug, Default)]
 struct Cached {
@@ -29,6 +34,7 @@ struct Cached {
     ground_speed_kt: Option<u16>,
     track_deg: Option<u16>,
     emergency: Option<EmergencyKind>,
+    emergency_at: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -83,17 +89,16 @@ impl Tracker {
     pub fn ingest(&mut self, timestamp: f64, frame: &[u8]) -> Option<Fix> {
         let message = Message::try_from(frame).ok()?;
         let (icao, fix, known) = match &message.df {
-            DF::ExtendedSquitterADSB(adsb) => {
-                let icao24 = adsb.icao24;
-                let known = self.known(icao24);
-                self.cache_adsb(icao24, &adsb.message);
-                let fix = self.try_position(icao24, timestamp, &adsb.message);
-                (icao24, fix, known)
+            DF::ExtendedSquitterADSB(adsb) => self.ingest_me(adsb.icao24, timestamp, &adsb.message),
+            DF::ExtendedSquitterTisB { cf, .. }
+                if cf.field_type == ControlFieldType::ADSB_ES_NT =>
+            {
+                self.ingest_me(cf.aa, timestamp, &cf.me)
             }
             DF::SurveillanceIdentityReply { id, ap, .. } => {
                 let icao = ICAO::from(*ap);
                 let known = self.known(icao);
-                self.apply_squawk(icao, id.0);
+                self.apply_squawk(icao, timestamp, id.0);
                 (icao, None, known)
             }
             DF::ShortAirAirSurveillance { .. }
@@ -117,6 +122,13 @@ impl Tracker {
 
     fn ident_mut(&mut self, icao: ICAO) -> &mut Cached {
         &mut self.aircraft.entry(icao).or_default().ident
+    }
+
+    fn ingest_me(&mut self, icao24: ICAO, timestamp: f64, me: &ME) -> (ICAO, Option<Fix>, bool) {
+        let known = self.known(icao24);
+        self.cache_adsb(icao24, timestamp, me);
+        let fix = self.try_position(icao24, timestamp, me);
+        (icao24, fix, known)
     }
 
     fn trim(&mut self, now: f64, keep: ICAO, known: bool) {
@@ -168,7 +180,7 @@ impl Tracker {
             .map(|(icao, _)| *icao)
     }
 
-    fn cache_adsb(&mut self, icao24: ICAO, me: &ME) {
+    fn cache_adsb(&mut self, icao24: ICAO, timestamp: f64, me: &ME) {
         match me {
             ME::BDS08 { inner, .. } => {
                 if !inner.callsign.contains('#') {
@@ -186,13 +198,16 @@ impl Tracker {
                 let ident = self.ident_mut(icao24);
                 match status.subtype {
                     AircraftStatusType::EmergencyPriorityStatus => {
-                        ident.emergency = emergency_kind(status.emergency_state, status.squawk.0);
+                        ident.set_emergency(
+                            timestamp,
+                            emergency_kind(status.emergency_state, status.squawk.0),
+                        );
                     }
                     AircraftStatusType::NoInformation
                     | AircraftStatusType::ACASRaBroadcast
                     | AircraftStatusType::Reserved => {
                         if ident.emergency.is_none() {
-                            ident.emergency = kind_from_squawk(status.squawk.0);
+                            ident.set_emergency(timestamp, kind_from_squawk(status.squawk.0));
                         }
                     }
                 }
@@ -216,7 +231,9 @@ impl Tracker {
             return None;
         }
         let icao = Icao::from_u24(icao24.0)?;
-        let ident = self.ident_mut(icao24).clone();
+        let ident = self.ident_mut(icao24);
+        ident.expire_emergency(timestamp);
+        let ident = ident.clone();
         Some(Fix {
             aircraft: Aircraft {
                 icao,
@@ -299,14 +316,29 @@ impl Tracker {
         }
     }
 
-    fn apply_squawk(&mut self, icao: ICAO, squawk: u16) {
+    fn apply_squawk(&mut self, icao: ICAO, timestamp: f64, squawk: u16) {
         let ident = self.ident_mut(icao);
         if ident.emergency.is_none() {
-            ident.emergency = kind_from_squawk(squawk);
+            ident.set_emergency(timestamp, kind_from_squawk(squawk));
         } else if matches!(ident.emergency, Some(EmergencyKind::Reserved))
             && let Some(kind) = kind_from_squawk(squawk)
         {
-            ident.emergency = Some(kind);
+            ident.set_emergency(timestamp, Some(kind));
+        }
+    }
+}
+
+impl Cached {
+    fn set_emergency(&mut self, timestamp: f64, emergency: Option<EmergencyKind>) {
+        self.emergency = emergency;
+        if emergency.is_some() {
+            self.emergency_at = timestamp;
+        }
+    }
+
+    fn expire_emergency(&mut self, now: f64) {
+        if self.emergency.is_some() && now - self.emergency_at > EMERGENCY_IDLE_S {
+            self.emergency = None;
         }
     }
 }
@@ -429,7 +461,9 @@ pub fn parse_hex_frame(bytes: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    use crate::modes::{EVEN, ODD, STATUS, airborne_position, hex14, with_icao};
+    use crate::modes::{
+        EVEN, ODD, STATUS, airborne_position, df5_identity, df17, df18_cf0, hex14, with_icao,
+    };
     use crate::pack_frame;
 
     const IDENT: &str = "8d406b902015a678d4d220aa4bda";
@@ -520,6 +554,51 @@ mod tests {
         let fix = tracker.ingest(3.0, &ODD).expect("position");
         assert_eq!(fix.aircraft.emergency, Some(EmergencyKind::General));
         assert_eq!(pack_frame(&fix)[31], 1);
+    }
+
+    #[test]
+    fn padded_df5_does_not_parse_and_seven_byte_7700_does() {
+        let df5 = df5_identity(0x40058B, 0x7700);
+        let mut padded = [0u8; 14];
+        padded[..7].copy_from_slice(&df5);
+        assert!(Message::try_from(padded.as_slice()).is_err());
+        let parsed = Message::try_from(df5.as_slice()).expect("df5");
+        match parsed.df {
+            DF::SurveillanceIdentityReply { id, ap, .. } => {
+                assert_eq!(id.0, 0x7700);
+                assert_eq!(ap.0, 0x40058B);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn df18_cf0_even_odd_matches_df17() {
+        let icao = 0x40058B;
+        let me_even: [u8; 7] = EVEN[4..11].try_into().unwrap();
+        let me_odd: [u8; 7] = ODD[4..11].try_into().unwrap();
+        let mut ads_b = Tracker::new();
+        assert!(ads_b.ingest(1.0, &df17(icao, me_even)).is_none());
+        let df17_fix = ads_b.ingest(2.0, &df17(icao, me_odd)).expect("df17");
+        let mut es_nt = Tracker::new();
+        assert!(es_nt.ingest(1.0, &df18_cf0(icao, me_even)).is_none());
+        let df18_fix = es_nt.ingest(2.0, &df18_cf0(icao, me_odd)).expect("df18");
+        assert_eq!(df18_fix.aircraft, df17_fix.aircraft);
+    }
+
+    #[test]
+    fn emergency_expires_after_idle() {
+        let mut tracker = Tracker::new();
+        assert!(tracker.ingest(1.0, &STATUS).is_none());
+        assert!(tracker.ingest(2.0, &EVEN).is_none());
+        let hot = tracker.ingest(3.0, &ODD).expect("hot");
+        assert_eq!(hot.aircraft.emergency, Some(EmergencyKind::General));
+        let even = airborne_position(0x40058B, 49.81755, 6.08442, 39_000, false);
+        let cold = tracker
+            .ingest(3.0 + EMERGENCY_IDLE_S + 1.0, &even)
+            .expect("position after idle");
+        assert_eq!(cold.aircraft.emergency, None);
+        assert_eq!(pack_frame(&cold)[31], 0);
     }
 
     #[test]
