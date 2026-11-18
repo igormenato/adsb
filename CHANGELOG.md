@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/igormenato/adsb/compare/v0.4.0...v0.5.0) - 2026-11-18
+
+### Added
+
+- *(uart)* SIMULATION command loops scenario onto UART ([#123](https://github.com/igormenato/adsb/pull/123))
+- *(uart)* shrink TACK to a health byte ([#122](https://github.com/igormenato/adsb/pull/122))
+
+### Fixed
+
+- *(uart)* keep inbound bytes across hangup reopen ([#126](https://github.com/igormenato/adsb/pull/126))
+
 ### Fixed
 
 - UART reopen no longer flushes a command that already arrived on the new port, so hangup then Pause still TACKs.
