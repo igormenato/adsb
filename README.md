@@ -111,8 +111,8 @@ Each `[[aircraft]]`:
 | `squawk` | string | no | Four octal digits (`0-7`). Omit to skip DF5. |
 | `lat` | float, degrees | yes | Finite, `-90` through `90`. |
 | `lon` | float, degrees | yes | Finite, `-180` through `180`. |
-| `alt_ft` | integer, feet | yes | `-1000` through `50000`. |
-| `heading_deg` | float, degrees | yes | Finite. Instant heading after `turn_at`. |
+| `alt_ft` | integer, feet | yes | `-1000` through `50000`. Used until `climb_at`, or the whole run if there is no climb. |
+| `heading_deg` | float, degrees | yes | Finite. Used until `turn_at`, or the whole run if there is no turn. |
 | `speed_kt` | float, knots | yes | Finite, `>= 0`. Constant for the run. |
 | `rate_hz` | float, Hz | yes | Finite, `> 0`. Sample period is `1 / rate_hz`. |
 | `turn_at` | float, seconds | with `heading_to_deg` | Finite, `>= 0`. Both fields or neither. |
