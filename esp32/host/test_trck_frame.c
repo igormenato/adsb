@@ -144,36 +144,25 @@ int main(int argc, char **argv) {
 
     free(raw);
 
-    uint8_t ping[TCMD_LEN];
-    trck_pack_cmd(TCMD_PING, ping);
-    assert(memcmp(ping, "TCMD", 4) == 0);
-    assert(ping[4] == TCMD_PING);
-    uint8_t cmd = 0xFF;
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_PING);
-    uint8_t status[TCMD_LEN];
-    trck_pack_cmd(TCMD_STATUS, status);
-    assert(trck_unpack_cmd(status, sizeof status, &cmd));
-    assert(cmd == TCMD_STATUS);
-    trck_pack_cmd(TCMD_REBOOT, ping);
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_REBOOT);
-    trck_pack_cmd(TCMD_SHUTDOWN, ping);
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_SHUTDOWN);
-    trck_pack_cmd(TCMD_PAUSE, ping);
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_PAUSE);
-    trck_pack_cmd(TCMD_RESUME, ping);
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_RESUME);
-    trck_pack_cmd(TCMD_RESTART, ping);
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_RESTART);
-    uint8_t bad_cmd[TCMD_LEN];
-    trck_pack_cmd(TCMD_PING, bad_cmd);
-    bad_cmd[TCMD_LEN - 1] ^= 0x5A;
-    assert(!trck_unpack_cmd(bad_cmd, sizeof bad_cmd, &cmd));
+    static const struct {
+        uint8_t cmd;
+        const char *line;
+    } kLines[] = {
+        {TCMD_PING, "PING\r\n"},       {TCMD_STATUS, "STATUS\r\n"}, {TCMD_REBOOT, "REBOOT\r\n"},
+        {TCMD_SHUTDOWN, "SHUTDOWN\r\n"}, {TCMD_PAUSE, "PAUSE\r\n"},   {TCMD_RESUME, "RESUME\r\n"},
+        {TCMD_RESTART, "RESTART\r\n"},
+    };
+    for (size_t i = 0; i < sizeof kLines / sizeof kLines[0]; i++) {
+        char line[16];
+        size_t n = trck_pack_cmd_line(kLines[i].cmd, line, sizeof line);
+        assert(n == strlen(kLines[i].line));
+        assert(memcmp(line, kLines[i].line, n) == 0);
+    }
+    char too_small[4];
+    assert(trck_pack_cmd_line(TCMD_PING, too_small, sizeof too_small) == 0);
+    assert(trck_pack_cmd_line(0xFF, too_small, sizeof too_small) == 0);
+    assert(trck_cmd_word(0xFF) == NULL);
+    assert(strcmp(TRCK_HB_LINE, "STATUS_ADSB\r\n") == 0);
 
     uint8_t ack_raw[TACK_LEN];
     memset(ack_raw, 0, sizeof ack_raw);

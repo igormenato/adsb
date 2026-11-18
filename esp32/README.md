@@ -1,6 +1,6 @@
 # ESP32-S3 UART ingest
 
-Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, `shutdown`, `pause`, `resume`, or `restart` on that Serial to send a 7-byte `TCMD` frame to the Pi. Replies are 21-byte `TACK` frames. Type `stats` to print frames received, `crc_fail`, `resync`, and `qdrop` (compare `frames` with `frames_sent` from `status` to measure wire loss; `qdrop` is events dropped when the print queue is full). UART1 RX runs in its own FreeRTOS task. After a `TCMD`, the sketch waits up to 1 s for the matching `TACK` and retries ping/status/pause/resume once. For reboot/shutdown/restart it sends `status` instead of repeating the command. Both attempts failing prints `no reply`.
+Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, `shutdown`, `pause`, `resume`, or `restart` on that Serial (any case) to send `PING`, `STATUS`, `REBOOT`, `SHUTDOWN`, `PAUSE`, `RESUME`, or `RESTART` plus `\r\n` on UART1. Replies are 21-byte `TACK` frames. Every 3 s the sketch also sends `STATUS_ADSB\r\n` and does not wait for a TACK. Type `stats` to print frames received, `crc_fail`, `resync`, and `qdrop` (compare `frames` with `frames_sent` from `status` to measure wire loss; `qdrop` is events dropped when the print queue is full). UART1 RX runs in its own FreeRTOS task. After a command line, the sketch waits up to 1 s for the matching `TACK` and retries ping/status/pause/resume once. For reboot/shutdown/restart it sends `STATUS` instead of repeating the command. Both attempts failing prints `no reply`.
 
 Two firmware trees: Arduino sketch `esp32/trck_uart/trck_uart.ino` (self-contained, protocol inlined) and PlatformIO `esp32/pio` (`src/main.cpp`, protocol in `include/trck_frame.h`). Host check includes the Arduino `.ino` (same as before the shared header, simpler than pointing at the PlatformIO header): `make -C esp32/host test`.
 
@@ -53,6 +53,8 @@ On the USB Serial Monitor, send one word and a newline.
 | `reboot` | `systemctl reboot` if `trck` was started with `--allow-power-commands` |
 | `shutdown` | `systemctl poweroff` with the same flag |
 | `stats` | ESP32 only: print `frames`, `crc_fail`, `resync`, `qdrop`. No UART command |
+
+Those USB words (except `stats`) go to the Pi as the uppercase line plus `\r\n`. `STATUS_ADSB\r\n` is sent every 3 s with no TACK wait.
 
 Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. Pause, resume, and restart do not need the flag. `sudo trck install-service` installs a root systemd unit with `--allow-power-commands` (`Restart=always`, `StartLimitIntervalSec=0`) so reboot, shutdown, `trck update`, and UART restart work without ssh. While paused, new positions are discarded at the UART/CSV entry. `last_fix_age` keeps growing. Resume does not flood the wire.
 

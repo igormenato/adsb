@@ -12,8 +12,6 @@
 #define TRCK_ALT_UNKNOWN INT32_MIN
 #define TRCK_SPEED_UNKNOWN ((uint16_t)0xFFFF)
 #define TRCK_TRACK_UNKNOWN ((uint16_t)0xFFFF)
-#define TCMD_LEN 7
-#define TCMD_BODY_LEN 5
 #define TACK_LEN 21
 #define TACK_BODY_LEN 19
 #define TCMD_PING 0
@@ -28,6 +26,7 @@
 #define TCMD_UNKNOWN 2
 #define TCMD_FAILED 3
 #define TCMD_AGE_NONE 0xFFFFFFFFu
+#define TRCK_HB_LINE "STATUS_ADSB\r\n"
 
 typedef struct {
     uint32_t icao;
@@ -162,24 +161,40 @@ static inline bool trck_scan_feed(TrckScan *scan, uint8_t byte, TrckFix *out) {
     }
 }
 
-static inline void trck_pack_cmd(uint8_t cmd, uint8_t out[TCMD_LEN]) {
-    memcpy(out, "TCMD", 4);
-    out[4] = cmd;
-    trck_wr_u16(out + TCMD_BODY_LEN, trck_crc16(out, TCMD_BODY_LEN));
+static inline const char *trck_cmd_word(uint8_t cmd) {
+    switch (cmd) {
+    case TCMD_PING:
+        return "PING";
+    case TCMD_STATUS:
+        return "STATUS";
+    case TCMD_REBOOT:
+        return "REBOOT";
+    case TCMD_SHUTDOWN:
+        return "SHUTDOWN";
+    case TCMD_PAUSE:
+        return "PAUSE";
+    case TCMD_RESUME:
+        return "RESUME";
+    case TCMD_RESTART:
+        return "RESTART";
+    default:
+        return NULL;
+    }
 }
 
-static inline bool trck_unpack_cmd(const uint8_t *bytes, size_t len, uint8_t *cmd) {
-    if (bytes == NULL || cmd == NULL || len != (size_t)TCMD_LEN) {
-        return false;
+static inline size_t trck_pack_cmd_line(uint8_t cmd, char *out, size_t cap) {
+    const char *word = trck_cmd_word(cmd);
+    if (word == NULL || out == NULL) {
+        return 0;
     }
-    if (memcmp(bytes, "TCMD", 4) != 0) {
-        return false;
+    size_t n = strlen(word);
+    if (cap < n + 2) {
+        return 0;
     }
-    if (trck_crc16(bytes, TCMD_BODY_LEN) != trck_rd_u16(bytes + TCMD_BODY_LEN)) {
-        return false;
-    }
-    *cmd = bytes[4];
-    return true;
+    memcpy(out, word, n);
+    out[n] = '\r';
+    out[n + 1] = '\n';
+    return n + 2;
 }
 
 static inline bool trck_unpack_ack(const uint8_t *bytes, size_t len, TrckAck *out) {
