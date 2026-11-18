@@ -154,7 +154,6 @@ fn drain_rtlsdr(reader: &rs_rtl::AsyncReadHandle, enqueue: &impl Fn(Fix), stop: 
         }
         let dropped = reader.dropped_chunks();
         if dropped != last_drop {
-            // TACK is 21 bytes with no spare field. USB drops stay on stderr.
             eprintln!("rtlsdr usb_dropped={dropped}");
             last_drop = dropped;
         }

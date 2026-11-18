@@ -12,8 +12,8 @@
 #define TRCK_ALT_UNKNOWN INT32_MIN
 #define TRCK_SPEED_UNKNOWN ((uint16_t)0xFFFF)
 #define TRCK_TRACK_UNKNOWN ((uint16_t)0xFFFF)
-#define TACK_LEN 21
-#define TACK_BODY_LEN 19
+#define TACK_LEN 9
+#define TACK_BODY_LEN 7
 #define TCMD_PING 0
 #define TCMD_STATUS 1
 #define TCMD_REBOOT 2
@@ -25,7 +25,9 @@
 #define TCMD_DISABLED 1
 #define TCMD_UNKNOWN 2
 #define TCMD_FAILED 3
-#define TCMD_AGE_NONE 0xFFFFFFFFu
+#define TACK_HEALTH_OK 0
+#define TACK_HEALTH_PAUSED 1
+#define TACK_HEALTH_DOWN 255
 #define TRCK_HB_LINE "STATUS_ADSB\r\n"
 #define TRCK_HB_DOWN_MS 10000u
 
@@ -50,10 +52,7 @@ typedef struct {
 typedef struct {
     uint8_t cmd;
     uint8_t status;
-    uint32_t uptime_s;
-    uint32_t frames_sent;
-    uint32_t last_fix_age_s;
-    uint8_t paused;
+    uint8_t health;
 } TrckAck;
 
 typedef struct {
@@ -211,15 +210,12 @@ static inline bool trck_unpack_ack(const uint8_t *bytes, size_t len, TrckAck *ou
     if (bytes[5] > TCMD_FAILED) {
         return false;
     }
-    if (bytes[18] > 1) {
+    if (bytes[6] > TACK_HEALTH_PAUSED) {
         return false;
     }
     out->cmd = bytes[4];
     out->status = bytes[5];
-    out->uptime_s = trck_rd_u32(bytes + 6);
-    out->frames_sent = trck_rd_u32(bytes + 10);
-    out->last_fix_age_s = trck_rd_u32(bytes + 14);
-    out->paused = bytes[18];
+    out->health = bytes[6];
     return true;
 }
 
@@ -231,7 +227,7 @@ enum {
 
 typedef struct {
     uint8_t have;
-    uint8_t paused;
+    uint8_t health;
     uint8_t down;
     uint32_t last_ms;
 } TrckHb;
@@ -240,9 +236,29 @@ static inline bool trck_ack_matches(uint8_t pending, uint8_t ack_cmd) {
     return pending == ack_cmd;
 }
 
+static inline const char *trck_health_word(uint8_t health) {
+    switch (health) {
+    case TACK_HEALTH_OK:
+        return "ok";
+    case TACK_HEALTH_PAUSED:
+        return "paused";
+    case TACK_HEALTH_DOWN:
+        return "down";
+    default:
+        return "?";
+    }
+}
+
+static inline uint8_t trck_health(const TrckHb *h) {
+    if (h == NULL || !h->have || h->down) {
+        return TACK_HEALTH_DOWN;
+    }
+    return h->health;
+}
+
 static inline void trck_hb_init(TrckHb *h) {
     h->have = 0;
-    h->paused = 0;
+    h->health = TACK_HEALTH_DOWN;
     h->down = 0;
     h->last_ms = 0;
 }
@@ -253,9 +269,9 @@ static inline void trck_hb_touch(TrckHb *h, uint32_t now_ms) {
     h->last_ms = now_ms;
 }
 
-static inline int trck_hb_on_status(TrckHb *h, uint8_t paused, uint32_t now_ms) {
-    int out = (!h->have || h->paused != paused) ? TRCK_HB_PRINT : TRCK_HB_SILENT;
-    h->paused = paused;
+static inline int trck_hb_on_status(TrckHb *h, uint8_t health, uint32_t now_ms) {
+    int out = (!h->have || h->health != health) ? TRCK_HB_PRINT : TRCK_HB_SILENT;
+    h->health = health;
     trck_hb_touch(h, now_ms);
     return out;
 }

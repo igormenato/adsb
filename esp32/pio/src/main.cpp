@@ -71,14 +71,7 @@ static void print_fix(const TrckFix *fix) {
 static void print_ack(const TrckAck *ack) {
     const char *cmd = ack->cmd <= TCMD_RESTART ? kCmdName[ack->cmd] : "unknown";
     const char *status = ack->status <= TCMD_FAILED ? kCmdStatus[ack->status] : "?";
-    const char *state = ack->paused ? "paused" : "running";
-    Serial.printf("ack cmd=%s status=%s state=%s uptime=%lu frames=%lu last_fix_age=", cmd, status,
-                  state, (unsigned long)ack->uptime_s, (unsigned long)ack->frames_sent);
-    if (ack->last_fix_age_s == TCMD_AGE_NONE) {
-        Serial.println("none");
-    } else {
-        Serial.printf("%lu\n", (unsigned long)ack->last_fix_age_s);
-    }
+    Serial.printf("ack cmd=%s status=%s health=%s\n", cmd, status, trck_health_word(ack->health));
 }
 
 static void print_evt(const UartEvt *ev) {
@@ -122,13 +115,13 @@ static void maybe_down(void) {
 static void on_ack(const TrckAck *ack, bool user) {
     uint32_t now = millis();
     if (ack->cmd == TCMD_STATUS) {
-        int act = trck_hb_on_status(&gWatch, ack->paused, now);
+        int act = trck_hb_on_status(&gWatch, ack->health, now);
         if (user || act == TRCK_HB_PRINT) {
             print_ack(ack);
         }
         return;
     }
-    trck_hb_touch(&gWatch, now);
+    trck_hb_on_status(&gWatch, ack->health, now);
     if (user) {
         print_ack(ack);
     }
