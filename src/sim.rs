@@ -18,6 +18,9 @@ use super::radio;
 
 const GEOM_ALT: u32 = 8;
 
+pub(crate) const SIM_PATH: &str = "sim.toml";
+pub(crate) const DEFAULT_SIM: &str = include_str!("default_sim.toml");
+
 #[derive(Parser, Debug)]
 pub struct Args {
     /// Scenario file. Omit when using --trace.
@@ -219,8 +222,34 @@ fn generate(opts: &Args) -> Result<(String, String)> {
 
 fn load(path: &Path) -> Result<Scenario> {
     let text = fs::read_to_string(path).with_context(|| path.display().to_string())?;
-    let file: File = toml::from_str(&text).with_context(|| path.display().to_string())?;
-    check(file)
+    parse_toml(&text).with_context(|| path.display().to_string())
+}
+
+fn parse_toml(text: &str) -> Result<Scenario> {
+    check(toml::from_str(text)?)
+}
+
+pub(crate) fn frames_from_toml(text: &str) -> Result<String> {
+    Ok(render(&scenario_tracks(&parse_toml(text)?)).0)
+}
+
+fn log_sim_fallback(logged: &mut bool, err: &impl std::fmt::Display) {
+    if !*logged {
+        eprintln!("sim.toml: {err:#}; using built-in scenario");
+        *logged = true;
+    }
+}
+
+pub(crate) fn uart_frames(logged: &mut bool) -> String {
+    match fs::read_to_string(SIM_PATH) {
+        Ok(text) => match frames_from_toml(&text) {
+            Ok(frames) => return frames,
+            Err(err) => log_sim_fallback(logged, &err),
+        },
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => log_sim_fallback(logged, &err),
+    }
+    frames_from_toml(DEFAULT_SIM).expect("built-in scenario")
 }
 
 fn check(file: File) -> Result<Scenario> {
@@ -749,5 +778,16 @@ rate_hz = 2
         assert_eq!(window[0].samples.len(), 1);
         assert_eq!(window[0].samples[0].t, 1004.0);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn builtin_scenario_has_four_curitiba_aircraft() {
+        let frames = frames_from_toml(DEFAULT_SIM).expect("builtin");
+        let icaos = ["A1C001", "A1C002", "A1C003", "A1C004"];
+        for icao in icaos {
+            assert!(frames.contains(icao), "missing {icao}");
+        }
+        let n = frames.lines().count();
+        assert!(n > 8, "{n}");
     }
 }

@@ -7,10 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- UART `SIMULATION` (ASCII line and TCMD 7) loops a scenario through the live decoder onto UART/CSV. `sim.toml` in the cwd overrides the built-in UTFPR Curitiba file. Health `sim` is 2. `RESUME` returns to live.
+
 ### Changed
 
-- TACK is 9 bytes: `TACK`, cmd, status, health, CRC-16/CCITT-FALSE over bytes 0..6. Health is `ok` (0) or `paused` (1). Uptime, frames sent, last-fix age, and the paused byte are gone.
-- ESP32 heartbeat STATUS TACKs print only when health changes. USB prints health as `ok` or `paused`. `trck_health()` returns the last health, or `down` (255) when no TACK has arrived or when 10 s have passed without one.
+- TACK is 9 bytes: `TACK`, cmd, status, health, CRC-16/CCITT-FALSE over bytes 0..6. Health is `ok` (0), `paused` (1), or `sim` (2). Uptime, frames sent, last-fix age, and the paused byte are gone.
+- ESP32 heartbeat STATUS TACKs print only when health changes. USB prints health as `ok`, `paused`, or `sim`. `trck_health()` returns the last health, or `down` (255) when no TACK has arrived or when 10 s have passed without one.
 
 ## [0.4.0](https://github.com/igormenato/adsb/compare/v0.3.5...v0.4.0) - 2026-11-18
 

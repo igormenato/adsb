@@ -1,6 +1,6 @@
 # ESP32-S3 UART ingest
 
-Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, `shutdown`, `pause`, `resume`, or `restart` on that Serial (any case) to send `PING`, `STATUS`, `REBOOT`, `SHUTDOWN`, `PAUSE`, `RESUME`, or `RESTART` plus `\r\n` on UART1. Replies are 9-byte `TACK` frames (`TACK`, cmd, status, health, CRC-16 over bytes 0..6). Health is `ok` or `paused`. Every 3 s the sketch also sends `STATUS_ADSB\r\n`. The Pi replies with a STATUS `TACK`. The sketch does not wait for that heartbeat. It matches a user command's TACK on the cmd byte, so a STATUS heartbeat cannot complete `PAUSE`. USB prints a heartbeat TACK only when health changes, and prints `trck down` once if no TACK arrives for 10 s. `trck_health()` returns the last health, or `down` (255). Type `stats` to print frames received, `crc_fail`, `resync`, and `qdrop` (`qdrop` is events dropped when the print queue is full). UART1 RX runs in its own FreeRTOS task. After a command line, the sketch waits up to 1 s for the matching `TACK` and retries ping/status/pause/resume once. For reboot/shutdown/restart it sends `STATUS` instead of repeating the command. Both attempts failing prints `no reply`.
+Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, `shutdown`, `pause`, `resume`, `restart`, or `simulation` on that Serial (any case) to send `PING`, `STATUS`, `REBOOT`, `SHUTDOWN`, `PAUSE`, `RESUME`, `RESTART`, or `SIMULATION` plus `\r\n` on UART1. Replies are 9-byte `TACK` frames (`TACK`, cmd, status, health, CRC-16 over bytes 0..6). Health is `ok`, `paused`, or `sim`. Every 3 s the sketch also sends `STATUS_ADSB\r\n`. The Pi replies with a STATUS `TACK`. The sketch does not wait for that heartbeat. It matches a user command's TACK on the cmd byte, so a STATUS heartbeat cannot complete `PAUSE`. USB prints a heartbeat TACK only when health changes, and prints `trck down` once if no TACK arrives for 10 s. `trck_health()` returns the last health, or `down` (255). Type `stats` to print frames received, `crc_fail`, `resync`, and `qdrop` (`qdrop` is events dropped when the print queue is full). UART1 RX runs in its own FreeRTOS task. After a command line, the sketch waits up to 1 s for the matching `TACK` and retries ping/status/pause/resume/simulation once. For reboot/shutdown/restart it sends `STATUS` instead of repeating the command. Both attempts failing prints `no reply`.
 
 Two firmware trees: Arduino sketch `esp32/trck_uart/trck_uart.ino` (self-contained, protocol inlined) and PlatformIO `esp32/pio` (`src/main.cpp`, protocol in `include/trck_frame.h`). Host check includes the Arduino `.ino` (same as before the shared header, simpler than pointing at the PlatformIO header): `make -C esp32/host test`.
 
@@ -47,16 +47,17 @@ On the USB Serial Monitor, send one word and a newline.
 | --- | --- |
 | `ping` | Reply `ok` with health |
 | `status` | Reply `ok` with health |
-| `pause` | Stop CSV rows and `TRCK` frames. The radio stays open. Replies still go out |
-| `resume` | Start sending `TRCK` frames again. `trck` starts running; there is no start command |
-| `restart` | Reply, drain the UART, then exit 1 so systemd starts trck again |
+| `pause` | Stop CSV rows and `TRCK` frames. The radio stays open. Replies still go out. Pauses live or simulation |
+| `resume` | Return to live radio/hex. Leaves simulation. Resume from pause-during-sim also returns to live |
+| `restart` | Reply, drain the UART, then exit 1 so systemd starts trck again (live) |
+| `simulation` | Stop forwarding radio positions. Loop a scenario through the decoder onto UART/CSV. Radio stays open |
 | `reboot` | `systemctl reboot` if `trck` was started with `--allow-power-commands` |
 | `shutdown` | `systemctl poweroff` with the same flag |
 | `stats` | ESP32 only: print `frames`, `crc_fail`, `resync`, `qdrop`. No UART command |
 
 Those USB words (except `stats`) go to the Pi as the uppercase line plus `\r\n`. `STATUS_ADSB\r\n` is sent every 3 s. The Pi STATUS TACK is not waited on for that send.
 
-Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. Pause, resume, and restart do not need the flag. `sudo trck install-service` installs a root systemd unit with `--allow-power-commands` (`Restart=always`, `StartLimitIntervalSec=0`) so reboot, shutdown, `trck update`, and UART restart work without ssh. While paused, new positions are discarded at the UART/CSV entry and health is `paused`. Resume does not flood the wire.
+Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. Pause, resume, restart, and simulation do not need the flag. `sudo trck install-service` installs a root systemd unit with `--allow-power-commands` (`Restart=always`, `StartLimitIntervalSec=0`) so reboot, shutdown, `trck update`, and UART restart work without ssh. While paused, new positions are discarded at the UART/CSV entry and health is `paused` (paused wins over sim). Resume does not flood the wire. A second `SIMULATION` while already running is `ok` and a no-op. While paused during sim, `SIMULATION` unpauses and continues.
 
 The RF firmware (ESP32 TX GPIO 10 to Pi RX GPIO 15) sends the same commands as uppercase ASCII lines. `trck` accepts those next to `TCMD` on the same RX stream. Pi TX still writes binary `TRCK` frames and binary `TACK` replies.
 
@@ -67,6 +68,7 @@ The RF firmware (ESP32 TX GPIO 10 to Pi RX GPIO 15) sends the same commands as u
 | `PAUSE` | Same as TCMD pause |
 | `RESUME` | Same as TCMD resume |
 | `RESTART` | Same as TCMD restart |
+| `SIMULATION` | Same as TCMD simulation (cmd 7) |
 | `REBOOT` | Same as TCMD reboot, including `--allow-power-commands` |
 | `SHUTDOWN` | Same as TCMD shutdown, including `--allow-power-commands` |
 | `STATUS_ADSB` | Heartbeat every 3 s. Same `TACK` as `STATUS`. ESP treats a missing reply as trck down |
@@ -78,7 +80,7 @@ The RF firmware (ESP32 TX GPIO 10 to Pi RX GPIO 15) sends the same commands as u
 | 0 | 4 | `TACK` |
 | 4 | 1 | cmd |
 | 5 | 1 | status |
-| 6 | 1 | health: `ok` 0, `paused` 1 |
+| 6 | 1 | health: `ok` 0, `paused` 1, `sim` 2 |
 | 7 | 2 | CRC |
 
 Lines end in `\r\n` or `\n`. Empty lines, unknown lines, and lines longer than 32 bytes are ignored. `trck` may print a rate-limited stderr note.
