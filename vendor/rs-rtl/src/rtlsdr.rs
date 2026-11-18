@@ -24,7 +24,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use nusb::MaybeFuture;
-use nusb::transfer::{Buffer, Bulk, In};
+use nusb::transfer::{Buffer, Bulk, Completion, In};
 use tracing::{debug, info, trace, warn};
 
 use crate::device::{self, Device};
@@ -49,8 +49,8 @@ const DEFAULT_FIR: [i16; 16] = [
 ];
 
 /// Recommended buffer size per USB transfer (bytes).
-/// 16384 bytes = 16 KB, multiple of USB high-speed max packet size (512).
-pub const TRANSFER_BUF_SIZE: usize = 16384;
+/// 256 KiB matches librtlsdr `DEFAULT_BUF_LENGTH`. Multiple of 512.
+pub const TRANSFER_BUF_SIZE: usize = 256 * 1024;
 
 /// Number of USB transfers to keep in-flight simultaneously.
 /// 15 matches librtlsdr's `rtlsdr_read_async` default.
@@ -876,6 +876,26 @@ impl AsyncReadHandle {
         }
     }
 
+    /// Wait up to `timeout` for the next chunk.
+    ///
+    /// `Empty` is a timeout. `End` is a clean stop.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<TryRecv<Vec<u8>>> {
+        let Some(rx) = &self.rx else {
+            return Ok(TryRecv::End);
+        };
+        match rx.recv_timeout(timeout) {
+            Ok(Ok(bytes)) => Ok(TryRecv::Item(bytes)),
+            Ok(Err(error)) => Err(error),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(TryRecv::Empty),
+            Err(mpsc::RecvTimeoutError::Disconnected) if self.stop.load(Ordering::Relaxed) => {
+                Ok(TryRecv::End)
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::StreamingError(
+                "streaming thread ended unexpectedly".to_string(),
+            )),
+        }
+    }
+
     /// Try to receive the next chunk without blocking.
     ///
     /// `Empty` means the reader is still active. `End` means it stopped
@@ -990,6 +1010,23 @@ impl AsyncReadControlHandle {
 /// 3. Re-submit the buffer for another transfer
 ///
 /// Control commands (tune, gain) are processed between transfer completions.
+/// Push a chunk to the consumer. Returns false if the consumer is gone.
+/// A full queue increments `dropped` and keeps USB transfers running.
+pub fn deliver_samples(
+    tx: &mpsc::SyncSender<Result<Vec<u8>>>,
+    dropped: &AtomicU64,
+    data: Vec<u8>,
+) -> bool {
+    match tx.try_send(Ok(data)) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(_)) => {
+            dropped.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn streaming_thread(
     dev: Device,
@@ -1096,8 +1133,12 @@ fn streaming_thread(
             }
         };
 
-        // Check for transfer errors
-        if let Err(ref e) = completion.status {
+        let Completion {
+            buffer,
+            actual_len,
+            status,
+        } = completion;
+        if let Err(e) = status {
             consecutive_errors += 1;
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                 warn!(
@@ -1114,38 +1155,22 @@ fn streaming_thread(
                 "bulk transfer error ({}/{}): {}",
                 consecutive_errors, MAX_CONSECUTIVE_ERRORS, e
             );
-            // Re-submit and continue (transient errors are common)
-            ep_in.submit(Buffer::new(transfer_size));
+            ep_in.submit(buffer);
             continue;
         }
 
-        // Successful transfer — reset error counter
         consecutive_errors = 0;
-
-        // Extract the data — completion.buffer is a Buffer which derefs to [u8]
-        let data = completion.buffer[..completion.actual_len].to_vec();
-
-        if data.is_empty() {
-            // Empty transfer — re-submit
-            ep_in.submit(Buffer::new(transfer_size));
+        if actual_len == 0 {
+            ep_in.submit(buffer);
             continue;
         }
 
-        // Send data to the consumer (blocking — provides backpressure)
-        // IMPORTANT: We use blocking send here to provide backpressure.
-        // Lesson 20.1: never use try_send in real-time signal processing
-        // pipelines — dropped samples corrupt protocol framing.
-        match tx.send(Ok(data)) {
-            Ok(()) => {}
-            Err(_) => {
-                // Channel closed — consumer is gone
-                debug!("streaming: consumer disconnected");
-                break;
-            }
+        let data = buffer[..actual_len].to_vec();
+        if !deliver_samples(&tx, &dropped, data) {
+            debug!("streaming: consumer disconnected");
+            break;
         }
-
-        // Re-submit a new transfer to keep the queue full
-        ep_in.submit(Buffer::new(transfer_size));
+        ep_in.submit(buffer);
     }
 
     // Cancel all pending transfers
@@ -1229,6 +1254,19 @@ mod reader_tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("reader Drop must wake and join a blocked producer");
         dropper.join().unwrap();
+    }
+
+    #[test]
+    fn a_full_channel_increments_dropped() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let dropped = AtomicU64::new(0);
+        assert!(deliver_samples(&tx, &dropped, vec![1]));
+        assert!(deliver_samples(&tx, &dropped, vec![2]));
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(rx.recv().unwrap().unwrap(), vec![1]);
+        drop(rx);
+        assert!(!deliver_samples(&tx, &dropped, vec![3]));
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 
     fn handle() -> (AsyncReadHandle, mpsc::SyncSender<Result<Vec<u8>>>) {
