@@ -54,7 +54,7 @@ On the USB Serial Monitor, send one word and a newline.
 | `shutdown` | `systemctl poweroff` with the same flag |
 | `stats` | ESP32 only: print `frames`, `crc_fail`, `resync`, `qdrop`. No UART command |
 
-Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. Pause, resume, and restart do not need the flag. `sudo trck install-service` installs a root systemd unit (`Restart=always`) so reboot, shutdown, `trck update`, and UART restart work without ssh. While paused, new positions are discarded at the UART/CSV entry. `last_fix_age` keeps growing. Resume does not flood the wire.
+Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. Pause, resume, and restart do not need the flag. `sudo trck install-service` installs a root systemd unit with `--allow-power-commands` (`Restart=always`, `StartLimitIntervalSec=0`) so reboot, shutdown, `trck update`, and UART restart work without ssh. While paused, new positions are discarded at the UART/CSV entry. `last_fix_age` keeps growing. Resume does not flood the wire.
 
 Change `kPiRxGpio` / `kPiTxGpio` in the sketch and in `esp32/pio/src/main.cpp` if those pins are not free on the board.
 

@@ -2,20 +2,22 @@
 
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use nix::unistd::Uid;
 
+use super::update;
+
 const UNIT: &str = include_str!("../packaging/trck.service");
 const UNIT_PATH: &str = "/etc/systemd/system/trck.service";
 const BIN_PATH: &str = "/usr/local/bin/trck";
 const WORK_DIR: &str = "/var/lib/trck";
+const ALLOW_POWER: &str = "--allow-power-commands";
 
-pub fn run() -> ExitCode {
-    match install() {
+pub fn run(args: &[String]) -> ExitCode {
+    match install(args) {
         Ok(()) => {
             println!("enabled trck.service");
             ExitCode::SUCCESS
@@ -27,30 +29,80 @@ pub fn run() -> ExitCode {
     }
 }
 
-fn install() -> Result<()> {
+fn install(args: &[String]) -> Result<()> {
     if !Uid::effective().is_root() {
         bail!("trck install-service needs root");
     }
     let exe = std::env::current_exe().context("cannot resolve this binary")?;
     fs::create_dir_all(WORK_DIR).with_context(|| format!("cannot create {WORK_DIR}"))?;
-    place_bin(&exe, Path::new(BIN_PATH))?;
-    write_unit(Path::new(UNIT_PATH), UNIT)?;
+    let had_unit = Path::new(UNIT_PATH).exists();
+    let bin_changed = place_bin(&exe, Path::new(BIN_PATH))?;
+    let unit = render_unit(args);
+    let unit_changed = write_unit(Path::new(UNIT_PATH), &unit)?;
     run_host(&["systemctl", "daemon-reload"])?;
     run_host(&["systemctl", "enable", "--now", "trck"])?;
+    if had_unit && (bin_changed || unit_changed) {
+        run_host(&["systemctl", "restart", "trck"])?;
+    }
     Ok(())
 }
 
-fn place_bin(src: &Path, dest: &Path) -> Result<()> {
-    if same_file(src, dest) {
-        return Ok(());
+fn render_unit(args: &[String]) -> String {
+    UNIT.lines()
+        .map(|line| {
+            if line.starts_with("ExecStart=") {
+                exec_start(args)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn exec_start(args: &[String]) -> String {
+    let mut parts = vec![BIN_PATH.to_string(), ALLOW_POWER.to_string()];
+    for arg in args {
+        if arg == ALLOW_POWER {
+            continue;
+        }
+        parts.push(systemd_quote(arg));
     }
-    fs::copy(src, dest).map_err(|err| write_fail(dest, err))?;
-    let mut perm = fs::metadata(dest)
-        .map_err(|err| write_fail(dest, err))?
-        .permissions();
-    perm.set_mode(perm.mode() | 0o755);
-    fs::set_permissions(dest, perm).map_err(|err| write_fail(dest, err))?;
-    Ok(())
+    format!("ExecStart={}", parts.join(" "))
+}
+
+fn systemd_quote(arg: &str) -> String {
+    let plain = arg.bytes().all(|b| {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'-' | b'_' | b'.' | b'/' | b':' | b'@' | b'+' | b'=' | b','
+            )
+    });
+    if plain && !arg.is_empty() {
+        return arg.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in arg.chars() {
+        match c {
+            '\\' | '"' | '$' | '`' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn place_bin(src: &Path, dest: &Path) -> Result<bool> {
+    if same_file(src, dest) {
+        return Ok(false);
+    }
+    update::replace_file(src, dest)?;
+    Ok(true)
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -60,14 +112,15 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn write_unit(path: &Path, text: &str) -> Result<()> {
+fn write_unit(path: &Path, text: &str) -> Result<bool> {
     if fs::read_to_string(path).is_ok_and(|got| got == text) {
-        return Ok(());
+        return Ok(false);
     }
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
-    fs::write(path, text).map_err(|err| write_fail(path, err))
+    fs::write(path, text).map_err(|err| write_fail(path, err))?;
+    Ok(true)
 }
 
 fn run_host(args: &[&str]) -> Result<()> {
@@ -117,8 +170,9 @@ mod tests {
         assert!(UNIT.contains("Type=simple"));
         assert!(UNIT.contains("Restart=always"));
         assert!(UNIT.contains("RestartSec=1"));
+        assert!(UNIT.contains("StartLimitIntervalSec=0"));
         assert!(UNIT.contains("WantedBy=multi-user.target"));
-        assert!(UNIT.contains("ExecStart=/usr/local/bin/trck"));
+        assert!(UNIT.contains("ExecStart=/usr/local/bin/trck --allow-power-commands"));
         assert!(UNIT.contains("ProtectHome=yes"));
         assert!(UNIT.contains("PrivateTmp=yes"));
         assert!(!UNIT.contains("User="));
@@ -127,12 +181,41 @@ mod tests {
     }
 
     #[test]
+    fn exec_start_always_allows_power_and_quotes() {
+        let none = exec_start(&[]);
+        assert_eq!(none, "ExecStart=/usr/local/bin/trck --allow-power-commands");
+        let args = [
+            "--ppm".into(),
+            "-8".into(),
+            "--gain".into(),
+            "19.7".into(),
+            ALLOW_POWER.into(),
+            "a b".into(),
+            "say\"hi".into(),
+        ];
+        let line = exec_start(&args);
+        assert!(line.starts_with("ExecStart=/usr/local/bin/trck --allow-power-commands "));
+        assert_eq!(line.matches(ALLOW_POWER).count(), 1);
+        assert!(line.contains(" --ppm -8 --gain 19.7 "));
+        assert!(line.contains("\"a b\""));
+        assert!(line.contains("\"say\\\"hi\""));
+        let again = render_unit(&["--gain".into(), "12".into()]);
+        assert_ne!(render_unit(&[]), again);
+        assert!(again.contains("StartLimitIntervalSec=0"));
+        assert!(again.contains("--gain 12"));
+    }
+
+    #[test]
     fn write_unit_is_idempotent() {
         let dir = temp_dir();
         let path = dir.join("trck.service");
-        write_unit(&path, UNIT).unwrap();
-        write_unit(&path, UNIT).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), UNIT);
+        let text = render_unit(&[]);
+        assert!(write_unit(&path, &text).unwrap());
+        assert!(!write_unit(&path, &text).unwrap());
+        assert!(write_unit(&path, &render_unit(&["--ppm".into(), "-8".into()])).unwrap());
+        let got = fs::read_to_string(&path).unwrap();
+        assert!(got.contains("--ppm -8"));
+        assert!(got.contains("StartLimitIntervalSec=0"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -142,10 +225,13 @@ mod tests {
         let src = dir.join("trck");
         let dest = dir.join("installed");
         fs::write(&src, b"bin").unwrap();
-        place_bin(&src, &dest).unwrap();
+        assert!(place_bin(&src, &dest).unwrap());
         assert_eq!(fs::read(&dest).unwrap(), b"bin");
-        place_bin(&dest, &dest).unwrap();
-        assert_eq!(fs::read(&dest).unwrap(), b"bin");
+        assert!(!place_bin(&dest, &dest).unwrap());
+        fs::write(&src, b"new").unwrap();
+        assert!(place_bin(&src, &dest).unwrap());
+        assert_eq!(fs::read(&dest).unwrap(), b"new");
+        assert!(!dir.join("installed.new").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

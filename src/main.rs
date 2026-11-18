@@ -102,7 +102,15 @@ enum Cmd {
     /// Replace this binary from GitHub Releases.
     Update(update::Args),
     /// Install and enable the systemd unit.
-    InstallService,
+    InstallService {
+        /// Flags for ExecStart after the binary. `--allow-power-commands` is always added.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -234,7 +242,7 @@ fn main() -> ExitCode {
             speed,
         }) => return run_replay(file, &output, speed),
         Some(Cmd::Update(opts)) => return update::run(opts),
-        Some(Cmd::InstallService) => return service::run(),
+        Some(Cmd::InstallService { args }) => return service::run(&args),
         None => {}
     }
     let stop = Stop::new();

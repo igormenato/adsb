@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `trck install-service` installs a root systemd unit (`Restart=always`).
+- `trck install-service` installs a root systemd unit (`Restart=always`, `StartLimitIntervalSec=0`, `--allow-power-commands`). Trailing args after `--` go on `ExecStart`.
 
 ### Changed
 
