@@ -24,6 +24,7 @@
 #define TCMD_FAILED 3
 #define TCMD_AGE_NONE 0xFFFFFFFFu
 #define TRCK_HB_LINE "STATUS_ADSB\r\n"
+#define TRCK_HB_DOWN_MS 10000u
 
 typedef struct {
     uint32_t icao;
@@ -223,6 +224,54 @@ static inline bool trck_unpack_ack(const uint8_t *bytes, size_t len, TrckAck *ou
     return true;
 }
 
+enum {
+    TRCK_HB_SILENT = 0,
+    TRCK_HB_PRINT = 1,
+    TRCK_HB_DOWN = 2,
+};
+
+typedef struct {
+    uint8_t have;
+    uint8_t paused;
+    uint8_t down;
+    uint32_t last_ms;
+} TrckHb;
+
+static inline bool trck_ack_matches(uint8_t pending, uint8_t ack_cmd) {
+    return pending == ack_cmd;
+}
+
+static inline void trck_hb_init(TrckHb *h) {
+    h->have = 0;
+    h->paused = 0;
+    h->down = 0;
+    h->last_ms = 0;
+}
+
+static inline void trck_hb_touch(TrckHb *h, uint32_t now_ms) {
+    h->have = 1;
+    h->down = 0;
+    h->last_ms = now_ms;
+}
+
+static inline int trck_hb_on_status(TrckHb *h, uint8_t paused, uint32_t now_ms) {
+    int out = (!h->have || h->paused != paused) ? TRCK_HB_PRINT : TRCK_HB_SILENT;
+    h->paused = paused;
+    trck_hb_touch(h, now_ms);
+    return out;
+}
+
+static inline int trck_hb_poll(TrckHb *h, uint32_t now_ms) {
+    if (!h->have || h->down) {
+        return TRCK_HB_SILENT;
+    }
+    if ((uint32_t)(now_ms - h->last_ms) < TRCK_HB_DOWN_MS) {
+        return TRCK_HB_SILENT;
+    }
+    h->down = 1;
+    return TRCK_HB_DOWN;
+}
+
 static inline void trck_ack_scan_init(TrckAckScan *scan) {
     scan->n = 0;
     scan->crc_fail = 0;
@@ -302,6 +351,7 @@ static std::atomic<unsigned long> gCrcFail{0};
 static std::atomic<unsigned long> gResync{0};
 static std::atomic<unsigned long> gQDrop{0};
 static uint32_t gHbAt;
+static TrckHb gWatch;
 
 static void print_fix(const TrckFix *fix) {
     int n = TRCK_CALLSIGN_LEN;
@@ -377,11 +427,33 @@ static void maybe_hb(void) {
     gHbAt = now;
 }
 
+static void maybe_down(void) {
+    if (trck_hb_poll(&gWatch, millis()) == TRCK_HB_DOWN) {
+        Serial.println("trck down");
+    }
+}
+
+static void on_ack(const TrckAck *ack, bool user) {
+    uint32_t now = millis();
+    if (ack->cmd == TCMD_STATUS) {
+        int act = trck_hb_on_status(&gWatch, ack->paused, now);
+        if (user || act == TRCK_HB_PRINT) {
+            print_ack(ack);
+        }
+        return;
+    }
+    trck_hb_touch(&gWatch, now);
+    if (user) {
+        print_ack(ack);
+    }
+}
+
 static bool wait_ack(uint8_t cmd, uint32_t ms) {
     uint32_t start = millis();
     UartEvt ev;
     while ((uint32_t)(millis() - start) < ms) {
         maybe_hb();
+        maybe_down();
         uint32_t left = ms - (uint32_t)(millis() - start);
         TickType_t ticks = pdMS_TO_TICKS(left);
         if (ticks == 0) {
@@ -390,8 +462,13 @@ static bool wait_ack(uint8_t cmd, uint32_t ms) {
         if (xQueueReceive(gQ, &ev, ticks) != pdTRUE) {
             continue;
         }
-        print_evt(&ev);
-        if (ev.kind == kEvtAck && ev.ack.cmd == cmd) {
+        if (ev.kind != kEvtAck) {
+            print_evt(&ev);
+            continue;
+        }
+        bool match = trck_ack_matches(cmd, ev.ack.cmd);
+        on_ack(&ev.ack, match);
+        if (match) {
             return true;
         }
     }
@@ -490,6 +567,7 @@ void setup() {
     xTaskCreatePinnedToCore(uart_rx_task, "uart1", kRxStack, NULL, 2, NULL, kRxCore);
 
     gHbAt = millis();
+    trck_hb_init(&gWatch);
     Serial.printf("UART 115200 8N1 RX GPIO %d TX GPIO %d. TRCK in, ASCII cmd out.\n", kPiRxGpio,
                   kPiTxGpio);
     Serial.println("Wire Pi GPIO 14 (pin 8) to RX, Pi GPIO 15 (pin 10) to TX, 3.3 V, common ground.");
@@ -498,9 +576,14 @@ void setup() {
 
 void loop() {
     maybe_hb();
+    maybe_down();
     UartEvt ev;
     if (xQueueReceive(gQ, &ev, pdMS_TO_TICKS(10)) == pdTRUE) {
-        print_evt(&ev);
+        if (ev.kind == kEvtAck) {
+            on_ack(&ev.ack, false);
+        } else {
+            print_evt(&ev);
+        }
     }
     while (Serial.available() > 0) {
         char c = (char)Serial.read();
