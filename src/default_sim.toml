@@ -1,0 +1,44 @@
+duration = 300
+
+[[aircraft]]
+icao = "A1C001"
+callsign = "TAM7700"
+squawk = "7700"
+lat = -25.44
+lon = -49.27
+alt_ft = 35000
+heading_deg = 90
+speed_kt = 420
+rate_hz = 2
+
+[[aircraft]]
+icao = "A1C002"
+callsign = "AZU01"
+lat = -25.30
+lon = -49.40
+alt_ft = 28000
+heading_deg = 180
+speed_kt = 380
+rate_hz = 2
+
+[[aircraft]]
+icao = "A1C003"
+callsign = "GOL02"
+lat = -25.55
+lon = -49.15
+alt_ft = 8000
+heading_deg = 270
+speed_kt = 220
+rate_hz = 2
+
+[[aircraft]]
+icao = "A1C004"
+callsign = "PTG03"
+lat = -25.40
+lon = -49.00
+alt_ft = 22000
+heading_deg = 45
+speed_kt = 300
+rate_hz = 2
+turn_at = 120
+heading_to_deg = 135

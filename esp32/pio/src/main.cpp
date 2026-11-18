@@ -18,7 +18,8 @@ static const char *kEmergency[] = {
     "none", "general", "lifeguard", "minfuel", "nordo", "unlawful", "downed", "reserved",
 };
 
-static const char *kCmdName[] = {"ping", "status", "reboot", "shutdown", "pause", "resume", "restart"};
+static const char *kCmdName[] = {"ping",    "status", "reboot", "shutdown",
+                                 "pause",   "resume", "restart", "simulation"};
 static const char *kCmdStatus[] = {"ok", "disabled", "unknown", "failed"};
 
 enum { kEvtFix = 0, kEvtAck = 1 };
@@ -69,7 +70,7 @@ static void print_fix(const TrckFix *fix) {
 }
 
 static void print_ack(const TrckAck *ack) {
-    const char *cmd = ack->cmd <= TCMD_RESTART ? kCmdName[ack->cmd] : "unknown";
+    const char *cmd = ack->cmd <= TCMD_SIMULATION ? kCmdName[ack->cmd] : "unknown";
     const char *status = ack->status <= TCMD_FAILED ? kCmdStatus[ack->status] : "?";
     Serial.printf("ack cmd=%s status=%s health=%s\n", cmd, status, trck_health_word(ack->health));
 }
@@ -192,6 +193,8 @@ static bool parse_cmd(const char *line, uint8_t *cmd) {
         *cmd = TCMD_RESUME;
     } else if (strcmp(line, "restart") == 0) {
         *cmd = TCMD_RESTART;
+    } else if (strcmp(line, "simulation") == 0) {
+        *cmd = TCMD_SIMULATION;
     } else {
         return false;
     }
@@ -250,7 +253,7 @@ void setup() {
     Serial.printf("UART 115200 8N1 RX GPIO %d TX GPIO %d. TRCK in, ASCII cmd out.\n", kPiRxGpio,
                   kPiTxGpio);
     Serial.println("Wire Pi GPIO 14 (pin 8) to RX, Pi GPIO 15 (pin 10) to TX, 3.3 V, common ground.");
-    Serial.println("Type ping, status, reboot, shutdown, pause, resume, restart, or stats.");
+    Serial.println("Type ping, status, reboot, shutdown, pause, resume, restart, simulation, or stats.");
 }
 
 void loop() {
@@ -283,7 +286,7 @@ void loop() {
             } else if (parse_cmd(gLine, &cmd)) {
                 run_cmd(cmd);
             } else {
-                Serial.println("commands: ping status reboot shutdown pause resume restart stats");
+                Serial.println("commands: ping status reboot shutdown pause resume restart simulation stats");
             }
         } else if (gLineN < sizeof gLine - 1) {
             gLine[gLineN++] = c;

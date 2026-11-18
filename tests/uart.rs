@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use nix::unistd::read;
 use trck::modes::{EVEN, ODD, STATUS, hex14};
-use trck::{ACK_LEN, Cmd, EmergencyKind, Fix, Health, pack_cmd};
+use trck::{ACK_LEN, Cmd, EmergencyKind, FRAME_LEN, Fix, Health, pack_cmd, unpack_frame};
 
 #[test]
 fn avr_hex_writes_a_pty_frame() {
@@ -280,4 +280,108 @@ fn uart_hangup_reopens_and_acks() {
     assert_eq!(tacks[0][5], 0);
     assert!(sender.0.try_wait().unwrap().is_none());
     let _ = std::fs::remove_file(&link);
+}
+
+const SIM_ICAOS: [u32; 4] = [0xA1C001, 0xA1C002, 0xA1C003, 0xA1C004];
+
+fn collect_trck(raw: &[u8]) -> Vec<[u8; FRAME_LEN]> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i..].starts_with(b"TRCK") && i + FRAME_LEN <= raw.len() {
+            let mut frame = [0u8; FRAME_LEN];
+            frame.copy_from_slice(&raw[i..i + FRAME_LEN]);
+            if unpack_frame(&frame).is_some() {
+                out.push(frame);
+                i += FRAME_LEN;
+                continue;
+            }
+        }
+        if raw[i..].starts_with(b"TACK") && i + ACK_LEN <= raw.len() {
+            i += ACK_LEN;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn read_some(master: &mut serialport::TTYPort, timeout: Duration) -> Vec<u8> {
+    set_nonblocking(master);
+    let mut raw = Vec::new();
+    let started = Instant::now();
+    loop {
+        let mut tmp = [0u8; 4096];
+        match read(as_fd(master), &mut tmp) {
+            Ok(0) => {}
+            Ok(count) => raw.extend_from_slice(&tmp[..count]),
+            Err(err) => {
+                let err = io::Error::from(err);
+                assert!(
+                    err.kind() == io::ErrorKind::WouldBlock
+                        || err.kind() == io::ErrorKind::Interrupted,
+                    "{err}"
+                );
+            }
+        }
+        if started.elapsed() > timeout {
+            return raw;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn is_sim_icao(icao: u32) -> bool {
+    SIM_ICAOS.contains(&icao)
+}
+
+#[test]
+fn simulation_acks_then_pause_and_resume_to_live() {
+    let (listener, port) = listen();
+    let mut pty = Pty::open();
+    let mut sender = spawn_uart(port, &pty.path());
+    let (_sock, _) = listener.accept().expect("accept");
+    pty.master.write_all(b"SIMULATION\n").expect("sim");
+    pty.master.flush().expect("flush");
+    let tacks = wait_tacks(&mut pty.master, 1, Duration::from_secs(3));
+    assert_eq!(tacks[0][4], Cmd::Simulation as u8);
+    assert_eq!(tacks[0][5], 0);
+    assert_eq!(tacks[0][6], Health::Sim as u8);
+
+    let started = Instant::now();
+    let mut raw = Vec::new();
+    let mut frames;
+    loop {
+        raw.extend(read_some(&mut pty.master, Duration::from_millis(200)));
+        frames = collect_trck(&raw);
+        if frames.iter().any(|f| is_sim_icao(frame_icao(f))) {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(5) {
+            panic!("no sim TRCK, {} bytes", raw.len());
+        }
+    }
+    let icaos: Vec<u32> = frames.iter().map(|f| frame_icao(f)).collect();
+    assert!(icaos.iter().any(|icao| is_sim_icao(*icao)), "{icaos:06x?}");
+
+    pty.master.write_all(b"PAUSE\n").expect("pause");
+    pty.master.flush().expect("flush");
+    let tacks = wait_tacks(&mut pty.master, 1, Duration::from_secs(3));
+    assert_eq!(tacks[0][4], Cmd::Pause as u8);
+    assert_eq!(tacks[0][6], Health::Paused as u8);
+    let _ = read_some(&mut pty.master, Duration::from_millis(200));
+    let later = collect_trck(&read_some(&mut pty.master, Duration::from_secs(1)));
+    assert!(later.is_empty(), "frames after pause: {later:?}");
+
+    pty.master.write_all(b"RESUME\n").expect("resume");
+    pty.master.flush().expect("flush");
+    let tacks = wait_tacks(&mut pty.master, 1, Duration::from_secs(3));
+    assert_eq!(tacks[0][4], Cmd::Resume as u8);
+    assert_eq!(tacks[0][6], Health::Ok as u8);
+    let after = collect_trck(&read_some(&mut pty.master, Duration::from_secs(1)));
+    assert!(
+        after.iter().all(|f| !is_sim_icao(frame_icao(f))),
+        "{after:?}"
+    );
+    assert!(sender.0.try_wait().unwrap().is_none());
 }

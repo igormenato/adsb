@@ -18,12 +18,14 @@
 #define TCMD_PAUSE 4
 #define TCMD_RESUME 5
 #define TCMD_RESTART 6
+#define TCMD_SIMULATION 7
 #define TCMD_OK 0
 #define TCMD_DISABLED 1
 #define TCMD_UNKNOWN 2
 #define TCMD_FAILED 3
 #define TACK_HEALTH_OK 0
 #define TACK_HEALTH_PAUSED 1
+#define TACK_HEALTH_SIM 2
 #define TACK_HEALTH_DOWN 255
 #define TRCK_HB_LINE "STATUS_ADSB\r\n"
 #define TRCK_HB_DOWN_MS 10000u
@@ -178,6 +180,8 @@ static inline const char *trck_cmd_word(uint8_t cmd) {
         return "RESUME";
     case TCMD_RESTART:
         return "RESTART";
+    case TCMD_SIMULATION:
+        return "SIMULATION";
     default:
         return NULL;
     }
@@ -211,7 +215,7 @@ static inline bool trck_unpack_ack(const uint8_t *bytes, size_t len, TrckAck *ou
     if (bytes[5] > TCMD_FAILED) {
         return false;
     }
-    if (bytes[6] > TACK_HEALTH_PAUSED) {
+    if (bytes[6] > TACK_HEALTH_SIM) {
         return false;
     }
     out->cmd = bytes[4];
@@ -243,6 +247,8 @@ static inline const char *trck_health_word(uint8_t health) {
         return "ok";
     case TACK_HEALTH_PAUSED:
         return "paused";
+    case TACK_HEALTH_SIM:
+        return "sim";
     case TACK_HEALTH_DOWN:
         return "down";
     default:
@@ -348,7 +354,8 @@ static const char *kEmergency[] = {
     "none", "general", "lifeguard", "minfuel", "nordo", "unlawful", "downed", "reserved",
 };
 
-static const char *kCmdName[] = {"ping", "status", "reboot", "shutdown", "pause", "resume", "restart"};
+static const char *kCmdName[] = {"ping",    "status", "reboot", "shutdown",
+                                 "pause",   "resume", "restart", "simulation"};
 static const char *kCmdStatus[] = {"ok", "disabled", "unknown", "failed"};
 
 enum { kEvtFix = 0, kEvtAck = 1 };
@@ -399,7 +406,7 @@ static void print_fix(const TrckFix *fix) {
 }
 
 static void print_ack(const TrckAck *ack) {
-    const char *cmd = ack->cmd <= TCMD_RESTART ? kCmdName[ack->cmd] : "unknown";
+    const char *cmd = ack->cmd <= TCMD_SIMULATION ? kCmdName[ack->cmd] : "unknown";
     const char *status = ack->status <= TCMD_FAILED ? kCmdStatus[ack->status] : "?";
     Serial.printf("ack cmd=%s status=%s health=%s\n", cmd, status, trck_health_word(ack->health));
 }
@@ -522,6 +529,8 @@ static bool parse_cmd(const char *line, uint8_t *cmd) {
         *cmd = TCMD_RESUME;
     } else if (strcmp(line, "restart") == 0) {
         *cmd = TCMD_RESTART;
+    } else if (strcmp(line, "simulation") == 0) {
+        *cmd = TCMD_SIMULATION;
     } else {
         return false;
     }
@@ -580,7 +589,7 @@ void setup() {
     Serial.printf("UART 115200 8N1 RX GPIO %d TX GPIO %d. TRCK in, ASCII cmd out.\n", kPiRxGpio,
                   kPiTxGpio);
     Serial.println("Wire Pi GPIO 14 (pin 8) to RX, Pi GPIO 15 (pin 10) to TX, 3.3 V, common ground.");
-    Serial.println("Type ping, status, reboot, shutdown, pause, resume, restart, or stats.");
+    Serial.println("Type ping, status, reboot, shutdown, pause, resume, restart, simulation, or stats.");
 }
 
 void loop() {
@@ -613,7 +622,7 @@ void loop() {
             } else if (parse_cmd(gLine, &cmd)) {
                 run_cmd(cmd);
             } else {
-                Serial.println("commands: ping status reboot shutdown pause resume restart stats");
+                Serial.println("commands: ping status reboot shutdown pause resume restart simulation stats");
             }
         } else if (gLineN < sizeof gLine - 1) {
             gLine[gLineN++] = c;

@@ -20,6 +20,7 @@ pub enum Cmd {
     Pause = 4,
     Resume = 5,
     Restart = 6,
+    Simulation = 7,
 }
 
 impl Cmd {
@@ -32,6 +33,7 @@ impl Cmd {
             4 => Self::Pause,
             5 => Self::Resume,
             6 => Self::Restart,
+            7 => Self::Simulation,
             _ => return None,
         })
     }
@@ -52,6 +54,7 @@ pub enum CmdStatus {
 pub enum Health {
     Ok = 0,
     Paused = 1,
+    Sim = 2,
 }
 
 impl Health {
@@ -59,6 +62,7 @@ impl Health {
         Some(match n {
             0 => Self::Ok,
             1 => Self::Paused,
+            2 => Self::Sim,
             _ => return None,
         })
     }
@@ -107,27 +111,51 @@ pub fn pack_reply(reply: &CmdReply) -> [u8; ACK_LEN] {
     raw
 }
 
+fn health(paused: bool, simulating: bool) -> Health {
+    if paused {
+        Health::Paused
+    } else if simulating {
+        Health::Sim
+    } else {
+        Health::Ok
+    }
+}
+
 /// What to write, the run state after this command, and any later host action.
-pub fn decide(cmd: u8, allow_power: bool, paused: bool) -> (CmdReply, AfterReply) {
-    let (status, paused, after) = match Cmd::from_u8(cmd) {
-        Some(Cmd::Ping | Cmd::Status) => (CmdStatus::Ok, paused, AfterReply::None),
-        Some(Cmd::Pause) => (CmdStatus::Ok, true, AfterReply::None),
-        Some(Cmd::Resume) => (CmdStatus::Ok, false, AfterReply::None),
-        Some(Cmd::Restart) => (CmdStatus::Ok, false, AfterReply::Restart),
-        Some(Cmd::Reboot) if allow_power => {
-            (CmdStatus::Ok, paused, AfterReply::Power(PowerOp::Reboot))
+pub fn decide(
+    cmd: u8,
+    allow_power: bool,
+    paused: bool,
+    simulating: bool,
+) -> (CmdReply, AfterReply) {
+    let (status, paused, simulating, after) = match Cmd::from_u8(cmd) {
+        Some(Cmd::Ping | Cmd::Status) => (CmdStatus::Ok, paused, simulating, AfterReply::None),
+        Some(Cmd::Pause) => (CmdStatus::Ok, true, simulating, AfterReply::None),
+        Some(Cmd::Resume) => (CmdStatus::Ok, false, false, AfterReply::None),
+        Some(Cmd::Restart) => (CmdStatus::Ok, false, false, AfterReply::Restart),
+        Some(Cmd::Simulation) => (CmdStatus::Ok, false, true, AfterReply::None),
+        Some(Cmd::Reboot) if allow_power => (
+            CmdStatus::Ok,
+            paused,
+            simulating,
+            AfterReply::Power(PowerOp::Reboot),
+        ),
+        Some(Cmd::Shutdown) if allow_power => (
+            CmdStatus::Ok,
+            paused,
+            simulating,
+            AfterReply::Power(PowerOp::Shutdown),
+        ),
+        Some(Cmd::Reboot | Cmd::Shutdown) => {
+            (CmdStatus::Disabled, paused, simulating, AfterReply::None)
         }
-        Some(Cmd::Shutdown) if allow_power => {
-            (CmdStatus::Ok, paused, AfterReply::Power(PowerOp::Shutdown))
-        }
-        Some(Cmd::Reboot | Cmd::Shutdown) => (CmdStatus::Disabled, paused, AfterReply::None),
-        None => (CmdStatus::Unknown, paused, AfterReply::None),
+        None => (CmdStatus::Unknown, paused, simulating, AfterReply::None),
     };
     (
         CmdReply {
             cmd,
             status,
-            health: if paused { Health::Paused } else { Health::Ok },
+            health: health(paused, simulating),
         },
         after,
     )
@@ -154,6 +182,7 @@ fn parse_line(bytes: &[u8]) -> Option<Line> {
         b"PAUSE" => Line::Cmd(Cmd::Pause as u8),
         b"RESUME" => Line::Cmd(Cmd::Resume as u8),
         b"RESTART" => Line::Cmd(Cmd::Restart as u8),
+        b"SIMULATION" => Line::Cmd(Cmd::Simulation as u8),
         _ => Line::Noise,
     })
 }
@@ -317,6 +346,7 @@ mod tests {
             Cmd::Pause,
             Cmd::Resume,
             Cmd::Restart,
+            Cmd::Simulation,
         ] {
             let raw = pack_cmd(cmd);
             assert_eq!(unpack_cmd(&raw), Some(cmd as u8));
@@ -328,6 +358,12 @@ mod tests {
         };
         let raw = pack_reply(&reply);
         assert_eq!(unpack_reply(&raw), Some(reply));
+        let sim = CmdReply {
+            health: Health::Sim,
+            ..reply
+        };
+        let raw = pack_reply(&sim);
+        assert_eq!(unpack_reply(&raw), Some(sim));
         let fail = CmdReply {
             status: CmdStatus::Failed,
             health: Health::Ok,
@@ -367,50 +403,89 @@ mod tests {
 
     #[test]
     fn power_refused_without_flag() {
-        let (reply, after) = decide(Cmd::Reboot as u8, false, false);
+        let (reply, after) = decide(Cmd::Reboot as u8, false, false, false);
         assert_eq!(reply.status, CmdStatus::Disabled);
         assert_eq!(after, AfterReply::None);
-        let (reply, after) = decide(Cmd::Shutdown as u8, false, true);
+        let (reply, after) = decide(Cmd::Shutdown as u8, false, true, false);
         assert_eq!(reply.status, CmdStatus::Disabled);
+        assert_eq!(reply.health, Health::Paused);
+        assert_eq!(after, AfterReply::None);
+        let (reply, after) = decide(Cmd::Shutdown as u8, false, true, true);
         assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
     }
 
     #[test]
     fn power_flag_sets_op() {
-        let (reply, after) = decide(Cmd::Reboot as u8, true, false);
+        let (reply, after) = decide(Cmd::Reboot as u8, true, false, false);
         assert_eq!(reply.status, CmdStatus::Ok);
         assert_eq!(after, AfterReply::Power(PowerOp::Reboot));
-        let (reply, after) = decide(Cmd::Shutdown as u8, true, false);
+        let (reply, after) = decide(Cmd::Shutdown as u8, true, false, true);
         assert_eq!(reply.status, CmdStatus::Ok);
+        assert_eq!(reply.health, Health::Sim);
         assert_eq!(after, AfterReply::Power(PowerOp::Shutdown));
     }
 
     #[test]
     fn pause_resume_restart() {
-        let (reply, after) = decide(Cmd::Pause as u8, false, false);
+        let (reply, after) = decide(Cmd::Pause as u8, false, false, false);
         assert_eq!(reply.status, CmdStatus::Ok);
         assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
 
-        let (reply, after) = decide(Cmd::Pause as u8, false, true);
+        let (reply, after) = decide(Cmd::Pause as u8, false, true, false);
         assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
 
-        let (reply, after) = decide(Cmd::Resume as u8, false, true);
+        let (reply, after) = decide(Cmd::Resume as u8, false, true, false);
         assert_eq!(reply.status, CmdStatus::Ok);
         assert_eq!(reply.health, Health::Ok);
         assert_eq!(after, AfterReply::None);
 
-        let (reply, after) = decide(Cmd::Status as u8, false, true);
+        let (reply, after) = decide(Cmd::Status as u8, false, true, false);
         assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
 
-        let (reply, after) = decide(Cmd::Restart as u8, false, true);
+        let (reply, after) = decide(Cmd::Restart as u8, false, true, false);
         assert_eq!(reply.status, CmdStatus::Ok);
         assert_eq!(reply.health, Health::Ok);
         assert_eq!(after, AfterReply::Restart);
-        let (reply, after) = decide(Cmd::Restart as u8, false, false);
+        let (reply, after) = decide(Cmd::Restart as u8, false, false, false);
+        assert_eq!(reply.health, Health::Ok);
+        assert_eq!(after, AfterReply::Restart);
+    }
+
+    #[test]
+    fn simulation_health_and_resume_to_live() {
+        let (reply, after) = decide(Cmd::Simulation as u8, false, false, false);
+        assert_eq!(reply.status, CmdStatus::Ok);
+        assert_eq!(reply.health, Health::Sim);
+        assert_eq!(after, AfterReply::None);
+
+        let (reply, after) = decide(Cmd::Simulation as u8, false, false, true);
+        assert_eq!(reply.health, Health::Sim);
+        assert_eq!(after, AfterReply::None);
+
+        let (reply, after) = decide(Cmd::Simulation as u8, false, true, false);
+        assert_eq!(reply.health, Health::Sim);
+        assert_eq!(after, AfterReply::None);
+
+        let (reply, after) = decide(Cmd::Pause as u8, false, false, true);
+        assert_eq!(reply.health, Health::Paused);
+        assert_eq!(after, AfterReply::None);
+
+        let (reply, _) = decide(Cmd::Status as u8, false, true, true);
+        assert_eq!(reply.health, Health::Paused);
+
+        let (reply, after) = decide(Cmd::Resume as u8, false, true, true);
+        assert_eq!(reply.status, CmdStatus::Ok);
+        assert_eq!(reply.health, Health::Ok);
+        assert_eq!(after, AfterReply::None);
+
+        let (reply, _) = decide(Cmd::Resume as u8, false, false, true);
+        assert_eq!(reply.health, Health::Ok);
+
+        let (reply, after) = decide(Cmd::Restart as u8, false, false, true);
         assert_eq!(reply.health, Health::Ok);
         assert_eq!(after, AfterReply::Restart);
     }
@@ -431,6 +506,10 @@ mod tests {
         assert_eq!(parse_line(b"PAUSE\r"), Some(Line::Cmd(Cmd::Pause as u8)));
         assert_eq!(parse_line(b"RESUME"), Some(Line::Cmd(Cmd::Resume as u8)));
         assert_eq!(parse_line(b"RESTART"), Some(Line::Cmd(Cmd::Restart as u8)));
+        assert_eq!(
+            parse_line(b"SIMULATION"),
+            Some(Line::Cmd(Cmd::Simulation as u8))
+        );
         assert_eq!(parse_line(b"REBOOT"), Some(Line::Cmd(Cmd::Reboot as u8)));
         assert_eq!(
             parse_line(b"SHUTDOWN"),
@@ -481,6 +560,7 @@ mod tests {
             (b"PAUSE", CmdFeed::Cmd(Cmd::Pause as u8)),
             (b"RESUME", CmdFeed::Cmd(Cmd::Resume as u8)),
             (b"RESTART", CmdFeed::Cmd(Cmd::Restart as u8)),
+            (b"SIMULATION", CmdFeed::Cmd(Cmd::Simulation as u8)),
             (b"STATUS_ADSB", CmdFeed::Cmd(Cmd::Status as u8)),
         ];
         for &(word, expect) in WORDS {

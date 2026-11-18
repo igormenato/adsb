@@ -15,8 +15,8 @@ use nix::poll::{PollFd, PollFlags};
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
 use trck::{
-    ACK_LEN, AfterReply, CmdFeed, CmdScan, CmdStatus, EmergencyKind, FRAME_LEN, Fix, Health,
-    PowerOp, Queue, Table, check_positions, decide, pack_reply,
+    ACK_LEN, AfterReply, Cmd, CmdFeed, CmdScan, CmdStatus, EmergencyKind, FRAME_LEN, Fix, PowerOp,
+    Queue, Replay, ReplayLine, Table, Tracker, check_positions, decide, pack_reply,
 };
 
 use super::sys;
@@ -52,11 +52,19 @@ struct PendingReply {
 pub(crate) struct Shared {
     queue: Mutex<Queue>,
     pub(crate) ready: Condvar,
+    sim_wake: Condvar,
     pub(crate) table: Mutex<Option<Table>>,
     frames_written: AtomicUsize,
     pending_reply: Mutex<VecDeque<PendingReply>>,
     allow_power: bool,
     paused: AtomicBool,
+    simulating: AtomicBool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Source {
+    Live,
+    Sim,
 }
 
 impl Shared {
@@ -64,11 +72,13 @@ impl Shared {
         Arc::new(Self {
             queue: Mutex::new(Queue::new(QUEUE_CAP)),
             ready: Condvar::new(),
+            sim_wake: Condvar::new(),
             table: Mutex::new(table),
             frames_written: AtomicUsize::new(0),
             pending_reply: Mutex::new(VecDeque::new()),
             allow_power,
             paused: AtomicBool::new(false),
+            simulating: AtomicBool::new(false),
         })
     }
 
@@ -77,12 +87,15 @@ impl Shared {
     }
 
     pub(crate) fn push(&self, fix: Fix) -> Option<Fix> {
-        self.push_at(fix, SystemTime::now())
+        self.push_at(fix, SystemTime::now(), Source::Live)
     }
 
-    fn push_at(&self, fix: Fix, now: SystemTime) -> Option<Fix> {
+    fn push_at(&self, fix: Fix, now: SystemTime, source: Source) -> Option<Fix> {
         let mut q = self.lock();
-        if self.paused.load(Ordering::Relaxed) {
+        let from_sim = matches!(source, Source::Sim);
+        if self.paused.load(Ordering::Relaxed)
+            || self.simulating.load(Ordering::Relaxed) != from_sim
+        {
             return None;
         }
         self.append_row_at(&fix, now);
@@ -96,14 +109,20 @@ impl Shared {
         self.paused.load(Ordering::Relaxed)
     }
 
-    fn set_paused(&self, paused: bool) {
+    fn is_simulating(&self) -> bool {
+        self.simulating.load(Ordering::Relaxed)
+    }
+
+    fn apply_run(&self, paused: bool, simulating: bool) {
         let mut q = self.lock();
-        self.paused.store(paused, Ordering::Relaxed);
-        if paused {
+        let was_paused = self.paused.swap(paused, Ordering::Relaxed);
+        let was_sim = self.simulating.swap(simulating, Ordering::Relaxed);
+        if (paused && !was_paused) || was_sim != simulating {
             q.drop_waiting();
         }
         drop(q);
         self.ready.notify_one();
+        self.sim_wake.notify_one();
     }
 
     fn handle_cmd(&self, cmd: u8) {
@@ -111,7 +130,8 @@ impl Shared {
             eprintln!("cmd dropped, reply queue full");
             return;
         }
-        let (mut reply, mut after) = decide(cmd, self.allow_power, self.is_paused());
+        let simulating = self.is_simulating();
+        let (mut reply, mut after) = decide(cmd, self.allow_power, self.is_paused(), simulating);
         if reply.status == CmdStatus::Disabled {
             eprintln!("power command disabled");
         }
@@ -125,7 +145,12 @@ impl Shared {
                 }
             }
         }
-        self.set_paused(reply.health == Health::Paused);
+        match Cmd::from_u8(cmd) {
+            Some(Cmd::Simulation) => self.apply_run(false, true),
+            Some(Cmd::Pause) => self.apply_run(true, simulating),
+            Some(Cmd::Resume | Cmd::Restart) => self.apply_run(false, false),
+            _ => {}
+        }
         let _ = self.queue_reply(pack_reply(&reply), after);
     }
 
@@ -235,7 +260,7 @@ impl Writer {
     }
 
     pub(crate) fn enqueue_at(&mut self, fix: Fix, now: SystemTime) {
-        if let Some(dropped) = self.shared.push_at(fix, now) {
+        if let Some(dropped) = self.shared.push_at(fix, now, Source::Live) {
             log_drop(&dropped);
         }
     }
@@ -485,6 +510,76 @@ fn poll_cmds(reader: &TTYPort) -> io::Result<()> {
     Ok(())
 }
 
+fn run_sim(shared: Arc<Shared>, stop: Arc<Stop>) {
+    let mut logged = false;
+    while !stop.is_set() {
+        if !shared.is_simulating() {
+            let q = shared.lock();
+            let _ = shared.sim_wake.wait_timeout(q, POLL_SLICE);
+            continue;
+        }
+        let text = super::sim::uart_frames(&mut logged);
+        let mut tracker = Tracker::new();
+        let mut replay = Replay::new(text.as_bytes());
+        let mut prev = None;
+        loop {
+            if stop.is_set() || !shared.is_simulating() {
+                break;
+            }
+            match replay.next_record() {
+                Ok(None) => {
+                    tracker = Tracker::new();
+                    replay = Replay::new(text.as_bytes());
+                    prev = None;
+                }
+                Ok(Some(ReplayLine::Skip | ReplayLine::Malformed)) => {}
+                Ok(Some(ReplayLine::Frame { timestamp, frame })) => {
+                    if let Some(prev_ts) = prev {
+                        sim_sleep(timestamp - prev_ts, &shared, &stop);
+                    }
+                    if stop.is_set() || !shared.is_simulating() {
+                        break;
+                    }
+                    prev = Some(timestamp);
+                    if let Some(fix) = tracker.ingest(timestamp, &frame) {
+                        log_fix(&fix);
+                        if let Some(dropped) = shared.push_at(fix, SystemTime::now(), Source::Sim) {
+                            log_drop(&dropped);
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("sim: {err}");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn sim_sleep(dt: f64, shared: &Shared, stop: &Stop) {
+    if !dt.is_finite() || dt <= 0.0 {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs_f64(dt);
+    loop {
+        if stop.is_set() {
+            return;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let q = shared.lock();
+        if !shared.is_simulating() {
+            return;
+        }
+        let _ = shared
+            .sim_wake
+            .wait_timeout(q, deadline.saturating_duration_since(now));
+    }
+}
+
 pub(crate) fn open_table(path: &Path) -> Option<Table> {
     match Table::open(path) {
         Ok(table) => Some(table),
@@ -529,6 +624,11 @@ fn open_uart(
         let stop = Arc::clone(&stop);
         let path = path.to_string();
         thread::spawn(move || read_cmds(reader, shared, stop, path, baud));
+    }
+    {
+        let shared = Arc::clone(&shared);
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || run_sim(shared, stop));
     }
     Ok(Writer {
         sink: Sink::Uart(port),
@@ -680,7 +780,11 @@ pub(crate) fn write_exit(err: ChunkError) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trck::Cmd;
+    use trck::Health;
+
+    fn ack_health(bytes: &[u8; ACK_LEN]) -> u8 {
+        bytes[6]
+    }
 
     fn ack_status(bytes: &[u8; ACK_LEN]) -> CmdStatus {
         match bytes[5] {
@@ -724,12 +828,12 @@ mod tests {
             });
             scope.spawn(|| {
                 for _ in 0..2_000 {
-                    shared.set_paused(true);
-                    shared.set_paused(false);
+                    shared.apply_run(true, false);
+                    shared.apply_run(false, false);
                 }
             });
         });
-        shared.set_paused(true);
+        shared.apply_run(true, false);
         assert!(!shared.lock().has_pending());
         assert!(shared.push(check_positions()[0]).is_none());
         assert!(!shared.lock().has_pending());
@@ -832,7 +936,7 @@ mod tests {
     #[test]
     fn restart_acks_then_returns_restart() {
         let mut writer = buf_writer(None);
-        let (reply, after) = decide(Cmd::Restart as u8, false, true);
+        let (reply, after) = decide(Cmd::Restart as u8, false, true, false);
         assert_eq!(after, AfterReply::Restart);
         assert_eq!(reply.health, Health::Ok);
         assert!(writer.shared.queue_reply(pack_reply(&reply), after));
@@ -885,7 +989,7 @@ mod tests {
         assert_eq!(buf(&writer).len(), FRAME_LEN);
         assert_eq!(csv_rows(&path).len(), 1);
 
-        writer.shared.set_paused(true);
+        writer.shared.apply_run(true, false);
         writer.enqueue(check_positions()[1]);
         writer.write_some().expect("write");
         assert_eq!(buf(&writer).len(), FRAME_LEN);
@@ -893,7 +997,7 @@ mod tests {
         writer.enqueue(check_positions()[2]);
         assert_eq!(csv_rows(&path).len(), 1);
 
-        let (reply, after) = decide(Cmd::Status as u8, false, true);
+        let (reply, after) = decide(Cmd::Status as u8, false, true, false);
         assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
         writer.shared.queue_reply(pack_reply(&reply), after);
@@ -903,11 +1007,53 @@ mod tests {
         assert_eq!(&out[FRAME_LEN..FRAME_LEN + 4], b"TACK");
         assert_eq!(out[FRAME_LEN + 6], Health::Paused as u8);
 
-        writer.shared.set_paused(false);
+        writer.shared.apply_run(false, false);
         writer.enqueue(check_positions()[1]);
         writer.write_some().expect("write");
         assert_eq!(buf(&writer).len(), FRAME_LEN * 2 + ACK_LEN);
         assert_eq!(csv_rows(&path).len(), 2);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn simulation_acks_and_drops_live_push() {
+        let shared = Shared::new(None, false);
+        shared.handle_cmd(Cmd::Simulation as u8);
+        let got = pending(&shared);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].bytes[4], Cmd::Simulation as u8);
+        assert_eq!(ack_health(&got[0].bytes), Health::Sim as u8);
+        assert!(shared.is_simulating());
+        assert!(!shared.is_paused());
+        assert!(shared.push(check_positions()[0]).is_none());
+        assert!(!shared.lock().has_pending());
+        assert!(
+            shared
+                .push_at(check_positions()[0], SystemTime::now(), Source::Sim)
+                .is_none()
+        );
+        assert!(shared.lock().has_pending());
+
+        shared.handle_cmd(Cmd::Simulation as u8);
+        let got = pending(&shared);
+        assert_eq!(got.len(), 2);
+        assert_eq!(ack_health(&got[1].bytes), Health::Sim as u8);
+
+        shared.handle_cmd(Cmd::Pause as u8);
+        let got = pending(&shared);
+        assert_eq!(ack_health(&got[2].bytes), Health::Paused as u8);
+        assert!(shared.is_paused());
+        assert!(shared.is_simulating());
+        assert!(
+            shared
+                .push_at(check_positions()[1], SystemTime::now(), Source::Sim)
+                .is_none()
+        );
+
+        shared.handle_cmd(Cmd::Resume as u8);
+        let got = pending(&shared);
+        assert_eq!(ack_health(&got[3].bytes), Health::Ok as u8);
+        assert!(!shared.is_simulating());
+        assert!(!shared.is_paused());
     }
 }
