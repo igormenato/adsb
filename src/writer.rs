@@ -3,7 +3,6 @@
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::os::fd::BorrowedFd;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -31,6 +30,7 @@ const UART_RETRY_MAX: Duration = Duration::from_secs(1);
 #[derive(Debug)]
 pub(crate) enum ChunkError {
     Stopped,
+    Restart,
     Failed(io::Error),
 }
 
@@ -341,13 +341,9 @@ impl Writer {
                 drop(slot);
                 drain_sink(&self.sink);
                 match after {
-                    AfterReply::None | AfterReply::Power(_) => {}
-                    AfterReply::Restart => {
-                        drop(std::mem::replace(&mut self.sink, Sink::Stdout));
-                        restart();
-                    }
+                    AfterReply::None | AfterReply::Power(_) => Ok(true),
+                    AfterReply::Restart => Err(ChunkError::Restart),
                 }
-                Ok(true)
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(false),
             Err(err) if err.kind() == io::ErrorKind::Interrupted => Ok(true),
@@ -413,20 +409,6 @@ fn drain_sink(sink: &Sink) {
     if let Err(err) = nix::sys::termios::tcdrain(sys::as_fd(port)) {
         eprintln!("uart drain: {err}");
     }
-}
-
-fn restart() -> ! {
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(err) => {
-            eprintln!("restart: {err}");
-            std::process::exit(78);
-        }
-    };
-    eprintln!("restart");
-    let err = Command::new(exe).args(std::env::args_os().skip(1)).exec();
-    eprintln!("restart exec: {err}");
-    std::process::exit(78);
 }
 
 fn power_arg(op: PowerOp) -> &'static str {
@@ -619,7 +601,7 @@ pub(crate) fn run_writer(mut writer: Writer, stop: &Stop, done: Option<&AtomicBo
         }
         if let Err(err) = writer.write_some() {
             match err {
-                ChunkError::Stopped => return write_exit(err),
+                ChunkError::Stopped | ChunkError::Restart => return write_exit(err),
                 ChunkError::Failed(err) => {
                     writer.recover_uart(&format!("uart write failed: {err}"))
                 }
@@ -662,7 +644,7 @@ pub(crate) fn run_check(writer: &mut Writer, stop: &Stop) -> ExitCode {
             }
             if let Err(err) = writer.write_some() {
                 match err {
-                    ChunkError::Stopped => return write_exit(err),
+                    ChunkError::Stopped | ChunkError::Restart => return write_exit(err),
                     ChunkError::Failed(err) => {
                         writer.recover_uart(&format!("uart write failed: {err}"))
                     }
@@ -695,6 +677,10 @@ pub(crate) fn write_exit(err: ChunkError) -> ExitCode {
         ChunkError::Stopped => {
             eprintln!("stopped");
             ExitCode::SUCCESS
+        }
+        ChunkError::Restart => {
+            eprintln!("restart");
+            ExitCode::from(1)
         }
         ChunkError::Failed(err) => {
             eprintln!("uart write failed: {err}");
@@ -853,6 +839,20 @@ mod tests {
         assert!(!stop.is_set());
         stop.request();
         thread.join().expect("reader");
+    }
+
+    #[test]
+    fn restart_acks_then_returns_restart() {
+        let mut writer = buf_writer(None);
+        let (reply, after) = decide(Cmd::Restart as u8, false, true, writer.shared.stats());
+        assert_eq!(after, AfterReply::Restart);
+        assert!(!reply.paused);
+        assert!(writer.shared.queue_reply(pack_reply(&reply), after));
+        let err = writer.write_some().expect_err("restart");
+        assert!(matches!(err, ChunkError::Restart));
+        let out = buf(&writer);
+        assert_eq!(&out[..4], b"TACK");
+        assert_eq!(out[4], Cmd::Restart as u8);
     }
 
     #[test]

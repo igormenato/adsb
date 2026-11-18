@@ -49,12 +49,12 @@ On the USB Serial Monitor, send one word and a newline.
 | `status` | Reply `ok` with run state, uptime seconds, frames sent, and last-fix age |
 | `pause` | Stop CSV rows and `TRCK` frames. The radio stays open. Replies still go out |
 | `resume` | Start sending `TRCK` frames again. `trck` starts running; there is no start command |
-| `restart` | Reply, drain the UART, then `exec` the same binary and args |
+| `restart` | Reply, drain the UART, then exit 1 so systemd starts trck again |
 | `reboot` | `systemctl reboot` if `trck` was started with `--allow-power-commands` |
 | `shutdown` | `systemctl poweroff` with the same flag |
 | `stats` | ESP32 only: print `frames`, `crc_fail`, `resync`, `qdrop`. No UART command |
 
-Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. `trck` must run as a user that may call those `systemctl` verbs, typically root. There is no systemd unit in this repo. Pause, resume, and restart do not need the flag. Restart uses `exec` so the process comes back without a unit. While paused, new positions are discarded at the UART/CSV entry. `last_fix_age` keeps growing. Resume does not flood the wire.
+Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. Pause, resume, and restart do not need the flag. `sudo trck install-service` installs a root systemd unit (`Restart=always`) so reboot, shutdown, `trck update`, and UART restart work without ssh. While paused, new positions are discarded at the UART/CSV entry. `last_fix_age` keeps growing. Resume does not flood the wire.
 
 Change `kPiRxGpio` / `kPiTxGpio` in the sketch and in `esp32/pio/src/main.cpp` if those pins are not free on the board.
 

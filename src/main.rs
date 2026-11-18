@@ -19,6 +19,7 @@ mod doctor;
 mod hex;
 mod iq;
 mod radio;
+mod service;
 mod sim;
 mod stress;
 mod sys;
@@ -100,6 +101,8 @@ enum Cmd {
     },
     /// Replace this binary from GitHub Releases.
     Update(update::Args),
+    /// Install and enable the systemd unit.
+    InstallService,
 }
 
 #[derive(Debug)]
@@ -231,6 +234,7 @@ fn main() -> ExitCode {
             speed,
         }) => return run_replay(file, &output, speed),
         Some(Cmd::Update(opts)) => return update::run(opts),
+        Some(Cmd::InstallService) => return service::run(),
         None => {}
     }
     let stop = Stop::new();

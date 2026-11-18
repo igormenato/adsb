@@ -54,6 +54,7 @@ impl<R: Read> HexLines<R> {
 #[derive(Debug)]
 enum Pump {
     Stopped,
+    Restart,
     Disconnected,
     Uart(io::Error),
 }
@@ -82,6 +83,7 @@ pub(crate) fn run_hex_stdin(writer: &mut Writer, stop: &Stop) -> ExitCode {
     };
     match pump_hex(&mut lines, writer, stop, "-") {
         Pump::Stopped => write_exit(ChunkError::Stopped),
+        Pump::Restart => write_exit(ChunkError::Restart),
         Pump::Uart(err) => write_exit(ChunkError::Failed(err)),
         Pump::Disconnected => {
             eprintln!("stopped");
@@ -103,6 +105,7 @@ pub(crate) fn run_hex(
                 eprintln!("hex {text} connected");
                 match pump(stream, writer, stop, text) {
                     Pump::Stopped => return write_exit(ChunkError::Stopped),
+                    Pump::Restart => return write_exit(ChunkError::Restart),
                     Pump::Uart(err) => return write_exit(ChunkError::Failed(err)),
                     Pump::Disconnected => delay = RETRY_MIN,
                 }
@@ -317,6 +320,7 @@ fn pump_hex<R: Read + AsRawFd>(
         {
             match err {
                 ChunkError::Stopped => return Pump::Stopped,
+                ChunkError::Restart => return Pump::Restart,
                 ChunkError::Failed(err) => writer.recover_uart(&format!("uart write: {err}")),
             }
         }
@@ -341,6 +345,7 @@ fn end_socket(writer: &mut Writer) -> Pump {
     match writer.write_some() {
         Ok(()) => Pump::Disconnected,
         Err(ChunkError::Stopped) => Pump::Stopped,
+        Err(ChunkError::Restart) => Pump::Restart,
         Err(ChunkError::Failed(err)) => Pump::Uart(err),
     }
 }

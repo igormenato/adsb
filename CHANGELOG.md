@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `trck install-service` installs a root systemd unit (`Restart=always`).
+
+### Changed
+
+- UART `restart` and `trck update` exit 1 after success so systemd starts the process again.
+
 ## [0.3.5](https://github.com/igormenato/adsb/compare/v0.3.4...v0.3.5) - 2026-11-17
 
 ### Added

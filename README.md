@@ -28,7 +28,21 @@ Copy `target/aarch64-unknown-linux-musl/release/trck`. The static musl binary ru
 ./trck update
 ```
 
-Needs `curl` (`sudo apt install curl` on Raspberry Pi OS Lite if it is missing). Downloads `trck-aarch64` from the latest GitHub release of [igormenato/adsb](https://github.com/igormenato/adsb) when that tag is newer than this binary. It writes a temp file next to the running binary and renames it over the file. `trck update --version 0.3.2` installs that tag, including a downgrade. The file must match the listed size and start with an ELF header. When GitHub sends an asset `digest`, `sha256sum` checks it. The command does not restart a running process.
+Needs `curl` (`sudo apt install curl` on Raspberry Pi OS Lite if it is missing). Downloads `trck-aarch64` from the latest GitHub release of [igormenato/adsb](https://github.com/igormenato/adsb) when that tag is newer than this binary. It writes a temp file next to the running binary and renames it over the file. `trck update --version 0.3.2` installs that tag, including a downgrade. The file must match the listed size and start with an ELF header. When GitHub sends an asset `digest`, `sha256sum` checks it. After a successful replace it prints `restart` and exits 1 so systemd `Restart=always` can start the new binary.
+
+## Autostart
+
+On the Pi, as root:
+
+```
+sudo ./trck install-service
+```
+
+Writes `/etc/systemd/system/trck.service`, copies this binary to `/usr/local/bin/trck`, creates `/var/lib/trck` for `aircraft.csv`, then `systemctl daemon-reload` and `systemctl enable --now trck`. Safe to run again. The unit runs as root (`Restart=always`, `RestartSec=1`) so UART reboot/shutdown and `trck update` can work. Logs:
+
+```
+journalctl -u trck -f
+```
 
 ## Run on the Pi
 

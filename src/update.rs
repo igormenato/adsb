@@ -93,7 +93,11 @@ struct GhAsset {
 
 pub fn run(args: Args) -> ExitCode {
     match run_inner(args) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::SUCCESS,
+        Ok(true) => {
+            eprintln!("restart");
+            ExitCode::from(1)
+        }
         Err(err) => {
             eprintln!("{err:#}");
             ExitCode::from(1)
@@ -101,14 +105,14 @@ pub fn run(args: Args) -> ExitCode {
     }
 }
 
-fn run_inner(args: Args) -> Result<()> {
+fn run_inner(args: Args) -> Result<bool> {
     let current = Version::parse(CURRENT).expect("CARGO_PKG_VERSION is X.Y.Z");
     let exact = args.version.as_deref().map(Version::parse).transpose()?;
     if let Some(v) = exact
         && current == v
     {
         println!("trck {current} is up to date");
-        return Ok(());
+        return Ok(false);
     }
     let (target, assets) = match exact {
         Some(v) => fetch_tag(&v.tag())?,
@@ -116,7 +120,7 @@ fn run_inner(args: Args) -> Result<()> {
     };
     if exact.is_none() && current >= target {
         println!("trck {current} is up to date");
-        return Ok(());
+        return Ok(false);
     }
     let asset = pick_asset(&assets)
         .ok_or_else(|| anyhow!("release {} has no {ASSET_NAME} asset", target.tag()))?;
@@ -124,7 +128,7 @@ fn run_inner(args: Args) -> Result<()> {
     install(&dest, asset)?;
     println!("{current} -> {target}");
     println!("replaced {}", dest.display());
-    Ok(())
+    Ok(true)
 }
 
 fn pick_asset(assets: &[Asset]) -> Option<&Asset> {
