@@ -27,13 +27,26 @@ fn install_service_needs_root() {
     assert!(err.contains("root"), "{err}");
 
     let out = Command::new(env!("CARGO_BIN_EXE_trck"))
-        .args(["install-service", "--", "--ppm", "-8", "--gain", "19.7"])
+        .args(["install-service", "--", "--gain", "19.7"])
         .output()
         .expect("install-service args");
     assert!(!out.status.success(), "{out:?}");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("root"), "{err}");
     assert!(!err.contains("unexpected"), "{err}");
+}
+
+#[test]
+fn install_service_rejects_unknown_run_args() {
+    let out = Command::new(env!("CARGO_BIN_EXE_trck"))
+        .args(["install-service", "--", "--gian", "19.7"])
+        .output()
+        .expect("install-service typo");
+    assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--gian"), "{err}");
+    assert!(err.contains("unexpected argument"), "{err}");
+    assert!(!err.contains("root"), "{err}");
 }
 
 #[test]

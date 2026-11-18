@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory as _, Parser, Subcommand};
 
 use trck::{DEFAULT_PATH, Replay, ReplayLine, Tracker, is_mode_s};
 
@@ -221,6 +221,21 @@ impl std::fmt::Display for Pace {
 fn fail(err: impl std::fmt::Display) -> ExitCode {
     eprintln!("{err}");
     ExitCode::from(1)
+}
+
+fn parse_run_args(args: &[String]) -> Result<(), clap::Error> {
+    let parsed =
+        Args::try_parse_from(std::iter::once("trck".to_string()).chain(args.iter().cloned()))?;
+    if parsed.command.is_some() {
+        return Err(Args::command().error(
+            clap::error::ErrorKind::UnknownArgument,
+            format!(
+                "unexpected argument '{}'",
+                args.first().map(String::as_str).unwrap_or("subcommand")
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn now_unix() -> f64 {
@@ -568,5 +583,13 @@ mod tests {
         assert!(parse_gain("").is_err());
         assert!(parse_gain("nan").is_err());
         assert!(parse_gain("inf").is_err());
+    }
+
+    #[test]
+    fn parse_run_args_rejects_typos() {
+        assert!(parse_run_args(&["--gain".into(), "19.7".into()]).is_ok());
+        let err = parse_run_args(&["--gian".into(), "19.7".into()]).unwrap_err();
+        assert!(err.to_string().contains("--gian"), "{err}");
+        assert!(parse_run_args(&["doctor".into()]).is_err());
     }
 }

@@ -36,7 +36,7 @@ On the Pi, as root:
 
 ```
 sudo ./trck install-service
-sudo ./trck install-service -- --ppm -8 --gain 19.7
+sudo ./trck install-service -- --gain 19.7
 ```
 
 Writes `/etc/systemd/system/trck.service`, replaces `/usr/local/bin/trck` (temp file + rename), creates `/var/lib/trck` for `aircraft.csv`, then `systemctl daemon-reload` and `systemctl enable --now trck`. Trailing args go on `ExecStart` after the binary; `--allow-power-commands` is always included. Run again with different args to rewrite the unit and restart. The unit runs as root (`Restart=always`, `RestartSec=1`, `StartLimitIntervalSec=0`, `ProtectHome=yes`, `PrivateTmp=yes`, no `ProtectSystem`) so UART reboot/shutdown and `trck update` can work. Logs:

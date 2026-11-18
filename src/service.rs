@@ -17,6 +17,10 @@ const WORK_DIR: &str = "/var/lib/trck";
 const ALLOW_POWER: &str = "--allow-power-commands";
 
 pub fn run(args: &[String]) -> ExitCode {
+    if let Err(err) = super::parse_run_args(args) {
+        let _ = err.print();
+        return ExitCode::from(1);
+    }
     match install(args) {
         Ok(()) => {
             println!("enabled trck.service");
@@ -90,6 +94,7 @@ fn systemd_quote(arg: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
+            '%' => out.push_str("%%"),
             _ => out.push(c),
         }
     }
@@ -192,6 +197,8 @@ mod tests {
             ALLOW_POWER.into(),
             "a b".into(),
             "say\"hi".into(),
+            "%n".into(),
+            "50%".into(),
         ];
         let line = exec_start(&args);
         assert!(line.starts_with("ExecStart=/usr/local/bin/trck --allow-power-commands "));
@@ -199,6 +206,10 @@ mod tests {
         assert!(line.contains(" --ppm -8 --gain 19.7 "));
         assert!(line.contains("\"a b\""));
         assert!(line.contains("\"say\\\"hi\""));
+        assert_eq!(systemd_quote("%n"), "\"%%n\"");
+        assert_eq!(systemd_quote("50%"), "\"50%%\"");
+        assert!(line.contains("\"%%n\""));
+        assert!(line.contains("\"50%%\""));
         let again = render_unit(&["--gain".into(), "12".into()]);
         assert_ne!(render_unit(&[]), again);
         assert!(again.contains("StartLimitIntervalSec=0"));
