@@ -15,7 +15,7 @@ mod table;
 
 #[doc(inline)]
 pub use cmd::{
-    ACK_LEN, AfterReply, CMD_LEN, Cmd, CmdFeed, CmdScan, CmdStats, CmdStatus, LAST_FIX_NONE,
+    ACK_LEN, AfterReply, CMD_LEN, Cmd, CmdFeed, CmdScan, CmdStatus, FIX_STALE_AFTER, Health,
     PowerOp, decide, pack_cmd, pack_reply,
 };
 #[doc(inline)]

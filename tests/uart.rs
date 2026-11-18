@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use nix::unistd::read;
 use trck::modes::{EVEN, ODD, STATUS, hex14};
-use trck::{ACK_LEN, Cmd, EmergencyKind, Fix, pack_cmd};
+use trck::{ACK_LEN, Cmd, EmergencyKind, Fix, Health, pack_cmd};
 
 #[test]
 fn avr_hex_writes_a_pty_frame() {
@@ -207,10 +207,10 @@ fn pause_then_status_both_ack() {
     let tacks = wait_tacks(&mut pty.master, 2, Duration::from_secs(3));
     assert_eq!(tacks[0][4], Cmd::Pause as u8);
     assert_eq!(tacks[0][5], 0);
-    assert_eq!(tacks[0][18], 1);
+    assert_eq!(tacks[0][6], Health::Paused as u8);
     assert_eq!(tacks[1][4], Cmd::Status as u8);
     assert_eq!(tacks[1][5], 0);
-    assert_eq!(tacks[1][18], 1);
+    assert_eq!(tacks[1][6], Health::Paused as u8);
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 
@@ -227,7 +227,7 @@ fn uart_restart_acks_then_exits() {
     let tacks = wait_tacks(&mut pty.master, 1, Duration::from_secs(3));
     assert_eq!(tacks[0][4], Cmd::Restart as u8);
     assert_eq!(tacks[0][5], 0);
-    assert_eq!(tacks[0][18], 0);
+    assert_eq!(tacks[0][6], Health::NoFix as u8);
     let status = wait_exit(&mut sender.0, Duration::from_secs(3));
     assert!(!status.success(), "{status}");
 }
@@ -246,13 +246,13 @@ fn ascii_pause_heartbeat_resume_acks() {
     assert_eq!(tacks.len(), 3);
     assert_eq!(tacks[0][4], Cmd::Pause as u8);
     assert_eq!(tacks[0][5], 0);
-    assert_eq!(tacks[0][18], 1);
+    assert_eq!(tacks[0][6], Health::Paused as u8);
     assert_eq!(tacks[1][4], Cmd::Status as u8);
     assert_eq!(tacks[1][5], 0);
-    assert_eq!(tacks[1][18], 1);
+    assert_eq!(tacks[1][6], Health::Paused as u8);
     assert_eq!(tacks[2][4], Cmd::Resume as u8);
     assert_eq!(tacks[2][5], 0);
-    assert_eq!(tacks[2][18], 0);
+    assert_eq!(tacks[2][6], Health::NoFix as u8);
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 

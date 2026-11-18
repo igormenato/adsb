@@ -15,8 +15,8 @@ use nix::poll::{PollFd, PollFlags};
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
 use trck::{
-    ACK_LEN, AfterReply, CmdFeed, CmdScan, CmdStats, CmdStatus, EmergencyKind, FRAME_LEN, Fix,
-    LAST_FIX_NONE, PowerOp, Queue, Table, check_positions, decide, pack_reply,
+    ACK_LEN, AfterReply, CmdFeed, CmdScan, CmdStatus, EmergencyKind, FRAME_LEN, Fix, PowerOp,
+    Queue, Table, check_positions, decide, pack_reply,
 };
 
 use super::sys;
@@ -53,7 +53,6 @@ pub(crate) struct Shared {
     queue: Mutex<Queue>,
     pub(crate) ready: Condvar,
     pub(crate) table: Mutex<Option<Table>>,
-    started: Instant,
     frames_written: AtomicUsize,
     last_fix: Mutex<Option<Instant>>,
     pending_reply: Mutex<VecDeque<PendingReply>>,
@@ -67,7 +66,6 @@ impl Shared {
             queue: Mutex::new(Queue::new(QUEUE_CAP)),
             ready: Condvar::new(),
             table: Mutex::new(table),
-            started: Instant::now(),
             frames_written: AtomicUsize::new(0),
             last_fix: Mutex::new(None),
             pending_reply: Mutex::new(VecDeque::new()),
@@ -111,21 +109,41 @@ impl Shared {
         self.ready.notify_one();
     }
 
-    fn stats(&self) -> CmdStats {
-        let uptime_s = self.started.elapsed().as_secs().min(u64::from(u32::MAX)) as u32;
-        let frames_sent = self
-            .frames_written
-            .load(Ordering::Relaxed)
-            .min(u32::MAX as usize) as u32;
-        let last_fix_age_s = match *self.last_fix.lock().unwrap_or_else(PoisonError::into_inner) {
-            Some(at) => at.elapsed().as_secs().min(u64::from(u32::MAX)) as u32,
-            None => LAST_FIX_NONE,
-        };
-        CmdStats {
-            uptime_s,
-            frames_sent,
-            last_fix_age_s,
+    fn last_fix(&self) -> Option<Instant> {
+        *self.last_fix.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn handle_cmd(&self, cmd: u8) {
+        self.handle_cmd_at(cmd, Instant::now());
+    }
+
+    fn handle_cmd_at(&self, cmd: u8, now: Instant) {
+        if !self.can_queue() {
+            eprintln!("cmd dropped, reply queue full");
+            return;
         }
+        let (mut reply, mut after) = decide(
+            cmd,
+            self.allow_power,
+            self.is_paused(),
+            self.last_fix(),
+            now,
+        );
+        if reply.status == CmdStatus::Disabled {
+            eprintln!("power command disabled");
+        }
+        if let AfterReply::Power(op) = after {
+            match try_power(op) {
+                Ok(()) => after = AfterReply::None,
+                Err(err) => {
+                    eprintln!("{err}");
+                    reply.status = CmdStatus::Failed;
+                    after = AfterReply::None;
+                }
+            }
+        }
+        self.set_paused(reply.paused);
+        let _ = self.queue_reply(pack_reply(&reply), after);
     }
 
     fn has_reply(&self) -> bool {
@@ -160,29 +178,6 @@ impl Shared {
         drop(q);
         self.ready.notify_one();
         true
-    }
-
-    fn handle_cmd(&self, cmd: u8) {
-        if !self.can_queue() {
-            eprintln!("cmd dropped, reply queue full");
-            return;
-        }
-        let (mut reply, mut after) = decide(cmd, self.allow_power, self.is_paused(), self.stats());
-        if reply.status == CmdStatus::Disabled {
-            eprintln!("power command disabled");
-        }
-        if let AfterReply::Power(op) = after {
-            match try_power(op) {
-                Ok(()) => after = AfterReply::None,
-                Err(err) => {
-                    eprintln!("{err}");
-                    reply.status = CmdStatus::Failed;
-                    after = AfterReply::None;
-                }
-            }
-        }
-        self.set_paused(reply.paused);
-        let _ = self.queue_reply(pack_reply(&reply), after);
     }
 
     fn append_row_at(&self, fix: &Fix, now: SystemTime) {
@@ -702,7 +697,7 @@ pub(crate) fn write_exit(err: ChunkError) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trck::Cmd;
+    use trck::{Cmd, FIX_STALE_AFTER, Health};
 
     fn ack_status(bytes: &[u8; ACK_LEN]) -> CmdStatus {
         match bytes[5] {
@@ -800,9 +795,9 @@ mod tests {
         let got = pending(&shared);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].bytes[4], Cmd::Pause as u8);
-        assert_eq!(got[0].bytes[18], 1);
+        assert_eq!(got[0].bytes[6], Health::Paused as u8);
         assert_eq!(got[1].bytes[4], Cmd::Status as u8);
-        assert_eq!(got[1].bytes[18], 1);
+        assert_eq!(got[1].bytes[6], Health::Paused as u8);
         assert!(shared.is_paused());
     }
 
@@ -854,7 +849,8 @@ mod tests {
     #[test]
     fn restart_acks_then_returns_restart() {
         let mut writer = buf_writer(None);
-        let (reply, after) = decide(Cmd::Restart as u8, false, true, writer.shared.stats());
+        let now = Instant::now();
+        let (reply, after) = decide(Cmd::Restart as u8, false, true, None, now);
         assert_eq!(after, AfterReply::Restart);
         assert!(!reply.paused);
         assert!(writer.shared.queue_reply(pack_reply(&reply), after));
@@ -908,35 +904,65 @@ mod tests {
         assert_eq!(csv_rows(&path).len(), 1);
 
         writer.shared.set_paused(true);
-        thread::sleep(Duration::from_millis(1100));
-        let age = writer.shared.stats().last_fix_age_s;
-        assert!(age >= 1, "{age}");
         writer.enqueue(check_positions()[1]);
         writer.write_some().expect("write");
         assert_eq!(buf(&writer).len(), FRAME_LEN);
         assert_eq!(csv_rows(&path).len(), 1);
-        thread::sleep(Duration::from_millis(1100));
         writer.enqueue(check_positions()[2]);
-        let age2 = writer.shared.stats().last_fix_age_s;
-        assert!(age2 > age, "age={age} age2={age2}");
         assert_eq!(csv_rows(&path).len(), 1);
 
-        let (reply, after) = decide(Cmd::Status as u8, false, true, writer.shared.stats());
+        let now = Instant::now();
+        let (reply, after) = decide(
+            Cmd::Status as u8,
+            false,
+            true,
+            writer.shared.last_fix(),
+            now,
+        );
         assert!(reply.paused);
+        assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
         writer.shared.queue_reply(pack_reply(&reply), after);
         writer.write_some().expect("write");
         let out = buf(&writer);
         assert_eq!(out.len(), FRAME_LEN + ACK_LEN);
         assert_eq!(&out[FRAME_LEN..FRAME_LEN + 4], b"TACK");
-        assert_eq!(out[FRAME_LEN + 18], 1);
+        assert_eq!(out[FRAME_LEN + 6], Health::Paused as u8);
 
         writer.shared.set_paused(false);
         writer.enqueue(check_positions()[1]);
         writer.write_some().expect("write");
         assert_eq!(buf(&writer).len(), FRAME_LEN * 2 + ACK_LEN);
         assert_eq!(csv_rows(&path).len(), 2);
-        assert_eq!(writer.shared.stats().last_fix_age_s, 0);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn health_ok_paused_no_fix_uses_injected_time() {
+        let shared = Shared::new(None, false);
+        let t0 = Instant::now();
+        shared.handle_cmd_at(Cmd::Status as u8, t0);
+        assert_eq!(pending(&shared)[0].bytes[6], Health::NoFix as u8);
+
+        *shared
+            .last_fix
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(t0);
+        shared.handle_cmd_at(Cmd::Status as u8, t0);
+        assert_eq!(pending(&shared)[1].bytes[6], Health::Ok as u8);
+
+        shared.handle_cmd_at(
+            Cmd::Status as u8,
+            t0 + FIX_STALE_AFTER - Duration::from_secs(1),
+        );
+        assert_eq!(pending(&shared)[2].bytes[6], Health::Ok as u8);
+
+        shared.handle_cmd_at(Cmd::Status as u8, t0 + FIX_STALE_AFTER);
+        assert_eq!(pending(&shared)[3].bytes[6], Health::NoFix as u8);
+
+        shared.handle_cmd_at(Cmd::Pause as u8, t0 + FIX_STALE_AFTER);
+        assert_eq!(pending(&shared)[4].bytes[6], Health::Paused as u8);
+        shared.handle_cmd_at(Cmd::Status as u8, t0);
+        assert_eq!(pending(&shared)[5].bytes[6], Health::Paused as u8);
     }
 }

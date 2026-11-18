@@ -1,11 +1,13 @@
 //! Host commands on the same UART as position frames. Little-endian.
 
+use std::time::{Duration, Instant};
+
 use crate::frame::crc16_ccitt_false;
 
 pub const CMD_MAGIC: &[u8; 4] = b"TCMD";
-pub const ACK_LEN: usize = 21;
+pub const ACK_LEN: usize = 9;
 pub const CMD_LEN: usize = 7;
-pub const LAST_FIX_NONE: u32 = u32::MAX;
+pub const FIX_STALE_AFTER: Duration = Duration::from_secs(60);
 
 const CMD_BODY_LEN: usize = CMD_LEN - 2;
 const ACK_BODY_LEN: usize = ACK_LEN - 2;
@@ -48,12 +50,34 @@ pub enum CmdStatus {
     Failed = 3,
 }
 
-/// Fields filled on every reply. Cheap to copy onto PING too.
+/// Run health on every TACK. Paused wins over a stale or missing fix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CmdStats {
-    pub uptime_s: u32,
-    pub frames_sent: u32,
-    pub last_fix_age_s: u32,
+#[repr(u8)]
+pub enum Health {
+    Ok = 0,
+    Paused = 1,
+    NoFix = 2,
+}
+
+impl Health {
+    pub fn from_u8(n: u8) -> Option<Self> {
+        Some(match n {
+            0 => Self::Ok,
+            1 => Self::Paused,
+            2 => Self::NoFix,
+            _ => return None,
+        })
+    }
+
+    pub fn from_state(paused: bool, last_fix: Option<Instant>, now: Instant) -> Self {
+        if paused {
+            Self::Paused
+        } else if last_fix.is_some_and(|at| now.saturating_duration_since(at) < FIX_STALE_AFTER) {
+            Self::Ok
+        } else {
+            Self::NoFix
+        }
+    }
 }
 
 /// One reply the Pi writes after a command.
@@ -62,7 +86,7 @@ pub struct CmdReply {
     pub cmd: u8,
     pub status: CmdStatus,
     pub paused: bool,
-    pub stats: CmdStats,
+    pub health: Health,
 }
 
 /// Host action that must not run inside tests.
@@ -94,17 +118,20 @@ pub fn pack_reply(reply: &CmdReply) -> [u8; ACK_LEN] {
     raw[0..4].copy_from_slice(b"TACK");
     raw[4] = reply.cmd;
     raw[5] = reply.status as u8;
-    raw[6..10].copy_from_slice(&reply.stats.uptime_s.to_le_bytes());
-    raw[10..14].copy_from_slice(&reply.stats.frames_sent.to_le_bytes());
-    raw[14..18].copy_from_slice(&reply.stats.last_fix_age_s.to_le_bytes());
-    raw[18] = u8::from(reply.paused);
+    raw[6] = reply.health as u8;
     let crc = crc16_ccitt_false(&raw[..ACK_BODY_LEN]);
     raw[ACK_BODY_LEN..ACK_LEN].copy_from_slice(&crc.to_le_bytes());
     raw
 }
 
 /// What to write, the run state after this command, and any later host action.
-pub fn decide(cmd: u8, allow_power: bool, paused: bool, stats: CmdStats) -> (CmdReply, AfterReply) {
+pub fn decide(
+    cmd: u8,
+    allow_power: bool,
+    paused: bool,
+    last_fix: Option<Instant>,
+    now: Instant,
+) -> (CmdReply, AfterReply) {
     let (status, paused, after) = match Cmd::from_u8(cmd) {
         Some(Cmd::Ping | Cmd::Status) => (CmdStatus::Ok, paused, AfterReply::None),
         Some(Cmd::Pause) => (CmdStatus::Ok, true, AfterReply::None),
@@ -124,7 +151,7 @@ pub fn decide(cmd: u8, allow_power: bool, paused: bool, stats: CmdStats) -> (Cmd
             cmd,
             status,
             paused,
-            stats,
+            health: Health::from_state(paused, last_fix, now),
         },
         after,
     )
@@ -292,19 +319,12 @@ fn unpack_reply(bytes: &[u8]) -> Option<CmdReply> {
         3 => CmdStatus::Failed,
         _ => return None,
     };
+    let health = Health::from_u8(bytes[6])?;
     Some(CmdReply {
         cmd: bytes[4],
         status,
-        paused: match bytes[18] {
-            0 => false,
-            1 => true,
-            _ => return None,
-        },
-        stats: CmdStats {
-            uptime_s: u32::from_le_bytes(bytes[6..10].try_into().ok()?),
-            frames_sent: u32::from_le_bytes(bytes[10..14].try_into().ok()?),
-            last_fix_age_s: u32::from_le_bytes(bytes[14..18].try_into().ok()?),
-        },
+        paused: health == Health::Paused,
+        health,
     })
 }
 
@@ -312,11 +332,9 @@ fn unpack_reply(bytes: &[u8]) -> Option<CmdReply> {
 mod tests {
     use super::*;
 
-    const STATS: CmdStats = CmdStats {
-        uptime_s: 12,
-        frames_sent: 3,
-        last_fix_age_s: 1,
-    };
+    fn decide_now(cmd: u8, allow_power: bool, paused: bool) -> (CmdReply, AfterReply) {
+        decide(cmd, allow_power, paused, None, Instant::now())
+    }
 
     #[test]
     fn cmd_round_trip() {
@@ -336,13 +354,14 @@ mod tests {
             cmd: Cmd::Status as u8,
             status: CmdStatus::Ok,
             paused: true,
-            stats: STATS,
+            health: Health::Paused,
         };
         let raw = pack_reply(&reply);
         assert_eq!(unpack_reply(&raw), Some(reply));
         let fail = CmdReply {
             status: CmdStatus::Failed,
             paused: false,
+            health: Health::NoFix,
             ..reply
         };
         let raw = pack_reply(&fail);
@@ -379,10 +398,10 @@ mod tests {
 
     #[test]
     fn power_refused_without_flag() {
-        let (reply, after) = decide(Cmd::Reboot as u8, false, false, STATS);
+        let (reply, after) = decide_now(Cmd::Reboot as u8, false, false);
         assert_eq!(reply.status, CmdStatus::Disabled);
         assert_eq!(after, AfterReply::None);
-        let (reply, after) = decide(Cmd::Shutdown as u8, false, true, STATS);
+        let (reply, after) = decide_now(Cmd::Shutdown as u8, false, true);
         assert_eq!(reply.status, CmdStatus::Disabled);
         assert!(reply.paused);
         assert_eq!(after, AfterReply::None);
@@ -390,41 +409,68 @@ mod tests {
 
     #[test]
     fn power_flag_sets_op() {
-        let (reply, after) = decide(Cmd::Reboot as u8, true, false, STATS);
+        let (reply, after) = decide_now(Cmd::Reboot as u8, true, false);
         assert_eq!(reply.status, CmdStatus::Ok);
         assert_eq!(after, AfterReply::Power(PowerOp::Reboot));
-        let (reply, after) = decide(Cmd::Shutdown as u8, true, false, STATS);
+        let (reply, after) = decide_now(Cmd::Shutdown as u8, true, false);
         assert_eq!(reply.status, CmdStatus::Ok);
         assert_eq!(after, AfterReply::Power(PowerOp::Shutdown));
     }
 
     #[test]
     fn pause_resume_restart() {
-        let (reply, after) = decide(Cmd::Pause as u8, false, false, STATS);
+        let (reply, after) = decide_now(Cmd::Pause as u8, false, false);
         assert_eq!(reply.status, CmdStatus::Ok);
         assert!(reply.paused);
+        assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
 
-        let (reply, after) = decide(Cmd::Pause as u8, false, true, STATS);
+        let (reply, after) = decide_now(Cmd::Pause as u8, false, true);
         assert!(reply.paused);
         assert_eq!(after, AfterReply::None);
 
-        let (reply, after) = decide(Cmd::Resume as u8, false, true, STATS);
+        let (reply, after) = decide_now(Cmd::Resume as u8, false, true);
         assert_eq!(reply.status, CmdStatus::Ok);
         assert!(!reply.paused);
+        assert_eq!(reply.health, Health::NoFix);
         assert_eq!(after, AfterReply::None);
 
-        let (reply, after) = decide(Cmd::Status as u8, false, true, STATS);
+        let (reply, after) = decide_now(Cmd::Status as u8, false, true);
         assert!(reply.paused);
+        assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
 
-        let (reply, after) = decide(Cmd::Restart as u8, false, true, STATS);
+        let (reply, after) = decide_now(Cmd::Restart as u8, false, true);
         assert_eq!(reply.status, CmdStatus::Ok);
         assert!(!reply.paused);
         assert_eq!(after, AfterReply::Restart);
-        let (reply, after) = decide(Cmd::Restart as u8, false, false, STATS);
+        let (reply, after) = decide_now(Cmd::Restart as u8, false, false);
         assert!(!reply.paused);
         assert_eq!(after, AfterReply::Restart);
+    }
+
+    #[test]
+    fn health_ok_paused_and_no_fix_at_60s() {
+        let t0 = Instant::now();
+        let t59 = t0 + FIX_STALE_AFTER - Duration::from_secs(1);
+        let t60 = t0 + FIX_STALE_AFTER;
+        assert_eq!(Health::from_state(false, Some(t0), t0), Health::Ok);
+        assert_eq!(Health::from_state(false, Some(t0), t59), Health::Ok);
+        assert_eq!(Health::from_state(false, Some(t0), t60), Health::NoFix);
+        assert_eq!(Health::from_state(false, None, t0), Health::NoFix);
+        assert_eq!(Health::from_state(true, Some(t0), t0), Health::Paused);
+        assert_eq!(Health::from_state(true, None, t60), Health::Paused);
+        let (reply, _) = decide(Cmd::Status as u8, false, false, Some(t0), t0);
+        assert_eq!(reply.health, Health::Ok);
+        let raw = pack_reply(&reply);
+        assert_eq!(raw.len(), 9);
+        assert_eq!(&raw[..4], b"TACK");
+        assert_eq!(raw[6], Health::Ok as u8);
+        assert_eq!(unpack_reply(&raw), Some(reply));
+        let (paused, _) = decide(Cmd::Status as u8, false, true, Some(t0), t0);
+        assert_eq!(paused.health, Health::Paused);
+        let (stale, _) = decide(Cmd::Status as u8, false, false, Some(t0), t60);
+        assert_eq!(stale.health, Health::NoFix);
     }
 
     fn feeds(scan: &mut CmdScan, bytes: &[u8]) -> Vec<CmdFeed> {
