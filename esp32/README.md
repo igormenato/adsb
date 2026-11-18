@@ -56,6 +56,21 @@ On the USB Serial Monitor, send one word and a newline.
 
 Without `--allow-power-commands`, reboot and shutdown are ignored and the reply status is `disabled`. Pause, resume, and restart do not need the flag. `sudo trck install-service` installs a root systemd unit with `--allow-power-commands` (`Restart=always`, `StartLimitIntervalSec=0`) so reboot, shutdown, `trck update`, and UART restart work without ssh. While paused, new positions are discarded at the UART/CSV entry. `last_fix_age` keeps growing. Resume does not flood the wire.
 
+The RF firmware (ESP32 TX GPIO 10 to Pi RX GPIO 15) sends the same commands as uppercase ASCII lines. `trck` accepts those next to `TCMD` on the same RX stream. Pi TX still writes binary `TRCK` frames and binary `TACK` replies.
+
+| Line | Pi action |
+| --- | --- |
+| `PING` | Same `TACK` as TCMD ping |
+| `STATUS` | Same `TACK` as TCMD status |
+| `PAUSE` | Same as TCMD pause |
+| `RESUME` | Same as TCMD resume |
+| `RESTART` | Same as TCMD restart |
+| `REBOOT` | Same as TCMD reboot, including `--allow-power-commands` |
+| `SHUTDOWN` | Same as TCMD shutdown, including `--allow-power-commands` |
+| `STATUS_ADSB` | Heartbeat every 3 s. Same `TACK` as `STATUS`. ESP treats a missing reply as trck down |
+
+Lines end in `\r\n` or `\n`. Empty lines, unknown lines, and lines longer than 32 bytes are ignored. `trck` may print a rate-limited stderr note.
+
 Change `kPiRxGpio` / `kPiTxGpio` in the sketch and in `esp32/pio/src/main.cpp` if those pins are not free on the board.
 
 ## What you should see

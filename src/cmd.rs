@@ -130,11 +130,46 @@ pub fn decide(cmd: u8, allow_power: bool, paused: bool, stats: CmdStats) -> (Cmd
     )
 }
 
-/// Byte-at-a-time reader. Resyncs on `TCMD`. Never panics on garbage.
+const LINE_MAX: usize = 32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Line {
+    Cmd(u8),
+    Noise,
+}
+
+fn parse_line(bytes: &[u8]) -> Option<Line> {
+    let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(match bytes {
+        b"PING" => Line::Cmd(Cmd::Ping as u8),
+        b"STATUS" | b"STATUS_ADSB" => Line::Cmd(Cmd::Status as u8),
+        b"REBOOT" => Line::Cmd(Cmd::Reboot as u8),
+        b"SHUTDOWN" => Line::Cmd(Cmd::Shutdown as u8),
+        b"PAUSE" => Line::Cmd(Cmd::Pause as u8),
+        b"RESUME" => Line::Cmd(Cmd::Resume as u8),
+        b"RESTART" => Line::Cmd(Cmd::Restart as u8),
+        _ => Line::Noise,
+    })
+}
+
+fn line_feed(line: Option<Line>) -> CmdFeed {
+    match line {
+        Some(Line::Cmd(cmd)) => CmdFeed::Cmd(cmd),
+        Some(Line::Noise) => CmdFeed::Noise,
+        None => CmdFeed::None,
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct CmdScan {
     buf: [u8; CMD_LEN],
     n: usize,
+    line: [u8; LINE_MAX],
+    line_n: usize,
+    overflow: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +177,7 @@ pub enum CmdFeed {
     None,
     Cmd(u8),
     BadCrc,
+    Noise,
 }
 
 impl CmdScan {
@@ -150,38 +186,78 @@ impl CmdScan {
     }
 
     pub fn feed(&mut self, byte: u8) -> CmdFeed {
+        if self.overflow {
+            return self.feed_line(byte);
+        }
         if self.n >= CMD_LEN {
-            self.drop_byte();
+            self.drop_to_line();
         }
         self.buf[self.n] = byte;
         self.n += 1;
         let mut bad = false;
+        let mut from_line = CmdFeed::None;
         loop {
             while self.n > 0 && !magic_prefix(&self.buf, self.n) {
-                self.drop_byte();
+                let feed = self.drop_to_line();
+                if feed != CmdFeed::None {
+                    from_line = feed;
+                }
             }
             if self.n < CMD_LEN {
-                return if bad { CmdFeed::BadCrc } else { CmdFeed::None };
+                return if bad { CmdFeed::BadCrc } else { from_line };
             }
             match unpack_cmd(&self.buf) {
                 Some(cmd) => {
                     self.n = 0;
+                    self.clear_line();
                     return CmdFeed::Cmd(cmd);
                 }
                 None => {
                     bad = true;
-                    self.drop_byte();
+                    let feed = self.drop_to_line();
+                    if feed != CmdFeed::None {
+                        from_line = feed;
+                    }
                 }
             }
         }
     }
 
-    fn drop_byte(&mut self) {
+    fn drop_to_line(&mut self) -> CmdFeed {
         if self.n == 0 {
-            return;
+            return CmdFeed::None;
         }
+        let byte = self.buf[0];
         self.buf.copy_within(1..self.n, 0);
         self.n -= 1;
+        self.feed_line(byte)
+    }
+
+    fn feed_line(&mut self, byte: u8) -> CmdFeed {
+        if self.overflow {
+            if byte == b'\n' {
+                self.clear_line();
+                return CmdFeed::Noise;
+            }
+            return CmdFeed::None;
+        }
+        if byte == b'\n' {
+            let feed = line_feed(parse_line(&self.line[..self.line_n]));
+            self.clear_line();
+            return feed;
+        }
+        if self.line_n >= LINE_MAX {
+            self.overflow = true;
+            return CmdFeed::None;
+        }
+        self.line[self.line_n] = byte;
+        self.line_n += 1;
+        CmdFeed::None
+    }
+
+    fn clear_line(&mut self) {
+        self.line_n = 0;
+        self.overflow = false;
     }
 }
 
@@ -349,5 +425,141 @@ mod tests {
         let (reply, after) = decide(Cmd::Restart as u8, false, false, STATS);
         assert!(!reply.paused);
         assert_eq!(after, AfterReply::Restart);
+    }
+
+    fn feeds(scan: &mut CmdScan, bytes: &[u8]) -> Vec<CmdFeed> {
+        bytes
+            .iter()
+            .copied()
+            .map(|byte| scan.feed(byte))
+            .filter(|feed| *feed != CmdFeed::None)
+            .collect()
+    }
+
+    #[test]
+    fn parse_line_maps_ascii_commands() {
+        assert_eq!(parse_line(b"PING"), Some(Line::Cmd(Cmd::Ping as u8)));
+        assert_eq!(parse_line(b"STATUS"), Some(Line::Cmd(Cmd::Status as u8)));
+        assert_eq!(parse_line(b"PAUSE\r"), Some(Line::Cmd(Cmd::Pause as u8)));
+        assert_eq!(parse_line(b"RESUME"), Some(Line::Cmd(Cmd::Resume as u8)));
+        assert_eq!(parse_line(b"RESTART"), Some(Line::Cmd(Cmd::Restart as u8)));
+        assert_eq!(parse_line(b"REBOOT"), Some(Line::Cmd(Cmd::Reboot as u8)));
+        assert_eq!(
+            parse_line(b"SHUTDOWN"),
+            Some(Line::Cmd(Cmd::Shutdown as u8))
+        );
+        assert_eq!(
+            parse_line(b"STATUS_ADSB"),
+            Some(Line::Cmd(Cmd::Status as u8))
+        );
+        assert_eq!(parse_line(b""), None);
+        assert_eq!(parse_line(b"ping"), Some(Line::Noise));
+        assert_eq!(parse_line(b"NOPE"), Some(Line::Noise));
+    }
+
+    #[test]
+    fn ascii_lines_and_crlf() {
+        let mut scan = CmdScan::new();
+        assert_eq!(
+            feeds(&mut scan, b"PAUSE\r\n"),
+            [CmdFeed::Cmd(Cmd::Pause as u8)]
+        );
+        assert_eq!(
+            feeds(&mut scan, b"STATUS_ADSB\r\n"),
+            [CmdFeed::Cmd(Cmd::Status as u8)]
+        );
+        assert_eq!(
+            feeds(&mut scan, b"RESUME\n"),
+            [CmdFeed::Cmd(Cmd::Resume as u8)]
+        );
+    }
+
+    #[test]
+    fn ascii_split_across_feeds() {
+        let mut scan = CmdScan::new();
+        assert_eq!(feeds(&mut scan, b"PI"), []);
+        assert_eq!(feeds(&mut scan, b"NG\n"), [CmdFeed::Cmd(Cmd::Ping as u8)]);
+        assert_eq!(feeds(&mut scan, b"RESTAR"), []);
+        assert_eq!(feeds(&mut scan, b"T\n"), [CmdFeed::Cmd(Cmd::Restart as u8)]);
+    }
+
+    #[test]
+    fn ascii_words_with_t_byte_at_a_time() {
+        const WORDS: &[(&[u8], CmdFeed)] = &[
+            (b"PING", CmdFeed::Cmd(Cmd::Ping as u8)),
+            (b"STATUS", CmdFeed::Cmd(Cmd::Status as u8)),
+            (b"REBOOT", CmdFeed::Cmd(Cmd::Reboot as u8)),
+            (b"SHUTDOWN", CmdFeed::Cmd(Cmd::Shutdown as u8)),
+            (b"PAUSE", CmdFeed::Cmd(Cmd::Pause as u8)),
+            (b"RESUME", CmdFeed::Cmd(Cmd::Resume as u8)),
+            (b"RESTART", CmdFeed::Cmd(Cmd::Restart as u8)),
+            (b"STATUS_ADSB", CmdFeed::Cmd(Cmd::Status as u8)),
+        ];
+        for &(word, expect) in WORDS {
+            for ending in [b"\r\n".as_slice(), b"\n".as_slice()] {
+                let mut scan = CmdScan::new();
+                let mut bytes = word.to_vec();
+                bytes.extend_from_slice(ending);
+                assert_eq!(feeds(&mut scan, &bytes), [expect], "{word:?} {ending:?}");
+            }
+        }
+        let mut scan = CmdScan::new();
+        assert_eq!(
+            feeds(&mut scan, b"STATUS_ADSB\nSTATUS\n"),
+            [
+                CmdFeed::Cmd(Cmd::Status as u8),
+                CmdFeed::Cmd(Cmd::Status as u8)
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_tcmd_and_ascii() {
+        let mut scan = CmdScan::new();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&pack_cmd(Cmd::Ping));
+        bytes.extend_from_slice(b"PAUSE\r\n");
+        bytes.extend_from_slice(&pack_cmd(Cmd::Status));
+        bytes.extend_from_slice(b"STATUS_ADSB\n");
+        bytes.extend_from_slice(b"RESUME\n");
+        bytes.extend_from_slice(&pack_cmd(Cmd::Pause));
+        assert_eq!(
+            feeds(&mut scan, &bytes),
+            [
+                CmdFeed::Cmd(Cmd::Ping as u8),
+                CmdFeed::Cmd(Cmd::Pause as u8),
+                CmdFeed::Cmd(Cmd::Status as u8),
+                CmdFeed::Cmd(Cmd::Status as u8),
+                CmdFeed::Cmd(Cmd::Resume as u8),
+                CmdFeed::Cmd(Cmd::Pause as u8),
+            ]
+        );
+    }
+
+    #[test]
+    fn garbage_between_frames_and_lines() {
+        let mut scan = CmdScan::new();
+        let mut bytes = vec![0x00, 0xFF];
+        bytes.extend_from_slice(&pack_cmd(Cmd::Ping));
+        bytes.extend_from_slice(b"??\nPING\n");
+        assert_eq!(
+            feeds(&mut scan, &bytes),
+            [
+                CmdFeed::Cmd(Cmd::Ping as u8),
+                CmdFeed::Noise,
+                CmdFeed::Cmd(Cmd::Ping as u8),
+            ]
+        );
+    }
+
+    #[test]
+    fn overlong_line_is_noise_then_recovers() {
+        let mut scan = CmdScan::new();
+        let mut bytes = vec![b'X'; LINE_MAX + 1];
+        bytes.extend_from_slice(b"\nPING\n");
+        assert_eq!(
+            feeds(&mut scan, &bytes),
+            [CmdFeed::Noise, CmdFeed::Cmd(Cmd::Ping as u8)]
+        );
     }
 }

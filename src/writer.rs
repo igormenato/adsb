@@ -441,6 +441,7 @@ fn read_cmds(mut reader: TTYPort, shared: Arc<Shared>, stop: Arc<Stop>, path: St
     let mut scan = CmdScan::new();
     let mut tmp = [0u8; 64];
     let mut wait = UART_RETRY_MIN;
+    let mut noted = None::<Instant>;
     while !stop.is_set() {
         let lost = match sys::read(sys::as_fd(&reader), &mut tmp) {
             Ok(0) => Some("uart hangup"),
@@ -449,6 +450,14 @@ fn read_cmds(mut reader: TTYPort, shared: Arc<Shared>, stop: Arc<Stop>, path: St
                     match scan.feed(byte) {
                         CmdFeed::None => {}
                         CmdFeed::BadCrc => eprintln!("cmd crc mismatch"),
+                        CmdFeed::Noise => {
+                            let now = Instant::now();
+                            if noted.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
+                            {
+                                eprintln!("uart cmd ignored");
+                                noted = Some(now);
+                            }
+                        }
                         CmdFeed::Cmd(cmd) => shared.handle_cmd(cmd),
                     }
                 }
@@ -475,6 +484,7 @@ fn read_cmds(mut reader: TTYPort, shared: Arc<Shared>, stop: Arc<Stop>, path: St
                 Ok(port) => {
                     eprintln!("uart reopened");
                     reader = port;
+                    scan = CmdScan::new();
                     wait = UART_RETRY_MIN;
                     break;
                 }
