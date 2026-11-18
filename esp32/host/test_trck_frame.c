@@ -187,6 +187,10 @@ int main(int argc, char **argv) {
     assert(ack.cmd == TCMD_STATUS);
     assert(ack.status == TCMD_OK);
     assert(ack.paused == 1);
+    ack_raw[5] = TCMD_FAILED;
+    trck_wr_u16(ack_raw + TACK_BODY_LEN, trck_crc16(ack_raw, TACK_BODY_LEN));
+    assert(trck_unpack_ack(ack_raw, sizeof ack_raw, &ack));
+    assert(ack.status == TCMD_FAILED);
     ack_raw[18] = 2;
     trck_wr_u16(ack_raw + TACK_BODY_LEN, trck_crc16(ack_raw, TACK_BODY_LEN));
     assert(!trck_unpack_ack(ack_raw, sizeof ack_raw, &ack));

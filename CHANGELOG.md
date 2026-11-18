@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - UART RX accepts uppercase ASCII command lines (`PING`, `STATUS`, `PAUSE`, `RESUME`, `RESTART`, `REBOOT`, `SHUTDOWN`) next to `TCMD`. `STATUS_ADSB` replies with a STATUS `TACK`.
 - `trck install-service` installs a root systemd unit (`Restart=always`, `StartLimitIntervalSec=0`, `--allow-power-commands`). Field flags go in `systemctl edit trck`.
 
+### Fixed
+
+- ESP32 `trck_unpack_ack` accepts TACK status `Failed` (3).
+
 ### Changed
 
 - UART `restart` and `trck update` exit 1 after success so systemd starts the process again.
