@@ -9,8 +9,6 @@
 #define TRCK_ALT_UNKNOWN INT32_MIN
 #define TRCK_SPEED_UNKNOWN ((uint16_t)0xFFFF)
 #define TRCK_TRACK_UNKNOWN ((uint16_t)0xFFFF)
-#define TCMD_LEN 7
-#define TCMD_BODY_LEN 5
 #define TACK_LEN 21
 #define TACK_BODY_LEN 19
 #define TCMD_PING 0
@@ -25,6 +23,8 @@
 #define TCMD_UNKNOWN 2
 #define TCMD_FAILED 3
 #define TCMD_AGE_NONE 0xFFFFFFFFu
+#define TRCK_HB_LINE "STATUS_ADSB\r\n"
+#define TRCK_HB_DOWN_MS 10000u
 
 typedef struct {
     uint32_t icao;
@@ -163,24 +163,40 @@ static inline bool trck_scan_feed(TrckScan *scan, uint8_t byte, TrckFix *out) {
     }
 }
 
-static inline void trck_pack_cmd(uint8_t cmd, uint8_t out[TCMD_LEN]) {
-    memcpy(out, "TCMD", 4);
-    out[4] = cmd;
-    trck_wr_u16(out + TCMD_BODY_LEN, trck_crc16(out, TCMD_BODY_LEN));
+static inline const char *trck_cmd_word(uint8_t cmd) {
+    switch (cmd) {
+    case TCMD_PING:
+        return "PING";
+    case TCMD_STATUS:
+        return "STATUS";
+    case TCMD_REBOOT:
+        return "REBOOT";
+    case TCMD_SHUTDOWN:
+        return "SHUTDOWN";
+    case TCMD_PAUSE:
+        return "PAUSE";
+    case TCMD_RESUME:
+        return "RESUME";
+    case TCMD_RESTART:
+        return "RESTART";
+    default:
+        return NULL;
+    }
 }
 
-static inline bool trck_unpack_cmd(const uint8_t *bytes, size_t len, uint8_t *cmd) {
-    if (bytes == NULL || cmd == NULL || len != (size_t)TCMD_LEN) {
-        return false;
+static inline size_t trck_pack_cmd_line(uint8_t cmd, char *out, size_t cap) {
+    const char *word = trck_cmd_word(cmd);
+    if (word == NULL || out == NULL) {
+        return 0;
     }
-    if (memcmp(bytes, "TCMD", 4) != 0) {
-        return false;
+    size_t n = strlen(word);
+    if (cap < n + 2) {
+        return 0;
     }
-    if (trck_crc16(bytes, TCMD_BODY_LEN) != trck_rd_u16(bytes + TCMD_BODY_LEN)) {
-        return false;
-    }
-    *cmd = bytes[4];
-    return true;
+    memcpy(out, word, n);
+    out[n] = '\r';
+    out[n + 1] = '\n';
+    return n + 2;
 }
 
 static inline bool trck_unpack_ack(const uint8_t *bytes, size_t len, TrckAck *out) {
@@ -206,6 +222,54 @@ static inline bool trck_unpack_ack(const uint8_t *bytes, size_t len, TrckAck *ou
     out->last_fix_age_s = trck_rd_u32(bytes + 14);
     out->paused = bytes[18];
     return true;
+}
+
+enum {
+    TRCK_HB_SILENT = 0,
+    TRCK_HB_PRINT = 1,
+    TRCK_HB_DOWN = 2,
+};
+
+typedef struct {
+    uint8_t have;
+    uint8_t paused;
+    uint8_t down;
+    uint32_t last_ms;
+} TrckHb;
+
+static inline bool trck_ack_matches(uint8_t pending, uint8_t ack_cmd) {
+    return pending == ack_cmd;
+}
+
+static inline void trck_hb_init(TrckHb *h) {
+    h->have = 0;
+    h->paused = 0;
+    h->down = 0;
+    h->last_ms = 0;
+}
+
+static inline void trck_hb_touch(TrckHb *h, uint32_t now_ms) {
+    h->have = 1;
+    h->down = 0;
+    h->last_ms = now_ms;
+}
+
+static inline int trck_hb_on_status(TrckHb *h, uint8_t paused, uint32_t now_ms) {
+    int out = (!h->have || h->paused != paused) ? TRCK_HB_PRINT : TRCK_HB_SILENT;
+    h->paused = paused;
+    trck_hb_touch(h, now_ms);
+    return out;
+}
+
+static inline int trck_hb_poll(TrckHb *h, uint32_t now_ms) {
+    if (!h->have || h->down) {
+        return TRCK_HB_SILENT;
+    }
+    if ((uint32_t)(now_ms - h->last_ms) < TRCK_HB_DOWN_MS) {
+        return TRCK_HB_SILENT;
+    }
+    h->down = 1;
+    return TRCK_HB_DOWN;
 }
 
 static inline void trck_ack_scan_init(TrckAckScan *scan) {
@@ -258,6 +322,7 @@ static const int kPiRxGpio = 11;
 static const int kPiTxGpio = 10;
 static const uint32_t kBaud = 115200;
 static const uint32_t kAckWaitMs = 1000;
+static const uint32_t kHbMs = 3000;
 static const uint32_t kRxBuf = 2048;
 static const uint16_t kRxStack = 2048;
 static const UBaseType_t kRxCore = 0;
@@ -285,6 +350,8 @@ static std::atomic<unsigned long> gFrames{0};
 static std::atomic<unsigned long> gCrcFail{0};
 static std::atomic<unsigned long> gResync{0};
 static std::atomic<unsigned long> gQDrop{0};
+static uint32_t gHbAt;
+static TrckHb gWatch;
 
 static void print_fix(const TrckFix *fix) {
     int n = TRCK_CALLSIGN_LEN;
@@ -343,15 +410,50 @@ static void print_stats(void) {
 }
 
 static void write_cmd(uint8_t cmd) {
-    uint8_t raw[TCMD_LEN];
-    trck_pack_cmd(cmd, raw);
-    Serial1.write(raw, TCMD_LEN);
+    char raw[16];
+    size_t n = trck_pack_cmd_line(cmd, raw, sizeof raw);
+    if (n == 0) {
+        return;
+    }
+    Serial1.write((const uint8_t *)raw, n);
+}
+
+static void maybe_hb(void) {
+    uint32_t now = millis();
+    if ((uint32_t)(now - gHbAt) < kHbMs) {
+        return;
+    }
+    Serial1.print(TRCK_HB_LINE);
+    gHbAt = now;
+}
+
+static void maybe_down(void) {
+    if (trck_hb_poll(&gWatch, millis()) == TRCK_HB_DOWN) {
+        Serial.println("trck down");
+    }
+}
+
+static void on_ack(const TrckAck *ack, bool user) {
+    uint32_t now = millis();
+    if (ack->cmd == TCMD_STATUS) {
+        int act = trck_hb_on_status(&gWatch, ack->paused, now);
+        if (user || act == TRCK_HB_PRINT) {
+            print_ack(ack);
+        }
+        return;
+    }
+    trck_hb_touch(&gWatch, now);
+    if (user) {
+        print_ack(ack);
+    }
 }
 
 static bool wait_ack(uint8_t cmd, uint32_t ms) {
     uint32_t start = millis();
     UartEvt ev;
     while ((uint32_t)(millis() - start) < ms) {
+        maybe_hb();
+        maybe_down();
         uint32_t left = ms - (uint32_t)(millis() - start);
         TickType_t ticks = pdMS_TO_TICKS(left);
         if (ticks == 0) {
@@ -360,8 +462,13 @@ static bool wait_ack(uint8_t cmd, uint32_t ms) {
         if (xQueueReceive(gQ, &ev, ticks) != pdTRUE) {
             continue;
         }
-        print_evt(&ev);
-        if (ev.kind == kEvtAck && ev.ack.cmd == cmd) {
+        if (ev.kind != kEvtAck) {
+            print_evt(&ev);
+            continue;
+        }
+        bool match = trck_ack_matches(cmd, ev.ack.cmd);
+        on_ack(&ev.ack, match);
+        if (match) {
             return true;
         }
     }
@@ -459,16 +566,24 @@ void setup() {
     gQ = xQueueCreate(kQLen, sizeof(UartEvt));
     xTaskCreatePinnedToCore(uart_rx_task, "uart1", kRxStack, NULL, 2, NULL, kRxCore);
 
-    Serial.printf("UART 115200 8N1 RX GPIO %d TX GPIO %d. TRCK in, TCMD out.\n", kPiRxGpio,
+    gHbAt = millis();
+    trck_hb_init(&gWatch);
+    Serial.printf("UART 115200 8N1 RX GPIO %d TX GPIO %d. TRCK in, ASCII cmd out.\n", kPiRxGpio,
                   kPiTxGpio);
     Serial.println("Wire Pi GPIO 14 (pin 8) to RX, Pi GPIO 15 (pin 10) to TX, 3.3 V, common ground.");
     Serial.println("Type ping, status, reboot, shutdown, pause, resume, restart, or stats.");
 }
 
 void loop() {
+    maybe_hb();
+    maybe_down();
     UartEvt ev;
     if (xQueueReceive(gQ, &ev, pdMS_TO_TICKS(10)) == pdTRUE) {
-        print_evt(&ev);
+        if (ev.kind == kEvtAck) {
+            on_ack(&ev.ack, false);
+        } else {
+            print_evt(&ev);
+        }
     }
     while (Serial.available() > 0) {
         char c = (char)Serial.read();

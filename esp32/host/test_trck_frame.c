@@ -144,36 +144,25 @@ int main(int argc, char **argv) {
 
     free(raw);
 
-    uint8_t ping[TCMD_LEN];
-    trck_pack_cmd(TCMD_PING, ping);
-    assert(memcmp(ping, "TCMD", 4) == 0);
-    assert(ping[4] == TCMD_PING);
-    uint8_t cmd = 0xFF;
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_PING);
-    uint8_t status[TCMD_LEN];
-    trck_pack_cmd(TCMD_STATUS, status);
-    assert(trck_unpack_cmd(status, sizeof status, &cmd));
-    assert(cmd == TCMD_STATUS);
-    trck_pack_cmd(TCMD_REBOOT, ping);
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_REBOOT);
-    trck_pack_cmd(TCMD_SHUTDOWN, ping);
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_SHUTDOWN);
-    trck_pack_cmd(TCMD_PAUSE, ping);
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_PAUSE);
-    trck_pack_cmd(TCMD_RESUME, ping);
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_RESUME);
-    trck_pack_cmd(TCMD_RESTART, ping);
-    assert(trck_unpack_cmd(ping, sizeof ping, &cmd));
-    assert(cmd == TCMD_RESTART);
-    uint8_t bad_cmd[TCMD_LEN];
-    trck_pack_cmd(TCMD_PING, bad_cmd);
-    bad_cmd[TCMD_LEN - 1] ^= 0x5A;
-    assert(!trck_unpack_cmd(bad_cmd, sizeof bad_cmd, &cmd));
+    static const struct {
+        uint8_t cmd;
+        const char *line;
+    } kLines[] = {
+        {TCMD_PING, "PING\r\n"},       {TCMD_STATUS, "STATUS\r\n"}, {TCMD_REBOOT, "REBOOT\r\n"},
+        {TCMD_SHUTDOWN, "SHUTDOWN\r\n"}, {TCMD_PAUSE, "PAUSE\r\n"},   {TCMD_RESUME, "RESUME\r\n"},
+        {TCMD_RESTART, "RESTART\r\n"},
+    };
+    for (size_t i = 0; i < sizeof kLines / sizeof kLines[0]; i++) {
+        char line[16];
+        size_t n = trck_pack_cmd_line(kLines[i].cmd, line, sizeof line);
+        assert(n == strlen(kLines[i].line));
+        assert(memcmp(line, kLines[i].line, n) == 0);
+    }
+    char too_small[4];
+    assert(trck_pack_cmd_line(TCMD_PING, too_small, sizeof too_small) == 0);
+    assert(trck_pack_cmd_line(0xFF, too_small, sizeof too_small) == 0);
+    assert(trck_cmd_word(0xFF) == NULL);
+    assert(strcmp(TRCK_HB_LINE, "STATUS_ADSB\r\n") == 0);
 
     uint8_t ack_raw[TACK_LEN];
     memset(ack_raw, 0, sizeof ack_raw);
@@ -187,6 +176,27 @@ int main(int argc, char **argv) {
     assert(ack.cmd == TCMD_STATUS);
     assert(ack.status == TCMD_OK);
     assert(ack.paused == 1);
+    assert(trck_ack_matches(TCMD_STATUS, ack.cmd));
+    assert(!trck_ack_matches(TCMD_PAUSE, ack.cmd));
+    TrckHb watch;
+    trck_hb_init(&watch);
+    assert(trck_hb_on_status(&watch, ack.paused, 0) == TRCK_HB_PRINT);
+    assert(trck_hb_on_status(&watch, ack.paused, 3000) == TRCK_HB_SILENT);
+    uint8_t pause_raw[TACK_LEN];
+    memset(pause_raw, 0, sizeof pause_raw);
+    memcpy(pause_raw, "TACK", 4);
+    pause_raw[4] = TCMD_PAUSE;
+    pause_raw[5] = TCMD_OK;
+    pause_raw[18] = 1;
+    trck_wr_u16(pause_raw + TACK_BODY_LEN, trck_crc16(pause_raw, TACK_BODY_LEN));
+    TrckAck pause;
+    assert(trck_unpack_ack(pause_raw, sizeof pause_raw, &pause));
+    assert(trck_ack_matches(TCMD_PAUSE, pause.cmd));
+    assert(!trck_ack_matches(TCMD_PAUSE, ack.cmd));
+    trck_hb_touch(&watch, 3000);
+    assert(trck_hb_poll(&watch, 12999) == TRCK_HB_SILENT);
+    assert(trck_hb_poll(&watch, 13000) == TRCK_HB_DOWN);
+    assert(trck_hb_poll(&watch, 14000) == TRCK_HB_SILENT);
     ack_raw[5] = TCMD_FAILED;
     trck_wr_u16(ack_raw + TACK_BODY_LEN, trck_crc16(ack_raw, TACK_BODY_LEN));
     assert(trck_unpack_ack(ack_raw, sizeof ack_raw, &ack));

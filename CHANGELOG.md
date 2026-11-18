@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ESP32 UART to the Pi sends uppercase ASCII command lines plus a `STATUS_ADSB` heartbeat every 3 s, not binary `TCMD`. Heartbeat STATUS TACKs print only on pause change. Missing TACK for 10 s prints `trck down` once.
 - UART `restart` and `trck update` exit 1 after success so systemd starts the process again.
 
 ## [0.3.5](https://github.com/igormenato/adsb/compare/v0.3.4...v0.3.5) - 2026-11-17
