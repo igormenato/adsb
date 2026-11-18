@@ -85,7 +85,6 @@ impl Health {
 pub struct CmdReply {
     pub cmd: u8,
     pub status: CmdStatus,
-    pub paused: bool,
     pub health: Health,
 }
 
@@ -150,7 +149,6 @@ pub fn decide(
         CmdReply {
             cmd,
             status,
-            paused,
             health: Health::from_state(paused, last_fix, now),
         },
         after,
@@ -323,7 +321,6 @@ fn unpack_reply(bytes: &[u8]) -> Option<CmdReply> {
     Some(CmdReply {
         cmd: bytes[4],
         status,
-        paused: health == Health::Paused,
         health,
     })
 }
@@ -353,14 +350,12 @@ mod tests {
         let reply = CmdReply {
             cmd: Cmd::Status as u8,
             status: CmdStatus::Ok,
-            paused: true,
             health: Health::Paused,
         };
         let raw = pack_reply(&reply);
         assert_eq!(unpack_reply(&raw), Some(reply));
         let fail = CmdReply {
             status: CmdStatus::Failed,
-            paused: false,
             health: Health::NoFix,
             ..reply
         };
@@ -403,7 +398,7 @@ mod tests {
         assert_eq!(after, AfterReply::None);
         let (reply, after) = decide_now(Cmd::Shutdown as u8, false, true);
         assert_eq!(reply.status, CmdStatus::Disabled);
-        assert!(reply.paused);
+        assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
     }
 
@@ -421,31 +416,28 @@ mod tests {
     fn pause_resume_restart() {
         let (reply, after) = decide_now(Cmd::Pause as u8, false, false);
         assert_eq!(reply.status, CmdStatus::Ok);
-        assert!(reply.paused);
         assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
 
         let (reply, after) = decide_now(Cmd::Pause as u8, false, true);
-        assert!(reply.paused);
+        assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
 
         let (reply, after) = decide_now(Cmd::Resume as u8, false, true);
         assert_eq!(reply.status, CmdStatus::Ok);
-        assert!(!reply.paused);
         assert_eq!(reply.health, Health::NoFix);
         assert_eq!(after, AfterReply::None);
 
         let (reply, after) = decide_now(Cmd::Status as u8, false, true);
-        assert!(reply.paused);
         assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
 
         let (reply, after) = decide_now(Cmd::Restart as u8, false, true);
         assert_eq!(reply.status, CmdStatus::Ok);
-        assert!(!reply.paused);
+        assert_eq!(reply.health, Health::NoFix);
         assert_eq!(after, AfterReply::Restart);
         let (reply, after) = decide_now(Cmd::Restart as u8, false, false);
-        assert!(!reply.paused);
+        assert_eq!(reply.health, Health::NoFix);
         assert_eq!(after, AfterReply::Restart);
     }
 

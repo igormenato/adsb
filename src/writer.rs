@@ -15,8 +15,8 @@ use nix::poll::{PollFd, PollFlags};
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits, TTYPort};
 
 use trck::{
-    ACK_LEN, AfterReply, CmdFeed, CmdScan, CmdStatus, EmergencyKind, FRAME_LEN, Fix, PowerOp,
-    Queue, Table, check_positions, decide, pack_reply,
+    ACK_LEN, AfterReply, CmdFeed, CmdScan, CmdStatus, EmergencyKind, FRAME_LEN, Fix, Health,
+    PowerOp, Queue, Table, check_positions, decide, pack_reply,
 };
 
 use super::sys;
@@ -142,7 +142,7 @@ impl Shared {
                 }
             }
         }
-        self.set_paused(reply.paused);
+        self.set_paused(reply.health == Health::Paused);
         let _ = self.queue_reply(pack_reply(&reply), after);
     }
 
@@ -697,7 +697,7 @@ pub(crate) fn write_exit(err: ChunkError) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trck::{Cmd, FIX_STALE_AFTER, Health};
+    use trck::{Cmd, FIX_STALE_AFTER};
 
     fn ack_status(bytes: &[u8; ACK_LEN]) -> CmdStatus {
         match bytes[5] {
@@ -852,7 +852,7 @@ mod tests {
         let now = Instant::now();
         let (reply, after) = decide(Cmd::Restart as u8, false, true, None, now);
         assert_eq!(after, AfterReply::Restart);
-        assert!(!reply.paused);
+        assert_eq!(reply.health, Health::NoFix);
         assert!(writer.shared.queue_reply(pack_reply(&reply), after));
         let err = writer.write_some().expect_err("restart");
         assert!(matches!(err, ChunkError::Restart));
@@ -919,7 +919,6 @@ mod tests {
             writer.shared.last_fix(),
             now,
         );
-        assert!(reply.paused);
         assert_eq!(reply.health, Health::Paused);
         assert_eq!(after, AfterReply::None);
         writer.shared.queue_reply(pack_reply(&reply), after);
