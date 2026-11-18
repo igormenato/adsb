@@ -162,8 +162,6 @@ fn line_feed(line: Line) -> CmdFeed {
     }
 }
 
-/// Byte-at-a-time reader. Resyncs on `TCMD`. ASCII lines share the stream.
-/// Never panics on garbage.
 #[derive(Debug, Default)]
 pub struct CmdScan {
     buf: [u8; CMD_LEN],
@@ -471,6 +469,34 @@ mod tests {
         let mut scan = CmdScan::new();
         assert_eq!(feeds(&mut scan, b"PI"), []);
         assert_eq!(feeds(&mut scan, b"NG\n"), [CmdFeed::Cmd(Cmd::Ping as u8)]);
+        assert_eq!(feeds(&mut scan, b"RESTAR"), []);
+        assert_eq!(feeds(&mut scan, b"T\n"), [CmdFeed::Cmd(Cmd::Restart as u8)]);
+    }
+
+    #[test]
+    fn ascii_words_with_t_byte_at_a_time() {
+        const WORDS: &[(&[u8], CmdFeed)] = &[
+            (b"PING", CmdFeed::Cmd(Cmd::Ping as u8)),
+            (b"STATUS", CmdFeed::Cmd(Cmd::Status as u8)),
+            (b"REBOOT", CmdFeed::Cmd(Cmd::Reboot as u8)),
+            (b"SHUTDOWN", CmdFeed::Cmd(Cmd::Shutdown as u8)),
+            (b"PAUSE", CmdFeed::Cmd(Cmd::Pause as u8)),
+            (b"RESUME", CmdFeed::Cmd(Cmd::Resume as u8)),
+            (b"RESTART", CmdFeed::Cmd(Cmd::Restart as u8)),
+        ];
+        for &(word, expect) in WORDS {
+            for ending in [b"\r\n".as_slice(), b"\n".as_slice()] {
+                let mut scan = CmdScan::new();
+                let mut bytes = word.to_vec();
+                bytes.extend_from_slice(ending);
+                assert_eq!(feeds(&mut scan, &bytes), [expect], "{word:?} {ending:?}");
+            }
+        }
+        let mut scan = CmdScan::new();
+        assert_eq!(
+            feeds(&mut scan, b"STATUS_ADSB\nSTATUS\n"),
+            [CmdFeed::Cmd(Cmd::Status as u8)]
+        );
     }
 
     #[test]
