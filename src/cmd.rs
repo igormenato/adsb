@@ -50,7 +50,6 @@ pub enum CmdStatus {
     Failed = 3,
 }
 
-/// Run health on every TACK. Paused wins over a stale or missing fix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Health {
