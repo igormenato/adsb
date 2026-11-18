@@ -23,6 +23,7 @@
 #define TCMD_OK 0
 #define TCMD_DISABLED 1
 #define TCMD_UNKNOWN 2
+#define TCMD_FAILED 3
 #define TCMD_AGE_NONE 0xFFFFFFFFu
 
 typedef struct {
@@ -267,7 +268,7 @@ static const char *kEmergency[] = {
 };
 
 static const char *kCmdName[] = {"ping", "status", "reboot", "shutdown", "pause", "resume", "restart"};
-static const char *kCmdStatus[] = {"ok", "disabled", "unknown"};
+static const char *kCmdStatus[] = {"ok", "disabled", "unknown", "failed"};
 
 enum { kEvtFix = 0, kEvtAck = 1 };
 
@@ -316,7 +317,7 @@ static void print_fix(const TrckFix *fix) {
 
 static void print_ack(const TrckAck *ack) {
     const char *cmd = ack->cmd <= TCMD_RESTART ? kCmdName[ack->cmd] : "unknown";
-    const char *status = ack->status <= TCMD_UNKNOWN ? kCmdStatus[ack->status] : "?";
+    const char *status = ack->status <= TCMD_FAILED ? kCmdStatus[ack->status] : "?";
     const char *state = ack->paused ? "paused" : "running";
     Serial.printf("ack cmd=%s status=%s state=%s uptime=%lu frames=%lu last_fix_age=", cmd, status,
                   state, (unsigned long)ack->uptime_s, (unsigned long)ack->frames_sent);

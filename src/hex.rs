@@ -241,19 +241,31 @@ fn pump_hex<R: Read + AsRawFd>(
         if stop.is_set() {
             return Pump::Stopped;
         }
-        let (socket_revents, uart_ready) = {
+        writer.try_reopen_uart();
+        let (socket_revents, uart_ready, uart_dead) = {
             let reader = sys::as_fd(&lines.reader);
-            let uart = writer.has_pending().then(|| writer.uart_fd()).flatten();
+            let uart = writer.uart_fd();
             let mut fds_two;
             let mut fds_one;
+            let uart_flags = if writer.has_pending() {
+                PollFlags::POLLOUT | PollFlags::POLLHUP | PollFlags::POLLERR
+            } else {
+                PollFlags::POLLHUP | PollFlags::POLLERR
+            };
             let fds: &mut [PollFd<'_>] = if let Some(uart) = uart {
                 fds_two = [
-                    PollFd::new(reader, PollFlags::POLLIN),
-                    PollFd::new(uart, PollFlags::POLLOUT),
+                    PollFd::new(
+                        reader,
+                        PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+                    ),
+                    PollFd::new(uart, uart_flags),
                 ];
                 &mut fds_two
             } else {
-                fds_one = [PollFd::new(reader, PollFlags::POLLIN)];
+                fds_one = [PollFd::new(
+                    reader,
+                    PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+                )];
                 &mut fds_one
             };
             if let Err(err) = sys::poll(fds, POLL_SLICE) {
@@ -261,13 +273,18 @@ fn pump_hex<R: Read + AsRawFd>(
                 return end_socket(writer);
             }
             let socket_revents = fds[0].revents().unwrap_or_else(PollFlags::empty);
-            let uart_ready = fds.get(1).is_some_and(|fd| {
-                fd.revents()
-                    .unwrap_or_else(PollFlags::empty)
-                    .intersects(PollFlags::POLLOUT | PollFlags::POLLERR | PollFlags::POLLHUP)
-            });
-            (socket_revents, uart_ready)
+            let uart_revents = fds
+                .get(1)
+                .map(|fd| fd.revents().unwrap_or_else(PollFlags::empty))
+                .unwrap_or_else(PollFlags::empty);
+            let uart_dead = uart_revents
+                .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL);
+            let uart_ready = uart_revents.intersects(PollFlags::POLLOUT);
+            (socket_revents, uart_ready, uart_dead)
         };
+        if uart_dead {
+            writer.recover_uart("uart hangup");
+        }
         if stop.is_set() {
             return Pump::Stopped;
         }
@@ -298,10 +315,10 @@ fn pump_hex<R: Read + AsRawFd>(
             && (fresh || uart_ready || writer.uart_fd().is_none())
             && let Err(err) = writer.write_some()
         {
-            return match err {
-                ChunkError::Stopped => Pump::Stopped,
-                ChunkError::Failed(err) => Pump::Uart(err),
-            };
+            match err {
+                ChunkError::Stopped => return Pump::Stopped,
+                ChunkError::Failed(err) => writer.recover_uart(&format!("uart write: {err}")),
+            }
         }
     }
 }

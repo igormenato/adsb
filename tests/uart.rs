@@ -1,11 +1,12 @@
 mod common;
 use common::*;
 
-use std::io::Write;
-use std::time::Duration;
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
+use nix::unistd::read;
 use trck::modes::{EVEN, ODD, STATUS, hex14};
-use trck::{EmergencyKind, Fix};
+use trck::{ACK_LEN, Cmd, EmergencyKind, Fix, pack_cmd};
 
 #[test]
 fn avr_hex_writes_a_pty_frame() {
@@ -155,4 +156,86 @@ fn csv_is_written_while_the_tty_is_full() {
     };
     assert_csv_row(&rows[0], &expect, before, after);
     assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+fn wait_tacks(master: &mut serialport::TTYPort, n: usize, timeout: Duration) -> Vec<[u8; ACK_LEN]> {
+    set_nonblocking(master);
+    let mut raw = Vec::new();
+    let started = Instant::now();
+    loop {
+        let mut tmp = [0u8; 4096];
+        match read(as_fd(master), &mut tmp) {
+            Ok(0) => {}
+            Ok(count) => {
+                raw.extend_from_slice(&tmp[..count]);
+                let tacks: Vec<[u8; ACK_LEN]> = raw
+                    .windows(ACK_LEN)
+                    .filter(|w| w.starts_with(b"TACK"))
+                    .filter_map(|w| w.try_into().ok())
+                    .collect();
+                if tacks.len() >= n {
+                    return tacks;
+                }
+            }
+            Err(err) => {
+                let err = io::Error::from(err);
+                assert!(
+                    err.kind() == io::ErrorKind::WouldBlock
+                        || err.kind() == io::ErrorKind::Interrupted,
+                    "{err}"
+                );
+            }
+        }
+        if started.elapsed() > timeout {
+            panic!("got {} bytes waiting for {n} TACK", raw.len());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn pause_then_status_both_ack() {
+    let (listener, port) = listen();
+    let mut pty = Pty::open();
+    let mut sender = spawn_uart(port, &pty.path());
+    let (_sock, _) = listener.accept().expect("accept");
+    pty.master.write_all(&pack_cmd(Cmd::Pause)).expect("pause");
+    pty.master
+        .write_all(&pack_cmd(Cmd::Status))
+        .expect("status");
+    pty.master.flush().expect("flush");
+    let tacks = wait_tacks(&mut pty.master, 2, Duration::from_secs(3));
+    assert_eq!(tacks[0][4], Cmd::Pause as u8);
+    assert_eq!(tacks[0][5], 0);
+    assert_eq!(tacks[0][18], 1);
+    assert_eq!(tacks[1][4], Cmd::Status as u8);
+    assert_eq!(tacks[1][5], 0);
+    assert_eq!(tacks[1][18], 1);
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn uart_hangup_reopens_and_acks() {
+    let (listener, port) = listen();
+    let link = unique_path("uart");
+    let first = Pty::open();
+    std::os::unix::fs::symlink(first.path(), &link).expect("link");
+    let mut sender = spawn_uart(port, link.to_str().expect("utf8"));
+    let (_sock, _) = listener.accept().expect("accept");
+    drop(first);
+    std::thread::sleep(Duration::from_millis(80));
+    let mut second = Pty::open();
+    std::fs::remove_file(&link).expect("unlink");
+    std::os::unix::fs::symlink(second.path(), &link).expect("relink");
+    std::thread::sleep(Duration::from_millis(200));
+    second
+        .master
+        .write_all(&pack_cmd(Cmd::Pause))
+        .expect("pause");
+    second.master.flush().expect("flush");
+    let tacks = wait_tacks(&mut second.master, 1, Duration::from_secs(3));
+    assert_eq!(tacks[0][4], Cmd::Pause as u8);
+    assert_eq!(tacks[0][5], 0);
+    assert!(sender.0.try_wait().unwrap().is_none());
+    let _ = std::fs::remove_file(&link);
 }
