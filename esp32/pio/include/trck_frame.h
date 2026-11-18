@@ -26,6 +26,7 @@
 #define TCMD_OK 0
 #define TCMD_DISABLED 1
 #define TCMD_UNKNOWN 2
+#define TCMD_FAILED 3
 #define TCMD_AGE_NONE 0xFFFFFFFFu
 
 typedef struct {
@@ -191,7 +192,7 @@ static inline bool trck_unpack_ack(const uint8_t *bytes, size_t len, TrckAck *ou
     if (trck_crc16(bytes, TACK_BODY_LEN) != trck_rd_u16(bytes + TACK_BODY_LEN)) {
         return false;
     }
-    if (bytes[5] > TCMD_UNKNOWN) {
+    if (bytes[5] > TCMD_FAILED) {
         return false;
     }
     if (bytes[18] > 1) {
