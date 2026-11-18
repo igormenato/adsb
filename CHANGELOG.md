@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/igormenato/adsb/compare/v0.3.5...v0.4.0) - 2026-11-18
+
+### Added
+
+- *(esp32)* send ASCII command lines instead of TCMD ([#119](https://github.com/igormenato/adsb/pull/119))
+- *(uart)* accept ASCII command lines next to TCMD ([#117](https://github.com/igormenato/adsb/pull/117))
+- *(pi)* install a root systemd unit and exit 1 to restart ([#116](https://github.com/igormenato/adsb/pull/116))
+
+### Fixed
+
+- *(esp32)* unpack TACK status Failed ([#118](https://github.com/igormenato/adsb/pull/118))
+- *(uart)* pause under one lock, queue TACKs, ACK after systemctl ([#115](https://github.com/igormenato/adsb/pull/115))
+- *(decode)* ingest 7-byte Mode S, DF18 CF=0, and idle 7700 ([#112](https://github.com/igormenato/adsb/pull/112))
+
+### Other
+
+- Document trck flight sim for Pi UART end-to-end ([#121](https://github.com/igormenato/adsb/pull/121))
+- *(radio)* cu8 mag LUT, 256 KiB URBs, and USB drop count ([#113](https://github.com/igormenato/adsb/pull/113))
+- Fix FC0013 manual gain test after DEFAULT_GAIN removal ([#110](https://github.com/igormenato/adsb/pull/110))
+
 ### Added
 
 - UART RX accepts uppercase ASCII command lines (`PING`, `STATUS`, `PAUSE`, `RESUME`, `RESTART`, `REBOOT`, `SHUTDOWN`) next to `TCMD`. `STATUS_ADSB` replies with a STATUS `TACK`.
