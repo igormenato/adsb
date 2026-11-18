@@ -215,6 +215,24 @@ fn pause_then_status_both_ack() {
 }
 
 #[test]
+fn uart_restart_acks_then_exits() {
+    let (listener, port) = listen();
+    let mut pty = Pty::open();
+    let mut sender = spawn_uart(port, &pty.path());
+    let (_sock, _) = listener.accept().expect("accept");
+    pty.master
+        .write_all(&pack_cmd(Cmd::Restart))
+        .expect("restart");
+    pty.master.flush().expect("flush");
+    let tacks = wait_tacks(&mut pty.master, 1, Duration::from_secs(3));
+    assert_eq!(tacks[0][4], Cmd::Restart as u8);
+    assert_eq!(tacks[0][5], 0);
+    assert_eq!(tacks[0][18], 0);
+    let status = wait_exit(&mut sender.0, Duration::from_secs(3));
+    assert!(!status.success(), "{status}");
+}
+
+#[test]
 fn uart_hangup_reopens_and_acks() {
     let (listener, port) = listen();
     let link = unique_path("uart");

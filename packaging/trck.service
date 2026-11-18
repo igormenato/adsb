@@ -1,0 +1,16 @@
+[Unit]
+Description=trck 1090 MHz ADS-B UART sender
+After=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/trck --allow-power-commands
+WorkingDirectory=/var/lib/trck
+Restart=always
+RestartSec=1
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
