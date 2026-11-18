@@ -61,6 +61,12 @@ pub(crate) struct Shared {
     simulating: AtomicBool,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Source {
+    Live,
+    Sim,
+}
+
 impl Shared {
     fn new(table: Option<Table>, allow_power: bool) -> Arc<Self> {
         Arc::new(Self {
@@ -81,27 +87,18 @@ impl Shared {
     }
 
     pub(crate) fn push(&self, fix: Fix) -> Option<Fix> {
-        self.push_at(fix, SystemTime::now())
+        self.push_at(fix, SystemTime::now(), Source::Live)
     }
 
-    fn push_at(&self, fix: Fix, now: SystemTime) -> Option<Fix> {
+    fn push_at(&self, fix: Fix, now: SystemTime, source: Source) -> Option<Fix> {
         let mut q = self.lock();
-        if self.paused.load(Ordering::Relaxed) || self.simulating.load(Ordering::Relaxed) {
+        let from_sim = matches!(source, Source::Sim);
+        if self.paused.load(Ordering::Relaxed)
+            || self.simulating.load(Ordering::Relaxed) != from_sim
+        {
             return None;
         }
         self.append_row_at(&fix, now);
-        let dropped = q.push(fix);
-        drop(q);
-        self.ready.notify_one();
-        dropped
-    }
-
-    fn push_sim(&self, fix: Fix) -> Option<Fix> {
-        let mut q = self.lock();
-        if self.paused.load(Ordering::Relaxed) || !self.simulating.load(Ordering::Relaxed) {
-            return None;
-        }
-        self.append_row_at(&fix, SystemTime::now());
         let dropped = q.push(fix);
         drop(q);
         self.ready.notify_one();
@@ -125,9 +122,7 @@ impl Shared {
         }
         drop(q);
         self.ready.notify_one();
-        if simulating {
-            self.sim_wake.notify_one();
-        }
+        self.sim_wake.notify_one();
     }
 
     fn handle_cmd(&self, cmd: u8) {
@@ -265,7 +260,7 @@ impl Writer {
     }
 
     pub(crate) fn enqueue_at(&mut self, fix: Fix, now: SystemTime) {
-        if let Some(dropped) = self.shared.push_at(fix, now) {
+        if let Some(dropped) = self.shared.push_at(fix, now, Source::Live) {
             log_drop(&dropped);
         }
     }
@@ -548,7 +543,7 @@ fn run_sim(shared: Arc<Shared>, stop: Arc<Stop>) {
                     prev = Some(timestamp);
                     if let Some(fix) = tracker.ingest(timestamp, &frame) {
                         log_fix(&fix);
-                        if let Some(dropped) = shared.push_sim(fix) {
+                        if let Some(dropped) = shared.push_at(fix, SystemTime::now(), Source::Sim) {
                             log_drop(&dropped);
                         }
                     }
@@ -566,15 +561,22 @@ fn sim_sleep(dt: f64, shared: &Shared, stop: &Stop) {
     if !dt.is_finite() || dt <= 0.0 {
         return;
     }
-    let mut left = Duration::from_secs_f64(dt);
-    let step = Duration::from_millis(50);
-    while left > Duration::ZERO {
-        if stop.is_set() || !shared.is_simulating() {
+    let deadline = Instant::now() + Duration::from_secs_f64(dt);
+    loop {
+        if stop.is_set() {
             return;
         }
-        let slice = left.min(step);
-        thread::sleep(slice);
-        left = left.saturating_sub(slice);
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let q = shared.lock();
+        if !shared.is_simulating() {
+            return;
+        }
+        let _ = shared
+            .sim_wake
+            .wait_timeout(q, deadline.saturating_duration_since(now));
     }
 }
 
@@ -1025,7 +1027,11 @@ mod tests {
         assert!(!shared.is_paused());
         assert!(shared.push(check_positions()[0]).is_none());
         assert!(!shared.lock().has_pending());
-        assert!(shared.push_sim(check_positions()[0]).is_none());
+        assert!(
+            shared
+                .push_at(check_positions()[0], SystemTime::now(), Source::Sim)
+                .is_none()
+        );
         assert!(shared.lock().has_pending());
 
         shared.handle_cmd(Cmd::Simulation as u8);
@@ -1038,7 +1044,11 @@ mod tests {
         assert_eq!(ack_health(&got[2].bytes), Health::Paused as u8);
         assert!(shared.is_paused());
         assert!(shared.is_simulating());
-        assert!(shared.push_sim(check_positions()[1]).is_none());
+        assert!(
+            shared
+                .push_at(check_positions()[1], SystemTime::now(), Source::Sim)
+                .is_none()
+        );
 
         shared.handle_cmd(Cmd::Resume as u8);
         let got = pending(&shared);
