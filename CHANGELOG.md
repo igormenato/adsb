@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/igormenato/adsb/compare/v0.5.1...v0.6.0) - 2026-11-19
+
+### Fixed
+
+- *(update)* replace the service binary and try-restart ([#129](https://github.com/igormenato/adsb/pull/129))
+
+### Other
+
+- in-process sha256, smaller clap, drop unused API ([#132](https://github.com/igormenato/adsb/pull/132))
+- shrink AGENTS.md, drop rust-guidelines ([#130](https://github.com/igormenato/adsb/pull/130))
+
 ### Fixed
 
 - `sudo trck update` replaces `/usr/local/bin/trck` and `systemctl try-restart trck` when the service is installed. Success exits 0.
