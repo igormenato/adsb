@@ -15,6 +15,7 @@ use trck::mag::{cu8_to_f32, mag_cu8, mag_iq};
 use trck::modes::{EVEN, df5_identity, df11, with_icao};
 
 const FRAMES: usize = 2000;
+/// Set ADSB55_SNR=16 to run one point (used to capture the 16 dB per-DF diagnosis).
 const SNR_DB: [f64; 13] = [
     4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
 ];
@@ -36,6 +37,8 @@ struct Point {
     decoded: usize,
     cpu_s: f64,
     iq_s: f64,
+    sent_df: [usize; 3],
+    hit_df: [usize; 3],
 }
 
 fn main() {
@@ -66,13 +69,25 @@ fn main() {
     println!("ADSB-55 demod bench");
     println!("frames={FRAMES} conf_n={CONF_N} seed={SEED:#x}");
     println!("SNR is 10 log10(A^2 / (2 sigma^2)); jitter 5 us; mix DF17/DF11/DF5");
+    println!("ICAO 1..0xBFFFFF (rs1090 is_plausible_icao); DF5 reuses prior DF17 ICAO");
     println!();
 
-    let frames = mix_frames(FRAMES, SEED);
-    let sent_set = sent_octets(&frames);
+    // rs1090's ICAO filter is process-global: measure noise + recordings before
+    // the synth sweep fills it with thousands of addresses.
+    let (noise_false, noise_cpu, noise_iq) = measure_noise(&variants);
+    let file_report = measure_files(&variants);
 
-    println!("snr_db\tvariant\tdecode_p\tse\thits\tsent\tfalse\tdecoded\tcpu_per_iq");
-    for snr in SNR_DB {
+    let frames = mix_frames(FRAMES, SEED);
+    let sent = index_sent(&frames);
+
+    println!(
+        "snr_db\tvariant\tdecode_p\tse\thits\tsent\tfalse\tdecoded\tcpu_per_iq\tdf17_p\tdf11_p\tdf5_p"
+    );
+    let snrs: Vec<f64> = match std::env::var("ADSB55_SNR") {
+        Ok(s) => vec![s.parse().expect("ADSB55_SNR")],
+        Err(_) => SNR_DB.to_vec(),
+    };
+    for snr in snrs {
         let synth = Synth {
             snr_db: Some(snr),
             seed: SEED.wrapping_add((snr as u64) << 8),
@@ -85,17 +100,27 @@ fn main() {
         let iq_s = mag.len() as f64 / f64::from(SAMPLE_HZ);
         for v in &variants {
             let (cpu_s, msgs) = timed_demod(&mag, v.opts);
-            let point = score(&sent_set, FRAMES, &msgs, cpu_s, iq_s);
+            let point = score(&sent, FRAMES, &msgs, cpu_s, iq_s);
             let p = point.hit as f64 / point.sent as f64;
             let se = (p * (1.0 - p) / point.sent as f64).sqrt();
+            let dfp = |i: usize| {
+                if point.sent_df[i] == 0 {
+                    0.0
+                } else {
+                    point.hit_df[i] as f64 / point.sent_df[i] as f64
+                }
+            };
             println!(
-                "{snr:.0}\t{}\t{p:.4}\t{se:.4}\t{}\t{}\t{}\t{}\t{:.3}",
+                "{snr:.0}\t{}\t{p:.4}\t{se:.4}\t{}\t{}\t{}\t{}\t{:.3}\t{:.4}\t{:.4}\t{:.4}",
                 v.name,
                 point.hit,
                 point.sent,
                 point.false_decodes,
                 point.decoded,
-                point.cpu_s / point.iq_s
+                point.cpu_s / point.iq_s,
+                dfp(0),
+                dfp(1),
+                dfp(2),
             );
         }
     }
@@ -103,6 +128,20 @@ fn main() {
     println!();
     println!("60 s AWGN at {NOISE_SNR_DB} dB sigma (no frames)");
     println!("variant\tfalse_total\tfalse_per_s\tcpu_per_iq");
+    for (i, v) in variants.iter().enumerate() {
+        println!(
+            "{}\t{}\t{:.3}\t{:.3}",
+            v.name,
+            noise_false[i],
+            noise_false[i] as f64 / NOISE_S,
+            noise_cpu[i] / noise_iq
+        );
+    }
+
+    print!("{file_report}");
+}
+
+fn measure_noise(variants: &[Variant]) -> ([u64; 4], [f64; 4], f64) {
     let mut noise_false = [0u64; 4];
     let mut noise_cpu = [0.0; 4];
     let mut noise_iq = 0.0;
@@ -124,35 +163,29 @@ fn main() {
             noise_false[i] += msgs.len() as u64;
         }
     }
-    for (i, v) in variants.iter().enumerate() {
-        println!(
-            "{}\t{}\t{:.3}\t{:.3}",
-            v.name,
-            noise_false[i],
-            noise_false[i] as f64 / NOISE_S,
-            noise_cpu[i] / noise_iq
-        );
-    }
-
-    real_files(&variants);
+    (noise_false, noise_cpu, noise_iq)
 }
 
+/// ICAOs in 1..0x00BFFFFF so `is_plausible_icao` (rs1090) does not reject them.
+/// DF5 AP replies only score >0 after that ICAO is in the filter, so each DF5
+/// reuses the preceding DF17's address (same capture, earlier in time).
 fn mix_frames(n: usize, seed: u64) -> Vec<[u8; 14]> {
     let mut rng = SplitMix(seed | 1);
     let mut used = HashSet::new();
+    let mut last_df17 = 0u32;
     let mut out = Vec::with_capacity(n);
     while out.len() < n {
-        let icao = (rng.next() & 0x00ff_ffff) as u32;
-        if icao == 0 || !used.insert(icao) {
-            continue;
-        }
         match out.len() % 3 {
-            0 => out.push(with_icao(&EVEN, icao)),
-            1 => out.push(df11(icao)),
+            0 => {
+                let icao = plausible_icao(&mut rng, &mut used);
+                last_df17 = icao;
+                out.push(with_icao(&EVEN, icao));
+            }
+            1 => out.push(df11(plausible_icao(&mut rng, &mut used))),
             _ => {
                 let mut frame = [0u8; 14];
                 let squawk = (rng.next() % 0o7777) as u16;
-                frame[..7].copy_from_slice(&df5_identity(icao, squawk));
+                frame[..7].copy_from_slice(&df5_identity(last_df17, squawk));
                 out.push(frame);
             }
         }
@@ -160,23 +193,54 @@ fn mix_frames(n: usize, seed: u64) -> Vec<[u8; 14]> {
     out
 }
 
-fn sent_octets(frames: &[[u8; 14]]) -> HashSet<Vec<u8>> {
-    frames.iter().map(|f| msg_octets(f).to_vec()).collect()
+fn plausible_icao(rng: &mut SplitMix, used: &mut HashSet<u32>) -> u32 {
+    loop {
+        let icao = (rng.next() % 0x00C0_0000) as u32;
+        if icao != 0 && used.insert(icao) {
+            return icao;
+        }
+    }
 }
 
-fn score(
-    sent: &HashSet<Vec<u8>>,
-    n_sent: usize,
-    msgs: &[ModeSMessage],
-    cpu_s: f64,
-    iq_s: f64,
-) -> Point {
+struct Sent {
+    octets: HashSet<Vec<u8>>,
+    by_df: [HashSet<Vec<u8>>; 3],
+}
+
+fn df_bucket(msg: &[u8; 14]) -> Option<usize> {
+    match msg[0] >> 3 {
+        17 | 18 => Some(0),
+        11 => Some(1),
+        0 | 4 | 5 => Some(2),
+        _ => None,
+    }
+}
+
+fn index_sent(frames: &[[u8; 14]]) -> Sent {
+    let mut octets = HashSet::new();
+    let mut by_df = [HashSet::new(), HashSet::new(), HashSet::new()];
+    for f in frames {
+        let oct = msg_octets(f).to_vec();
+        octets.insert(oct.clone());
+        if let Some(i) = df_bucket(f) {
+            by_df[i].insert(oct);
+        }
+    }
+    Sent { octets, by_df }
+}
+
+fn score(sent: &Sent, n_sent: usize, msgs: &[ModeSMessage], cpu_s: f64, iq_s: f64) -> Point {
     let mut seen = HashSet::new();
+    let mut hit_df = [0usize; 3];
     let mut false_decodes = 0usize;
     for m in msgs {
         let oct = msg_octets(&m.msg).to_vec();
-        if sent.contains(&oct) {
-            seen.insert(oct);
+        if sent.octets.contains(&oct) {
+            if seen.insert(oct.clone())
+                && let Some(i) = df_bucket(&m.msg)
+            {
+                hit_df[i] += 1;
+            }
         } else {
             false_decodes += 1;
         }
@@ -188,6 +252,12 @@ fn score(
         decoded: msgs.len(),
         cpu_s,
         iq_s,
+        sent_df: [
+            sent.by_df[0].len(),
+            sent.by_df[1].len(),
+            sent.by_df[2].len(),
+        ],
+        hit_df,
     }
 }
 
@@ -197,43 +267,43 @@ fn timed_demod(mag: &[u16], opts: DemodOpts) -> (f64, Vec<ModeSMessage>) {
     (t0.elapsed().as_secs_f64(), msgs)
 }
 
-fn real_files(variants: &[Variant]) {
-    println!();
-    if std::process::Command::new("scripts/fetch-iq.sh")
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        println!("fetch-iq.sh ok");
-    } else {
-        println!("fetch-iq.sh failed or missing; skip recordings");
-        return;
-    }
+fn measure_files(variants: &[Variant]) -> String {
+    let mut out = String::from("\n");
     let modes1 = PathBuf::from("tests/data/modes1.bin");
+    if !modes1.is_file()
+        && !std::process::Command::new("scripts/fetch-iq.sh")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    {
+        out.push_str("fetch-iq.sh failed or missing; skip recordings\n");
+        return out;
+    }
+    out.push_str("fetch-iq.sh ok\n");
     if modes1.is_file() {
-        println!("file\tvariant\tunique_crc\tmessages\tcpu_per_iq");
-        report_file("modes1.bin", &modes1, 2_000_000, variants);
+        out.push_str("file\tvariant\tunique_crc\tmessages\tcpu_per_iq\n");
+        report_file(&mut out, "modes1.bin", &modes1, 2_000_000, variants);
     }
-    let awec = find_under(Path::new("tests/data/awec2026"), "recording.bin");
-    if let Some(path) = awec {
-        report_file("awec2026", &path, 2_000_000, variants);
+    if let Some(path) = find_under(Path::new("tests/data/awec2026"), "recording.bin") {
+        report_file(&mut out, "awec2026", &path, 2_000_000, variants);
     }
+    out
 }
 
-fn report_file(name: &str, path: &Path, in_hz: u32, variants: &[Variant]) {
+fn report_file(out: &mut String, name: &str, path: &Path, in_hz: u32, variants: &[Variant]) {
     let cu8 = fs::read(path).expect("read iq");
     let mag = mag_resample_24(&cu8, in_hz);
     let iq_s = mag.len() as f64 / f64::from(SAMPLE_HZ);
     for v in variants {
         let (cpu_s, msgs) = timed_demod(&mag, v.opts);
         let unique: HashSet<Vec<u8>> = msgs.iter().map(|m| msg_octets(&m.msg).to_vec()).collect();
-        println!(
-            "{name}\t{}\t{}\t{}\t{:.3}",
+        out.push_str(&format!(
+            "{name}\t{}\t{}\t{}\t{:.3}\n",
             v.name,
             unique.len(),
             msgs.len(),
             cpu_s / iq_s
-        );
+        ));
     }
 }
 
