@@ -47,102 +47,150 @@ pub fn demodulate2400(samples: &[u16], fix: bool) -> Vec<ModeSMessage> {
     let last = samples.len() - MIN_TRAILING_SAMPLES;
     let mut j = 0;
     while j < last {
-        if !(samples[j + 1] > samples[j + 7]
-            && samples[j + 12] > samples[j + 14]
-            && samples[j + 12] > samples[j + 15])
+        if j + 16 <= last
+            && let Some(window) = samples[j..].first_chunk::<31>()
         {
+            let mut mask = preamble_mask16(window);
+            if mask == 0 {
+                j += 16;
+                continue;
+            }
+            let mut skip_to = j + 16;
+            while mask != 0 {
+                let k = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                let idx = j + k;
+                if let Some(msg) = decode_at(&samples[idx..], idx, df_long, fix) {
+                    skip_to = idx + skip_after(&msg);
+                    results.push(msg);
+                    break;
+                }
+            }
+            j = skip_to;
+            continue;
+        }
+        if !preamble_quick(samples, j) {
             j += 1;
             continue;
         }
-        let pa = &samples[j..];
-        let base_noise = i32::from(pa[5])
-            + i32::from(pa[8])
-            + i32::from(pa[16])
-            + i32::from(pa[17])
-            + i32::from(pa[18]);
-        let ref_level = (base_noise * PREAMBLE_THRESHOLD) >> 5;
-        let mut best_msg = [0_u8; MODES_LONG_MSG_BYTES];
-        let mut best_score = -42;
-        let mut best_corrected = 0_u8;
-        let diff_2_3 = i32::from(pa[2]) - i32::from(pa[3]);
-        let sum_1_4 = i32::from(pa[1]) + i32::from(pa[4]);
-        let diff_10_11 = i32::from(pa[10]) - i32::from(pa[11]);
-        let common = sum_1_4 - diff_2_3 + i32::from(pa[9]) + i32::from(pa[12]);
-        if common - diff_10_11 >= ref_level {
-            score_phase(
-                4,
-                pa,
-                df_long,
-                fix,
-                &mut best_msg,
-                &mut best_score,
-                &mut best_corrected,
-            );
-            score_phase(
-                5,
-                pa,
-                df_long,
-                fix,
-                &mut best_msg,
-                &mut best_score,
-                &mut best_corrected,
-            );
-        }
-        if common + diff_10_11 >= ref_level {
-            score_phase(
-                6,
-                pa,
-                df_long,
-                fix,
-                &mut best_msg,
-                &mut best_score,
-                &mut best_corrected,
-            );
-            score_phase(
-                7,
-                pa,
-                df_long,
-                fix,
-                &mut best_msg,
-                &mut best_score,
-                &mut best_corrected,
-            );
-        }
-        if sum_1_4 + 2 * diff_2_3 + diff_10_11 + i32::from(pa[12]) >= ref_level {
-            score_phase(
-                8,
-                pa,
-                df_long,
-                fix,
-                &mut best_msg,
-                &mut best_score,
-                &mut best_corrected,
-            );
-        }
-        if best_score < 0 {
+        if let Some(msg) = decode_at(&samples[j..], j, df_long, fix) {
+            j += skip_after(&msg);
+            results.push(msg);
+        } else {
             j += 1;
-            continue;
         }
-        let bits: usize = if best_msg[0] >> 3 >= 16 { 112 } else { 56 };
-        let signal_len = bits * 12 / 5;
-        let mut scaled_signal_power = 0_u64;
-        for k in 0..signal_len {
-            let mag = u64::from(pa[19 + k]);
-            scaled_signal_power += mag * mag;
-        }
-        let signal_power = scaled_signal_power as f64 / 65535.0 / 65535.0;
-        results.push(ModeSMessage {
-            msg: best_msg,
-            signal_level: signal_power / signal_len as f64,
-            score: best_score,
-            sample_position: j,
-            corrected_bits: best_corrected,
-        });
-        // readsb: `pa += msglen * 8 / 4` (msglen in bits).
-        j += bits * 2;
-        j += 1;
     }
     results
+}
+
+fn skip_after(msg: &ModeSMessage) -> usize {
+    // readsb: `pa += msglen * 8 / 4` (msglen in bits), then the loop's +1.
+    let bits = if msg.msg[0] >> 3 >= 16 { 112 } else { 56 };
+    bits * 2 + 1
+}
+
+/// 16 consecutive preamble quick-checks as a bitmask (bit k → offset k).
+/// `&` not `&&` so LLVM emits SSE2/NEON compares instead of scalar branches.
+fn preamble_mask16(window: &[u16; 31]) -> u16 {
+    let mut mask = 0u16;
+    for k in 0..16 {
+        let pass = (window[k + 1] > window[k + 7])
+            & (window[k + 12] > window[k + 14])
+            & (window[k + 12] > window[k + 15]);
+        mask |= u16::from(pass) << k;
+    }
+    mask
+}
+
+fn preamble_quick(samples: &[u16], j: usize) -> bool {
+    (samples[j + 1] > samples[j + 7])
+        & (samples[j + 12] > samples[j + 14])
+        & (samples[j + 12] > samples[j + 15])
+}
+
+fn decode_at(pa: &[u16], sample_position: usize, df_long: u32, fix: bool) -> Option<ModeSMessage> {
+    let base_noise = i32::from(pa[5])
+        + i32::from(pa[8])
+        + i32::from(pa[16])
+        + i32::from(pa[17])
+        + i32::from(pa[18]);
+    let ref_level = (base_noise * PREAMBLE_THRESHOLD) >> 5;
+    let mut best_msg = [0_u8; MODES_LONG_MSG_BYTES];
+    let mut best_score = -42;
+    let mut best_corrected = 0_u8;
+    let diff_2_3 = i32::from(pa[2]) - i32::from(pa[3]);
+    let sum_1_4 = i32::from(pa[1]) + i32::from(pa[4]);
+    let diff_10_11 = i32::from(pa[10]) - i32::from(pa[11]);
+    let common = sum_1_4 - diff_2_3 + i32::from(pa[9]) + i32::from(pa[12]);
+    if common - diff_10_11 >= ref_level {
+        score_phase(
+            4,
+            pa,
+            df_long,
+            fix,
+            &mut best_msg,
+            &mut best_score,
+            &mut best_corrected,
+        );
+        score_phase(
+            5,
+            pa,
+            df_long,
+            fix,
+            &mut best_msg,
+            &mut best_score,
+            &mut best_corrected,
+        );
+    }
+    if common + diff_10_11 >= ref_level {
+        score_phase(
+            6,
+            pa,
+            df_long,
+            fix,
+            &mut best_msg,
+            &mut best_score,
+            &mut best_corrected,
+        );
+        score_phase(
+            7,
+            pa,
+            df_long,
+            fix,
+            &mut best_msg,
+            &mut best_score,
+            &mut best_corrected,
+        );
+    }
+    if sum_1_4 + 2 * diff_2_3 + diff_10_11 + i32::from(pa[12]) >= ref_level {
+        score_phase(
+            8,
+            pa,
+            df_long,
+            fix,
+            &mut best_msg,
+            &mut best_score,
+            &mut best_corrected,
+        );
+    }
+    if best_score < 0 {
+        return None;
+    }
+    let bits: usize = if best_msg[0] >> 3 >= 16 { 112 } else { 56 };
+    let signal_len = bits * 12 / 5;
+    let mut scaled_signal_power = 0_u64;
+    for mag in pa[19..19 + signal_len].iter().copied() {
+        let mag = u64::from(mag);
+        scaled_signal_power += mag * mag;
+    }
+    let signal_power = scaled_signal_power as f64 / 65535.0 / 65535.0;
+    Some(ModeSMessage {
+        msg: best_msg,
+        signal_level: signal_power / signal_len as f64,
+        score: best_score,
+        sample_position,
+        corrected_bits: best_corrected,
+    })
 }
 
 fn df17_one_bit_damage() -> u32 {
@@ -317,5 +365,69 @@ mod tests {
         assert_eq!(msg_octets(&msg).len(), 7);
         msg[0] = 0x8D;
         assert_eq!(msg_octets(&msg).len(), 14);
+    }
+
+    #[test]
+    fn preamble_mask16_matches_per_sample_quick_check() {
+        let mut mag = vec![0u16; 64];
+        let mut seed = 0x9E37_79B9_u32;
+        for _ in 0..200 {
+            for slot in mag.iter_mut() {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                *slot = (seed >> 16) as u16;
+            }
+            let window: &[u16; 31] = mag[..31].try_into().unwrap();
+            let mask = preamble_mask16(window);
+            for k in 0..16 {
+                assert_eq!(mask & (1 << k) != 0, preamble_quick(&mag, k), "k={k}");
+            }
+        }
+    }
+
+    #[test]
+    fn vector_scan_matches_scalar_scan_on_noise() {
+        let mut mag = vec![0u16; 4096];
+        let mut seed = 1u32;
+        for slot in mag.iter_mut() {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            *slot = (seed >> 8) as u16;
+        }
+        let vector = demodulate2400(&mag, true);
+        let scalar = demodulate2400_scalar(&mag, true);
+        assert_eq!(vector.len(), scalar.len());
+        for (a, b) in vector.iter().zip(&scalar) {
+            assert_eq!(a.sample_position, b.sample_position);
+            assert_eq!(a.msg, b.msg);
+            assert_eq!(a.score, b.score);
+            assert_eq!(a.corrected_bits, b.corrected_bits);
+            assert_eq!(a.signal_level.to_bits(), b.signal_level.to_bits());
+        }
+    }
+
+    fn demodulate2400_scalar(samples: &[u16], fix: bool) -> Vec<ModeSMessage> {
+        let mut results = Vec::new();
+        if samples.len() < MIN_TRAILING_SAMPLES {
+            return results;
+        }
+        let df_long = if fix {
+            DF_LONG | df17_one_bit_damage()
+        } else {
+            DF_LONG
+        };
+        let last = samples.len() - MIN_TRAILING_SAMPLES;
+        let mut j = 0;
+        while j < last {
+            if !preamble_quick(samples, j) {
+                j += 1;
+                continue;
+            }
+            if let Some(msg) = decode_at(&samples[j..], j, df_long, fix) {
+                j += skip_after(&msg);
+                results.push(msg);
+            } else {
+                j += 1;
+            }
+        }
+        results
     }
 }
