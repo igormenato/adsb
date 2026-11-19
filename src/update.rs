@@ -10,6 +10,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Parser;
 use nix::unistd::Uid;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use super::service;
 
@@ -242,26 +243,20 @@ fn verify(path: &Path, asset: &Asset) -> Result<()> {
 }
 
 fn sha256_hex(path: &Path) -> Result<String> {
-    let out = Command::new("sha256sum")
-        .arg(path)
-        .output()
-        .map_err(|err| {
-            if err.kind() == ErrorKind::NotFound {
-                anyhow!("{ASSET_NAME} has a GitHub digest, but sha256sum is missing")
-            } else {
-                anyhow!("cannot run sha256sum: {err}")
-            }
-        })?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        bail!("{}", err.trim());
+    let mut file =
+        fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
     }
-    let text = String::from_utf8(out.stdout).context("sha256sum output")?;
-    let hex = text
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| anyhow!("sha256sum output was empty"))?;
-    Ok(hex.to_ascii_lowercase())
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn make_executable(path: &Path) -> io::Result<()> {
@@ -424,6 +419,10 @@ mod tests {
         elf.extend_from_slice(&[0u8; 12]);
         fs::write(&path, &elf).unwrap();
         let sha = sha256_hex(&path).unwrap();
+        assert_eq!(
+            sha,
+            "69aa6b82d3b9e2bc578213ac6f77a0c1959053798cb026b96bac125d878b6766"
+        );
         let asset = Asset {
             name: ASSET_NAME.into(),
             size: elf.len() as u64,

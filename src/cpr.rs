@@ -109,7 +109,7 @@ pub fn relative(reference: LatLon, bits: CprBits) -> Option<LatLon> {
     let frac_lon = f64::from(bits.lon) / CPR_MAX;
     let dlat = span / if bits.odd { 59.0 } else { 60.0 };
     let j = (reference.lat / dlat).floor()
-        + (0.5 + rem_pos(reference.lat, dlat) / dlat - frac_lat).floor();
+        + (0.5 + reference.lat.rem_euclid(dlat) / dlat - frac_lat).floor();
     let mut rlat = dlat * (j + frac_lat);
     if rlat >= 270.0 {
         rlat -= 360.0;
@@ -120,7 +120,7 @@ pub fn relative(reference: LatLon, bits: CprBits) -> Option<LatLon> {
     let ni = cpr_nl(rlat).saturating_sub(u32::from(bits.odd)).max(1);
     let dlon = span / f64::from(ni);
     let m = (reference.lon / dlon).floor()
-        + (0.5 + rem_pos(reference.lon, dlon) / dlon - frac_lon).floor();
+        + (0.5 + reference.lon.rem_euclid(dlon) / dlon - frac_lon).floor();
     let mut rlon = dlon * (m + frac_lon);
     if rlon > 180.0 {
         rlon -= 360.0;
@@ -132,11 +132,6 @@ pub fn relative(reference: LatLon, bits: CprBits) -> Option<LatLon> {
         lat: rlat,
         lon: rlon,
     })
-}
-
-fn rem_pos(a: f64, b: f64) -> f64 {
-    let r = a % b;
-    if r < 0.0 { r + b } else { r }
 }
 
 pub fn greatcircle_m(a: LatLon, b: LatLon) -> f64 {

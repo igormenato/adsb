@@ -4,7 +4,7 @@ use crate::frame::crc16_ccitt_false;
 
 pub const CMD_MAGIC: &[u8; 4] = b"TCMD";
 pub const ACK_LEN: usize = 9;
-pub const CMD_LEN: usize = 7;
+const CMD_LEN: usize = 7;
 
 const CMD_BODY_LEN: usize = CMD_LEN - 2;
 const ACK_BODY_LEN: usize = ACK_LEN - 2;

@@ -15,15 +15,14 @@ mod table;
 
 #[doc(inline)]
 pub use cmd::{
-    ACK_LEN, AfterReply, CMD_LEN, Cmd, CmdFeed, CmdScan, CmdStatus, Health, PowerOp, decide,
-    pack_cmd, pack_reply,
+    ACK_LEN, AfterReply, Cmd, CmdFeed, CmdScan, CmdStatus, Health, PowerOp, decide, pack_cmd,
+    pack_reply,
 };
 #[doc(inline)]
 pub use decode::{Tracker, is_mode_s, parse_hex_frame};
 #[doc(inline)]
 pub use frame::{
-    ALT_UNKNOWN, Aircraft, CALLSIGN_LEN, Callsign, EmergencyKind, FRAME_LEN, Fix, Icao,
-    SPEED_UNKNOWN, TRACK_MAGIC, TRACK_UNKNOWN, check_positions, crc16_ccitt_false, deg_e7,
+    Aircraft, Callsign, EmergencyKind, FRAME_LEN, Fix, Icao, check_positions, crc16_ccitt_false,
     pack_frame, unpack_frame,
 };
 #[doc(inline)]

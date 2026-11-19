@@ -36,14 +36,6 @@ repository = "https://github.com/xoolive/desperado"
 name = "rs_rtl"
 path = "src/lib.rs"
 
-[[example]]
-name = "rtl_stream"
-path = "examples/rtl_stream.rs"
-
-[[example]]
-name = "rtl_test"
-path = "examples/rtl_test.rs"
-
 [dependencies.nusb]
 version = "0.2"
 
@@ -53,6 +45,3 @@ version = "2.0"
 [dependencies.tracing]
 version = "0.1"
 
-[dev-dependencies.tracing-subscriber]
-version = "0.3"
-features = ["env-filter"]

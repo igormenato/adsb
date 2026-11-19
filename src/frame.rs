@@ -8,12 +8,12 @@ use crc::{CRC_16_IBM_3740, Crc};
 /// The `crc` catalog names this `CRC_16_IBM_3740`. Check value is `0x29B1`.
 const CCITT_FALSE: Crc<u16> = Crc::<u16>::new(&CRC_16_IBM_3740);
 
-pub const TRACK_MAGIC: &[u8; 4] = b"TRCK";
+const TRACK_MAGIC: &[u8; 4] = b"TRCK";
 pub const FRAME_LEN: usize = 34;
-pub const CALLSIGN_LEN: usize = 8;
-pub const SPEED_UNKNOWN: u16 = 0xFFFF;
-pub const TRACK_UNKNOWN: u16 = 0xFFFF;
-pub const ALT_UNKNOWN: i32 = i32::MIN;
+const CALLSIGN_LEN: usize = 8;
+const SPEED_UNKNOWN: u16 = 0xFFFF;
+const TRACK_UNKNOWN: u16 = 0xFFFF;
+const ALT_UNKNOWN: i32 = i32::MIN;
 const BODY_LEN: usize = FRAME_LEN - 2;
 
 /// 24-bit Mode S address. The wire field is three bytes.
@@ -142,7 +142,7 @@ pub struct Fix {
 }
 
 /// `floor(|degrees| * 1e7 + 0.5)` with the original sign.
-pub fn deg_e7(degrees: f64) -> i32 {
+pub(crate) fn deg_e7(degrees: f64) -> i32 {
     let scaled = (degrees.abs() * 10_000_000.0 + 0.5).floor() as i32;
     if degrees < 0.0 { -scaled } else { scaled }
 }
