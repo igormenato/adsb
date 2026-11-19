@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- UART ASCII `STATUS` and `STATUS_ADSB` are ignored with no `TACK`. ESP32 heartbeat is `PING` every 3 s. Binary TCMD status is unchanged.
+
 ## [0.5.0](https://github.com/igormenato/adsb/compare/v0.4.0...v0.5.0) - 2026-11-18
 
 ### Added

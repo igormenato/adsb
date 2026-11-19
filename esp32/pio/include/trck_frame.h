@@ -30,7 +30,7 @@
 #define TACK_HEALTH_PAUSED 1
 #define TACK_HEALTH_SIM 2
 #define TACK_HEALTH_DOWN 255
-#define TRCK_HB_LINE "STATUS_ADSB\r\n"
+#define TRCK_HB_LINE "PING\r\n"
 #define TRCK_HB_DOWN_MS 10000u
 
 typedef struct {
@@ -168,7 +168,7 @@ static inline const char *trck_cmd_word(uint8_t cmd) {
     case TCMD_PING:
         return "PING";
     case TCMD_STATUS:
-        return "STATUS";
+        return NULL;
     case TCMD_REBOOT:
         return "REBOOT";
     case TCMD_SHUTDOWN:

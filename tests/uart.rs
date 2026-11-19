@@ -239,7 +239,7 @@ fn ascii_pause_heartbeat_resume_acks() {
     let mut sender = spawn_uart(port, &pty.path());
     let (_sock, _) = listener.accept().expect("accept");
     pty.master
-        .write_all(b"PAUSE\r\nSTATUS_ADSB\r\nRESUME\n")
+        .write_all(b"PAUSE\r\nPING\r\nRESUME\n")
         .expect("ascii");
     pty.master.flush().expect("flush");
     let tacks = wait_tacks(&mut pty.master, 3, Duration::from_secs(3));
@@ -247,12 +247,30 @@ fn ascii_pause_heartbeat_resume_acks() {
     assert_eq!(tacks[0][4], Cmd::Pause as u8);
     assert_eq!(tacks[0][5], 0);
     assert_eq!(tacks[0][6], Health::Paused as u8);
-    assert_eq!(tacks[1][4], Cmd::Status as u8);
+    assert_eq!(tacks[1][4], Cmd::Ping as u8);
     assert_eq!(tacks[1][5], 0);
     assert_eq!(tacks[1][6], Health::Paused as u8);
     assert_eq!(tacks[2][4], Cmd::Resume as u8);
     assert_eq!(tacks[2][5], 0);
     assert_eq!(tacks[2][6], Health::Ok as u8);
+    assert!(sender.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn ascii_status_ignored_status_adsb_and_ping_ack() {
+    let (listener, port) = listen();
+    let mut pty = Pty::open();
+    let mut sender = spawn_uart(port, &pty.path());
+    let (_sock, _) = listener.accept().expect("accept");
+    pty.master
+        .write_all(b"STATUS\nSTATUS_ADSB\nPING\n")
+        .expect("ascii");
+    pty.master.flush().expect("flush");
+    let tacks = wait_tacks(&mut pty.master, 1, Duration::from_secs(3));
+    assert_eq!(tacks.len(), 1);
+    assert_eq!(tacks[0][4], Cmd::Ping as u8);
+    assert_eq!(tacks[0][5], 0);
+    assert_eq!(tacks[0][6], Health::Ok as u8);
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 

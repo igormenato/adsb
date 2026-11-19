@@ -148,7 +148,7 @@ int main(int argc, char **argv) {
         uint8_t cmd;
         const char *line;
     } kLines[] = {
-        {TCMD_PING, "PING\r\n"},       {TCMD_STATUS, "STATUS\r\n"}, {TCMD_REBOOT, "REBOOT\r\n"},
+        {TCMD_PING, "PING\r\n"},       {TCMD_REBOOT, "REBOOT\r\n"},
         {TCMD_SHUTDOWN, "SHUTDOWN\r\n"}, {TCMD_PAUSE, "PAUSE\r\n"},   {TCMD_RESUME, "RESUME\r\n"},
         {TCMD_RESTART, "RESTART\r\n"}, {TCMD_SIMULATION, "SIMULATION\r\n"},
     };
@@ -160,9 +160,11 @@ int main(int argc, char **argv) {
     }
     char too_small[4];
     assert(trck_pack_cmd_line(TCMD_PING, too_small, sizeof too_small) == 0);
+    assert(trck_pack_cmd_line(TCMD_STATUS, too_small, sizeof too_small) == 0);
     assert(trck_pack_cmd_line(0xFF, too_small, sizeof too_small) == 0);
+    assert(trck_cmd_word(TCMD_STATUS) == NULL);
     assert(trck_cmd_word(0xFF) == NULL);
-    assert(strcmp(TRCK_HB_LINE, "STATUS_ADSB\r\n") == 0);
+    assert(strcmp(TRCK_HB_LINE, "PING\r\n") == 0);
 
     uint8_t ack_raw[TACK_LEN];
     memset(ack_raw, 0, sizeof ack_raw);

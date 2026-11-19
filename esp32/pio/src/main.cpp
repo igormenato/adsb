@@ -115,7 +115,7 @@ static void maybe_down(void) {
 
 static void on_ack(const TrckAck *ack, bool user) {
     uint32_t now = millis();
-    if (ack->cmd == TCMD_STATUS) {
+    if (ack->cmd == TCMD_PING || ack->cmd == TCMD_STATUS) {
         int act = trck_hb_on_status(&gWatch, ack->health, now);
         if (user || act == TRCK_HB_PRINT) {
             print_ack(ack);
@@ -165,8 +165,8 @@ static void run_cmd(uint8_t cmd) {
         return;
     }
     if (cmd_no_resend(cmd)) {
-        write_cmd(TCMD_STATUS);
-        if (wait_ack(TCMD_STATUS, kAckWaitMs)) {
+        write_cmd(TCMD_PING);
+        if (wait_ack(TCMD_PING, kAckWaitMs)) {
             return;
         }
     } else {
@@ -182,7 +182,7 @@ static bool parse_cmd(const char *line, uint8_t *cmd) {
     if (strcmp(line, "ping") == 0) {
         *cmd = TCMD_PING;
     } else if (strcmp(line, "status") == 0) {
-        *cmd = TCMD_STATUS;
+        *cmd = TCMD_PING;
     } else if (strcmp(line, "reboot") == 0) {
         *cmd = TCMD_REBOOT;
     } else if (strcmp(line, "shutdown") == 0) {
