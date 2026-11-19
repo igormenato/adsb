@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- UART ASCII `STATUS` and `STATUS_ADSB` are ignored with no `TACK`. ESP32 sends `PING` only on USB command. No TACK in 1 s is health `down` (255). Binary TCMD status is unchanged.
+- UART ASCII `STATUS` and `STATUS_ADSB` are ignored with no `TACK`. ESP32 sends `PING` only on USB `ping`. No TACK after one retry is health `down` (255). Binary TCMD status is unchanged.
 
 ## [0.5.0](https://github.com/igormenato/adsb/compare/v0.4.0...v0.5.0) - 2026-11-18
 

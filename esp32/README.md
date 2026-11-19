@@ -1,6 +1,6 @@
 # ESP32-S3 UART ingest
 
-Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `status`, `reboot`, `shutdown`, `pause`, `resume`, `restart`, or `simulation` on that Serial (any case) to send `PING`, `REBOOT`, `SHUTDOWN`, `PAUSE`, `RESUME`, `RESTART`, or `SIMULATION` plus `\r\n` on UART1. USB `status` sends `PING`. Replies are 9-byte `TACK` frames (`TACK`, cmd, status, health, CRC-16 over bytes 0..6). Health is `ok`, `paused`, or `sim`. There is no periodic heartbeat. Health is read on demand from a `PING` `TACK`. The sketch matches a user command's TACK on the cmd byte. If that TACK does not arrive in 1 s, USB prints health `down` (255) for that request and `trck_health()` returns `down`. Type `stats` to print frames received, `crc_fail`, `resync`, and `qdrop` (`qdrop` is events dropped when the print queue is full). UART1 RX runs in its own FreeRTOS task.
+Arduino sketch that reads the 34-byte `TRCK` frames `trck` writes. It prints ICAO, callsign, lat, lon, alt, ground speed, track, emergency, and running CRC-fail and resync counts on USB `Serial`. Type `ping`, `reboot`, `shutdown`, `pause`, `resume`, `restart`, or `simulation` on that Serial (any case) to send `PING`, `REBOOT`, `SHUTDOWN`, `PAUSE`, `RESUME`, `RESTART`, or `SIMULATION` plus `\r\n` on UART1. Replies are 9-byte `TACK` frames (`TACK`, cmd, status, health, CRC-16 over bytes 0..6). Health is `ok`, `paused`, or `sim`. There is no periodic heartbeat. Health is read on demand from a `PING` `TACK`. The sketch matches a user command's TACK on the cmd byte. After a command line it waits up to 1 s and retries ping/pause/resume/simulation once. For reboot/shutdown/restart it sends `PING` instead of repeating the command. Both attempts failing prints health `down` (255) for that request and `trck_health()` returns `down`. Type `stats` to print frames received, `crc_fail`, `resync`, and `qdrop` (`qdrop` is events dropped when the print queue is full). UART1 RX runs in its own FreeRTOS task.
 
 Two firmware trees: Arduino sketch `esp32/trck_uart/trck_uart.ino` (self-contained, protocol inlined) and PlatformIO `esp32/pio` (`src/main.cpp`, protocol in `include/trck_frame.h`). Host check includes the Arduino `.ino` (same as before the shared header, simpler than pointing at the PlatformIO header): `make -C esp32/host test`.
 
@@ -46,7 +46,6 @@ On the USB Serial Monitor, send one word and a newline.
 | Word | Pi action |
 | --- | --- |
 | `ping` | Reply `ok` with health |
-| `status` | Send `PING`. Reply `ok` with health |
 | `pause` | Stop CSV rows and `TRCK` frames. The radio stays open. Replies still go out. Pauses live or simulation |
 | `resume` | Return to live radio/hex. Leaves simulation. Resume from pause-during-sim also returns to live |
 | `restart` | Reply, drain the UART, then exit 1 so systemd starts trck again (live) |
@@ -63,7 +62,7 @@ The RF firmware (ESP32 TX GPIO 10 to Pi RX GPIO 15) sends the same commands as u
 
 | Line | Pi action |
 | --- | --- |
-| `PING` | Same `TACK` as TCMD ping, including health. USB `ping` and `status` send this on demand |
+| `PING` | Same `TACK` as TCMD ping, including health. USB `ping` sends this on demand |
 | `PAUSE` | Same as TCMD pause |
 | `RESUME` | Same as TCMD resume |
 | `RESTART` | Same as TCMD restart |

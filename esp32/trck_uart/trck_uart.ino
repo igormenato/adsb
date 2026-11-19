@@ -418,17 +418,31 @@ static bool wait_ack(uint8_t cmd, uint32_t ms) {
     return false;
 }
 
+static bool cmd_no_resend(uint8_t cmd) {
+    return cmd == TCMD_REBOOT || cmd == TCMD_SHUTDOWN || cmd == TCMD_RESTART;
+}
+
 static void run_cmd(uint8_t cmd) {
     write_cmd(cmd);
-    if (!wait_ack(cmd, kAckWaitMs)) {
-        note_down(cmd);
+    if (wait_ack(cmd, kAckWaitMs)) {
+        return;
     }
+    if (cmd_no_resend(cmd)) {
+        write_cmd(TCMD_PING);
+        if (wait_ack(TCMD_PING, kAckWaitMs)) {
+            return;
+        }
+    } else {
+        write_cmd(cmd);
+        if (wait_ack(cmd, kAckWaitMs)) {
+            return;
+        }
+    }
+    note_down(cmd);
 }
 
 static bool parse_cmd(const char *line, uint8_t *cmd) {
     if (strcmp(line, "ping") == 0) {
-        *cmd = TCMD_PING;
-    } else if (strcmp(line, "status") == 0) {
         *cmd = TCMD_PING;
     } else if (strcmp(line, "reboot") == 0) {
         *cmd = TCMD_REBOOT;
@@ -498,7 +512,7 @@ void setup() {
     Serial.printf("UART 115200 8N1 RX GPIO %d TX GPIO %d. TRCK in, ASCII cmd out.\n", kPiRxGpio,
                   kPiTxGpio);
     Serial.println("Wire Pi GPIO 14 (pin 8) to RX, Pi GPIO 15 (pin 10) to TX, 3.3 V, common ground.");
-    Serial.println("Type ping, status, reboot, shutdown, pause, resume, restart, simulation, or stats.");
+    Serial.println("Type ping, reboot, shutdown, pause, resume, restart, simulation, or stats.");
 }
 
 void loop() {
@@ -529,7 +543,7 @@ void loop() {
             } else if (parse_cmd(gLine, &cmd)) {
                 run_cmd(cmd);
             } else {
-                Serial.println("commands: ping status reboot shutdown pause resume restart simulation stats");
+                Serial.println("commands: ping reboot shutdown pause resume restart simulation stats");
             }
         } else if (gLineN < sizeof gLine - 1) {
             gLine[gLineN++] = c;
