@@ -1,4 +1,4 @@
-//! Replace this binary with a GitHub release of `igormenato/adsb`.
+//! Replace the service binary, or this binary, with a GitHub release of `igormenato/adsb`.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Read as _};
@@ -8,7 +8,10 @@ use std::process::{Command, ExitCode, Output};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Parser;
+use nix::unistd::Uid;
 use serde::Deserialize;
+
+use super::service;
 
 const REPO: &str = "igormenato/adsb";
 const ASSET_NAME: &str = "trck-aarch64";
@@ -93,11 +96,7 @@ struct GhAsset {
 
 pub fn run(args: Args) -> ExitCode {
     match run_inner(args) {
-        Ok(false) => ExitCode::SUCCESS,
-        Ok(true) => {
-            eprintln!("restart");
-            ExitCode::from(1)
-        }
+        Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("{err:#}");
             ExitCode::from(1)
@@ -105,30 +104,65 @@ pub fn run(args: Args) -> ExitCode {
     }
 }
 
-fn run_inner(args: Args) -> Result<bool> {
+#[derive(Debug)]
+struct Target {
+    dest: PathBuf,
+    restart: bool,
+}
+
+fn resolve_target(
+    unit: &Path,
+    installed: &Path,
+    current_exe: PathBuf,
+    is_root: bool,
+) -> Result<Target> {
+    if unit.exists() {
+        if !is_root {
+            bail!("trck update needs root: sudo trck update");
+        }
+        return Ok(Target {
+            dest: installed.to_path_buf(),
+            restart: true,
+        });
+    }
+    Ok(Target {
+        dest: current_exe,
+        restart: false,
+    })
+}
+
+fn run_inner(args: Args) -> Result<()> {
     let current = Version::parse(CURRENT).expect("CARGO_PKG_VERSION is X.Y.Z");
     let exact = args.version.as_deref().map(Version::parse).transpose()?;
     if let Some(v) = exact
         && current == v
     {
         println!("trck {current} is up to date");
-        return Ok(false);
+        return Ok(());
     }
+    let plan = resolve_target(
+        Path::new(service::UNIT_PATH),
+        Path::new(service::BIN_PATH),
+        std::env::current_exe().context("cannot resolve this binary")?,
+        Uid::effective().is_root(),
+    )?;
     let (target, assets) = match exact {
         Some(v) => fetch_tag(&v.tag())?,
         None => fetch_latest()?,
     };
     if exact.is_none() && current >= target {
         println!("trck {current} is up to date");
-        return Ok(false);
+        return Ok(());
     }
     let asset = pick_asset(&assets)
         .ok_or_else(|| anyhow!("release {} has no {ASSET_NAME} asset", target.tag()))?;
-    let dest = std::env::current_exe().context("cannot resolve this binary")?;
-    install(&dest, asset)?;
+    install(&plan.dest, asset)?;
     println!("{current} -> {target}");
-    println!("replaced {}", dest.display());
-    Ok(true)
+    println!("replaced {}", plan.dest.display());
+    if plan.restart {
+        service::run_host(&["systemctl", "try-restart", "trck"])?;
+    }
+    Ok(())
 }
 
 fn pick_asset(assets: &[Asset]) -> Option<&Asset> {
@@ -465,5 +499,45 @@ mod tests {
     fn missing_curl_names_apt() {
         let msg = curl_spawn(io::Error::new(ErrorKind::NotFound, "nope")).to_string();
         assert_eq!(msg, "trck update needs curl: sudo apt install curl");
+    }
+
+    #[test]
+    fn service_unit_selects_installed_bin() {
+        let dir = temp_dir();
+        let unit = dir.join("trck.service");
+        let installed = dir.join("usr-local-bin-trck");
+        let current = dir.join("home-trck");
+        fs::write(&unit, b"").unwrap();
+        let plan = resolve_target(&unit, &installed, current, true).unwrap();
+        assert_eq!(plan.dest, installed);
+        assert!(plan.restart);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_unit_selects_current_exe() {
+        let dir = temp_dir();
+        let unit = dir.join("trck.service");
+        let installed = dir.join("usr-local-bin-trck");
+        let current = dir.join("home-trck");
+        let as_user = resolve_target(&unit, &installed, current.clone(), false).unwrap();
+        let as_root = resolve_target(&unit, &installed, current.clone(), true).unwrap();
+        assert_eq!(as_user.dest, current);
+        assert!(!as_user.restart);
+        assert_eq!(as_root.dest, current);
+        assert!(!as_root.restart);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn service_unit_without_root_fails() {
+        let dir = temp_dir();
+        let unit = dir.join("trck.service");
+        let installed = dir.join("usr-local-bin-trck");
+        let current = dir.join("home-trck");
+        fs::write(&unit, b"").unwrap();
+        let err = resolve_target(&unit, &installed, current, false).unwrap_err();
+        assert_eq!(err.to_string(), "trck update needs root: sudo trck update");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -99,7 +99,7 @@ enum Cmd {
         #[arg(long, default_value = "1", value_parser = parse_pace)]
         speed: Pace,
     },
-    /// Replace this binary from GitHub Releases.
+    /// Replace the service binary, or this binary if the service is not installed, from GitHub Releases.
     Update(update::Args),
     /// Install and enable the systemd unit.
     InstallService,

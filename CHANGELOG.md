@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `sudo trck update` replaces `/usr/local/bin/trck` and `systemctl try-restart trck` when the service is installed. Success exits 0.
+
 ## [0.5.1](https://github.com/igormenato/adsb/compare/v0.5.0...v0.5.1) - 2026-11-19
 
 ### Added
