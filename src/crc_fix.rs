@@ -1,16 +1,25 @@
-//! One-bit Mode S CRC correction for DF11/DF17/DF18 (dump1090-fa `--fix`).
+//! Mode S CRC correction for DF11/DF17/DF18 (dump1090-fa `--fix`).
+//!
+//! 1-bit PI repair is ungated. DF17/18 also try a 2-bit syndrome table
+//! (collisions with other 1–4 bit patterns dropped; table from `build.rs`)
+//! when both bits are among the [`TWO_BIT_CONF_N`] lowest-confidence magnitudes.
 
 use std::sync::OnceLock;
+
+include!(concat!(env!("OUT_DIR"), "/two_bit_long.rs"));
 
 use rs1090::decode::crc::modes_checksum;
 
 const LONG_BITS: usize = 112;
 const SHORT_BITS: usize = 56;
 const AA_BITS: std::ops::RangeInclusive<usize> = 8..=31;
+/// 2-bit DF17/18 repair only if both flipped bits rank in this many weakest |corr|.
+const TWO_BIT_CONF_N: usize = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Correction {
     pub bit: usize,
+    pub extra: Option<usize>,
 }
 
 fn long_syndromes() -> &'static [u32; LONG_BITS] {
@@ -63,20 +72,36 @@ pub fn aa_bit(bit: usize) -> bool {
     AA_BITS.contains(&bit)
 }
 
-/// Flip a single correctable PI bit. Input DF must be 11, 17, or 18.
-pub fn correct_pi(msg: &mut [u8; 14]) -> Option<Correction> {
+pub(crate) fn prepare_tables() {
+    let _ = long_syndromes();
+    let _ = short_syndromes();
+}
+
+pub(crate) fn lookup_two_bit(syndrome: u32) -> Option<(u8, u8)> {
+    TWO_BIT_LONG
+        .binary_search_by_key(&syndrome, |&(s, _, _)| s)
+        .ok()
+        .map(|i| (TWO_BIT_LONG[i].1, TWO_BIT_LONG[i].2))
+}
+
+/// 1-bit repair, plus the 112-bit remainder so the caller can try 2-bit without another CRC.
+pub(crate) fn correct_pi_syndrome(msg: &mut [u8; 14]) -> (Option<Correction>, u32) {
     let df0 = df(msg);
+    let Some(long) = long_crc(msg) else {
+        return (None, 0);
+    };
     if !matches!(df0, 11 | 17 | 18) {
-        return None;
+        return (None, long);
     }
-    let long = long_crc(msg)?;
-    let short = short_crc(msg)?;
+    let Some(short) = short_crc(msg) else {
+        return (None, long);
+    };
 
     if matches!(df0, 17 | 18) && long == 0 {
-        return None;
+        return (None, 0);
     }
     if df0 == 11 && short & 0x00ff_ff80 == 0 {
-        return None;
+        return (None, long);
     }
 
     if long != 0
@@ -87,7 +112,7 @@ pub fn correct_pi(msg: &mut [u8; 14]) -> Option<Correction> {
         let df1 = df(&trial);
         if matches!(df1, 17 | 18) && long_crc(&trial) == Some(0) {
             *msg = trial;
-            return Some(Correction { bit });
+            return (Some(Correction { bit, extra: None }), 0);
         }
     }
 
@@ -98,17 +123,150 @@ pub fn correct_pi(msg: &mut [u8; 14]) -> Option<Correction> {
         flip(&mut trial, bit);
         if df(&trial) == 11 && short_crc(&trial).is_some_and(|c| c & 0x00ff_ff80 == 0) {
             *msg = trial;
-            return Some(Correction { bit });
+            return (Some(Correction { bit, extra: None }), 0);
         }
     }
 
+    (None, long)
+}
+
+pub(crate) fn try_two_bit(msg: &mut [u8; 14], long: u32, conf: &[i32]) -> Option<Correction> {
+    if !matches!(df(msg), 17 | 18) || long == 0 {
+        return None;
+    }
+    let (a, b) = lookup_two_bit(long)?;
+    if !among_weakest(a as usize, conf) || !among_weakest(b as usize, conf) {
+        return None;
+    }
+    let mut trial = *msg;
+    flip(&mut trial, a as usize);
+    flip(&mut trial, b as usize);
+    let df1 = df(&trial);
+    if matches!(df1, 17 | 18) && long_crc(&trial) == Some(0) {
+        *msg = trial;
+        return Some(Correction {
+            bit: a as usize,
+            extra: Some(b as usize),
+        });
+    }
     None
+}
+
+fn among_weakest(bit: usize, conf: &[i32]) -> bool {
+    if bit >= conf.len() {
+        return false;
+    }
+    let target = conf[bit].unsigned_abs();
+    let mut rank = 0usize;
+    for (i, &c) in conf.iter().enumerate() {
+        let mag = c.unsigned_abs();
+        if mag < target || (mag == target && i < bit) {
+            rank += 1;
+            if rank >= TWO_BIT_CONF_N {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
+
     use super::*;
-    use crate::modes::{EVEN, IDENT, ODD, STATUS, VELOCITY, df17};
+    use crate::modes::{EVEN, IDENT, ODD, STATUS, VELOCITY, df17, df18_cf0};
+
+    /// Unique 2-bit syndromes; collisions with other 1–4 bit patterns dropped.
+    fn rebuild_two_bit_long() -> Vec<(u32, u8, u8)> {
+        let s = long_syndromes();
+        let one: HashSet<u32> = s.iter().copied().collect();
+        let mut map: HashMap<u32, Option<(u8, u8)>> = HashMap::new();
+        for i in 0..LONG_BITS {
+            for j in (i + 1)..LONG_BITS {
+                let syn = s[i] ^ s[j];
+                if syn == 0 || one.contains(&syn) {
+                    continue;
+                }
+                match map.get_mut(&syn) {
+                    None => {
+                        map.insert(syn, Some((i as u8, j as u8)));
+                    }
+                    Some(slot) => *slot = None,
+                }
+            }
+        }
+        for i in 0..LONG_BITS {
+            for j in (i + 1)..LONG_BITS {
+                let sj = s[i] ^ s[j];
+                for k in (j + 1)..LONG_BITS {
+                    let sk = sj ^ s[k];
+                    if let Some(slot) = map.get_mut(&sk) {
+                        *slot = None;
+                    }
+                    for &sl in s.iter().skip(k + 1) {
+                        if let Some(slot) = map.get_mut(&(sk ^ sl)) {
+                            *slot = None;
+                        }
+                    }
+                }
+            }
+        }
+        let mut rows: Vec<(u32, u8, u8)> = map
+            .into_iter()
+            .filter_map(|(syn, pair)| pair.map(|(a, b)| (syn, a, b)))
+            .collect();
+        rows.sort_unstable_by_key(|r| r.0);
+        rows
+    }
+
+    #[test]
+    fn two_bit_long_matches_dump1090_2_4() {
+        let got = rebuild_two_bit_long();
+        assert_eq!(got.as_slice(), super::TWO_BIT_LONG.as_slice());
+    }
+
+    fn unique_two_bit_pair() -> (usize, usize) {
+        for &(_, a, b) in super::TWO_BIT_LONG.iter() {
+            if a >= 8 {
+                return (a as usize, b as usize);
+            }
+        }
+        panic!("no unique 2-bit pair");
+    }
+
+    fn colliding_two_bit_pair() -> (usize, usize) {
+        let s = long_syndromes();
+        for a in 8..LONG_BITS {
+            for b in (a + 1)..LONG_BITS {
+                let syn = s[a] ^ s[b];
+                if syn != 0 && find_bit(syn, s).is_none() && lookup_two_bit(syn).is_none() {
+                    return (a, b);
+                }
+            }
+        }
+        panic!("no colliding 2-bit pair");
+    }
+
+    fn weak_at(bits: &[usize]) -> [i32; LONG_BITS] {
+        let mut conf = [10_000_i32; LONG_BITS];
+        for &b in bits {
+            conf[b] = 0;
+        }
+        conf
+    }
+
+    fn correct_with_conf(msg: &mut [u8; 14], conf: &[i32]) -> Option<Correction> {
+        let (one, long) = super::correct_pi_syndrome(msg);
+        if one.is_some() {
+            return one;
+        }
+        super::try_two_bit(msg, long, conf)
+    }
+
+    fn correct_pi(msg: &mut [u8; 14]) -> Option<Correction> {
+        super::correct_pi_syndrome(msg).0
+    }
 
     fn remainder(frame: &[u8; 14]) -> u32 {
         long_crc(frame).expect("crc")
@@ -144,6 +302,103 @@ mod tests {
         assert!(correct_pi(&mut damaged).is_none());
         assert_eq!(damaged, original);
         assert_ne!(remainder(&damaged), 0);
+    }
+
+    #[test]
+    fn two_bit_unique_pair_is_restored_when_weak() {
+        let (a, b) = unique_two_bit_pair();
+        let conf = weak_at(&[a, b]);
+        for frame in [&EVEN, &ODD] {
+            let mut damaged = *frame;
+            flip(&mut damaged, a);
+            flip(&mut damaged, b);
+            let got = correct_with_conf(&mut damaged, &conf).expect("2-bit");
+            assert_eq!(got.extra, Some(b));
+            assert_eq!(got.bit, a);
+            assert_eq!(&damaged, frame);
+        }
+        let mut df18 = df18_cf0(0xABC001, EVEN[4..11].try_into().unwrap());
+        assert_eq!(df(&df18), 18);
+        assert_eq!(remainder(&df18), 0);
+        let good = df18;
+        flip(&mut df18, a);
+        flip(&mut df18, b);
+        let got = correct_with_conf(&mut df18, &conf).expect("df18 2-bit");
+        assert_eq!(got.bit, a);
+        assert_eq!(got.extra, Some(b));
+        assert_eq!(df18, good);
+    }
+
+    #[test]
+    fn two_bit_collision_is_rejected() {
+        let (a, b) = colliding_two_bit_pair();
+        let mut damaged = EVEN;
+        flip(&mut damaged, a);
+        flip(&mut damaged, b);
+        let original = damaged;
+        let conf = weak_at(&[a, b]);
+        assert!(correct_with_conf(&mut damaged, &conf).is_none());
+        assert_eq!(damaged, original);
+    }
+
+    #[test]
+    fn two_bit_high_confidence_is_rejected() {
+        let (a, b) = unique_two_bit_pair();
+        let mut damaged = EVEN;
+        flip(&mut damaged, a);
+        flip(&mut damaged, b);
+        let original = damaged;
+        let mut conf = [0_i32; LONG_BITS];
+        conf[a] = 10_000;
+        conf[b] = 10_000;
+        assert!(correct_with_conf(&mut damaged, &conf).is_none());
+        assert_eq!(damaged, original);
+    }
+
+    #[test]
+    fn two_bit_skips_non_df17_18() {
+        let (a, b) = unique_two_bit_pair();
+        let conf = weak_at(&[a, b]);
+
+        let mut df4 = [0u8; 14];
+        df4[0] = 0x20;
+        df4[1] = 0x00;
+        df4[2] = 0x10;
+        flip(&mut df4, a);
+        flip(&mut df4, b);
+        let original = df4;
+        assert!(correct_with_conf(&mut df4, &conf).is_none());
+        assert_eq!(df4, original);
+
+        let mut df11 = [0u8; 14];
+        df11[0] = 0x58;
+        df11[1] = 0x40;
+        df11[2] = 0x05;
+        df11[3] = 0x8B;
+        let crc = modes_checksum(&df11[..7], SHORT_BITS).expect("df11");
+        df11[4] = (crc >> 16) as u8;
+        df11[5] = (crc >> 8) as u8;
+        df11[6] = crc as u8;
+        flip(&mut df11, 10);
+        flip(&mut df11, 20);
+        let original = df11;
+        assert_eq!(df(&df11), 11);
+        assert!(correct_with_conf(&mut df11, &conf).is_none());
+        assert_eq!(df11, original);
+
+        const SYNDROME: u32 = 0x00C3_97DB;
+        let mut df16 = [0u8; 14];
+        df16[0] = 16 << 3;
+        df16[1] = 0x12;
+        let crc = modes_checksum(&df16, LONG_BITS).expect("df16");
+        let pi = crc ^ SYNDROME;
+        df16[11] = (pi >> 16) as u8;
+        df16[12] = (pi >> 8) as u8;
+        df16[13] = pi as u8;
+        let original = df16;
+        assert!(correct_with_conf(&mut df16, &conf).is_none());
+        assert_eq!(df16, original);
+        assert_eq!(df16[0] >> 3, 16);
     }
 
     #[test]

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Gated 2-bit Mode S CRC repair for DF17/DF18 (syndrome table with 1–4 bit collision rejection; both bits must be among the 10 weakest |corr|). Still on with `--fix`; `--no-fix` disables 1-bit and 2-bit.
+
 ### Fixed
 
 - `sudo trck update` replaces `/usr/local/bin/trck` and `systemctl try-restart trck` when the service is installed. Success exits 0.
