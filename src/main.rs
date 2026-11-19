@@ -16,8 +16,8 @@ use trck::{DEFAULT_PATH, Replay, ReplayLine, Tracker, is_mode_s};
 use writer::Writer;
 
 mod doctor;
-mod hex;
 mod iq;
+mod pump;
 mod radio;
 mod service;
 mod sim;
@@ -285,12 +285,12 @@ fn main() -> ExitCode {
             args.output.table.display()
         );
         if text == "-" {
-            return hex::run_hex_stdin(&mut writer, &stop);
+            return pump::run_hex_stdin(&mut writer, &stop);
         }
-        let Some(addrs) = hex::resolve_addr(text) else {
+        let Some(addrs) = pump::resolve_addr(text) else {
             return fail(format!("hex {text}: expected host:port"));
         };
-        return hex::run_hex(&addrs, text, &mut writer, &stop);
+        return pump::run_hex(&addrs, text, &mut writer, &stop);
     }
 
     eprintln!(
