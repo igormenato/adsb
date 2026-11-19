@@ -108,6 +108,20 @@ fn extended_squitter(df_ca: u8, icao: u32, me: [u8; 7]) -> [u8; 14] {
     frame
 }
 
+/// DF11 all-call reply with IID overlay 0 (56-bit PI CRC).
+pub fn df11(icao: u32) -> [u8; 14] {
+    let mut frame = [0u8; 14];
+    frame[0] = 11 << 3;
+    frame[1] = (icao >> 16) as u8;
+    frame[2] = (icao >> 8) as u8;
+    frame[3] = icao as u8;
+    let crc = rs1090::decode::crc::modes_checksum(&frame[..7], 56).expect("DF11");
+    frame[4] = (crc >> 16) as u8;
+    frame[5] = (crc >> 8) as u8;
+    frame[6] = crc as u8;
+    frame
+}
+
 /// DF5 identity reply. AP overlay so the 56-bit remainder is `icao`.
 pub fn df5_identity(icao: u32, squawk: u16) -> [u8; 7] {
     let mut frame = [0u8; 7];

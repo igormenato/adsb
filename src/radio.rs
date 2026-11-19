@@ -281,7 +281,7 @@ mod tests {
     use super::*;
     use std::io::{self, Cursor};
 
-    use crate::iq::{Synth, encode_cu8};
+    use trck::iq::{Synth, encode_cu8};
     use trck::modes::EVEN;
 
     struct OddReads {

@@ -6,6 +6,7 @@ mod crc_fix;
 mod decode;
 pub mod demod;
 mod frame;
+pub mod iq;
 mod lines;
 pub mod mag;
 pub mod modes;

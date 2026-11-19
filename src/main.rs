@@ -16,7 +16,6 @@ use trck::{DEFAULT_PATH, Replay, ReplayLine, Tracker, is_mode_s};
 use writer::Writer;
 
 mod doctor;
-mod iq;
 mod pump;
 mod radio;
 mod service;

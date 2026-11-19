@@ -1,5 +1,7 @@
 //! One-bit Mode S CRC correction for DF11/DF17/DF18 (dump1090-fa `--fix`).
+//! Optional 2-bit DF17/18 repair (`--fix-2bit` style) lives behind [`FixPolicy`].
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use rs1090::decode::crc::modes_checksum;
@@ -11,6 +13,15 @@ const AA_BITS: std::ops::RangeInclusive<usize> = 8..=31;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Correction {
     pub bit: usize,
+    pub nbits: u8,
+    pub extra: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixPolicy {
+    pub one_bit: bool,
+    pub two_bit: bool,
+    pub conf_n: Option<u8>,
 }
 
 fn long_syndromes() -> &'static [u32; LONG_BITS] {
@@ -65,6 +76,22 @@ pub fn aa_bit(bit: usize) -> bool {
 
 /// Flip a single correctable PI bit. Input DF must be 11, 17, or 18.
 pub fn correct_pi(msg: &mut [u8; 14]) -> Option<Correction> {
+    correct_with(
+        msg,
+        FixPolicy {
+            one_bit: true,
+            two_bit: false,
+            conf_n: None,
+        },
+        None,
+    )
+}
+
+pub fn correct_with(
+    msg: &mut [u8; 14],
+    policy: FixPolicy,
+    conf: Option<&[i32]>,
+) -> Option<Correction> {
     let df0 = df(msg);
     if !matches!(df0, 11 | 17 | 18) {
         return None;
@@ -79,30 +106,132 @@ pub fn correct_pi(msg: &mut [u8; 14]) -> Option<Correction> {
         return None;
     }
 
-    if long != 0
+    if policy.one_bit
+        && long != 0
         && let Some(bit) = find_bit(long, long_syndromes())
+        && low_conf(bit, conf, policy.conf_n)
     {
         let mut trial = *msg;
         flip(&mut trial, bit);
         let df1 = df(&trial);
         if matches!(df1, 17 | 18) && long_crc(&trial) == Some(0) {
             *msg = trial;
-            return Some(Correction { bit });
+            return Some(Correction {
+                bit,
+                nbits: 1,
+                extra: None,
+            });
         }
     }
 
-    if short != 0
+    if policy.one_bit
+        && short != 0
         && let Some(bit) = find_bit(short, short_syndromes())
+        && low_conf(bit, conf, policy.conf_n)
     {
         let mut trial = *msg;
         flip(&mut trial, bit);
         if df(&trial) == 11 && short_crc(&trial).is_some_and(|c| c & 0x00ff_ff80 == 0) {
             *msg = trial;
-            return Some(Correction { bit });
+            return Some(Correction {
+                bit,
+                nbits: 1,
+                extra: None,
+            });
+        }
+    }
+
+    if policy.two_bit
+        && matches!(df0, 17 | 18)
+        && long != 0
+        && let Some(&(a, b)) = two_bit_long().get(&long)
+        && low_conf(a as usize, conf, policy.conf_n)
+        && low_conf(b as usize, conf, policy.conf_n)
+    {
+        let mut trial = *msg;
+        flip(&mut trial, a as usize);
+        flip(&mut trial, b as usize);
+        let df1 = df(&trial);
+        if matches!(df1, 17 | 18) && long_crc(&trial) == Some(0) {
+            *msg = trial;
+            return Some(Correction {
+                bit: a as usize,
+                nbits: 2,
+                extra: Some(b as usize),
+            });
         }
     }
 
     None
+}
+
+fn low_conf(bit: usize, conf: Option<&[i32]>, n: Option<u8>) -> bool {
+    let Some(n) = n else {
+        return true;
+    };
+    let Some(conf) = conf else {
+        return true;
+    };
+    if n == 0 || bit >= conf.len() {
+        return false;
+    }
+    let n = usize::from(n);
+    let target = conf[bit].unsigned_abs();
+    let mut rank = 0usize;
+    for (i, &c) in conf.iter().enumerate() {
+        let mag = c.unsigned_abs();
+        if mag < target || (mag == target && i < bit) {
+            rank += 1;
+            if rank >= n {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Unique 2-bit syndromes on 112-bit PI, collisions with other 1–4 bit patterns dropped
+/// (dump1090-fa `prepareErrorTable(..., 2, 4)`).
+fn two_bit_long() -> &'static HashMap<u32, (u16, u16)> {
+    static TABLE: OnceLock<HashMap<u32, (u16, u16)>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let s = long_syndromes();
+        let one: std::collections::HashSet<u32> = s.iter().copied().collect();
+        let mut map: HashMap<u32, Option<(u16, u16)>> = HashMap::new();
+        for i in 0..LONG_BITS {
+            for j in (i + 1)..LONG_BITS {
+                let syn = s[i] ^ s[j];
+                if syn == 0 || one.contains(&syn) {
+                    continue;
+                }
+                match map.get_mut(&syn) {
+                    None => {
+                        map.insert(syn, Some((i as u16, j as u16)));
+                    }
+                    Some(slot) => *slot = None,
+                }
+            }
+        }
+        for i in 0..LONG_BITS {
+            for j in (i + 1)..LONG_BITS {
+                let sj = s[i] ^ s[j];
+                for k in (j + 1)..LONG_BITS {
+                    let sk = sj ^ s[k];
+                    if let Some(slot) = map.get_mut(&sk) {
+                        *slot = None;
+                    }
+                    for &sl in s.iter().skip(k + 1) {
+                        if let Some(slot) = map.get_mut(&(sk ^ sl)) {
+                            *slot = None;
+                        }
+                    }
+                }
+            }
+        }
+        map.into_iter()
+            .filter_map(|(syn, pair)| pair.map(|p| (syn, p)))
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -144,6 +273,73 @@ mod tests {
         assert!(correct_pi(&mut damaged).is_none());
         assert_eq!(damaged, original);
         assert_ne!(remainder(&damaged), 0);
+    }
+
+    #[test]
+    fn two_bit_policy_restores_some_df17_pairs() {
+        let policy = FixPolicy {
+            one_bit: true,
+            two_bit: true,
+            conf_n: None,
+        };
+        let mut restored = 0;
+        for a in 8..24 {
+            for b in (a + 1)..40 {
+                let mut damaged = EVEN;
+                flip(&mut damaged, a);
+                flip(&mut damaged, b);
+                if correct_with(&mut damaged, policy, None).is_some_and(|c| c.nbits == 2)
+                    && damaged == EVEN
+                {
+                    restored += 1;
+                }
+            }
+        }
+        assert!(
+            restored >= 8,
+            "2-bit table restored {restored} DF17 pairs in the sample"
+        );
+    }
+
+    #[test]
+    fn confidence_gate_rejects_high_confidence_one_bit() {
+        let mut damaged = EVEN;
+        flip(&mut damaged, 20);
+        let mut conf = [1_i32; LONG_BITS];
+        conf[20] = 10_000;
+        let gated = FixPolicy {
+            one_bit: true,
+            two_bit: false,
+            conf_n: Some(8),
+        };
+        assert!(correct_with(&mut damaged, gated, Some(&conf)).is_none());
+        let mut damaged = EVEN;
+        flip(&mut damaged, 20);
+        conf[20] = 0;
+        let got = correct_with(&mut damaged, gated, Some(&conf)).expect("low conf");
+        assert_eq!(got.bit, 20);
+        assert_eq!(damaged, EVEN);
+    }
+
+    #[test]
+    fn two_bit_policy_leaves_df16_alone() {
+        const SYNDROME: u32 = 0x00C3_97DB;
+        let mut df16 = [0u8; 14];
+        df16[0] = 16 << 3;
+        df16[1] = 0x12;
+        let crc = modes_checksum(&df16, LONG_BITS).expect("df16");
+        let pi = crc ^ SYNDROME;
+        df16[11] = (pi >> 16) as u8;
+        df16[12] = (pi >> 8) as u8;
+        df16[13] = pi as u8;
+        let original = df16;
+        let policy = FixPolicy {
+            one_bit: true,
+            two_bit: true,
+            conf_n: None,
+        };
+        assert!(correct_with(&mut df16, policy, None).is_none());
+        assert_eq!(df16, original);
     }
 
     #[test]

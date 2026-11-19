@@ -13,8 +13,8 @@ use serde_json::Value;
 use trck::modes::{airborne_position, hex14, identification, status, velocity};
 use trck::parse_hex_frame;
 
-use super::iq::{Synth, encode_cu8};
 use super::radio;
+use trck::iq::{Synth, encode_cu8};
 
 const GEOM_ALT: u32 = 8;
 
@@ -192,6 +192,7 @@ fn write_iq(path: &Path, text: &str, opts: &Args) -> Result<()> {
             seed: opts.iq_seed,
             sample_hz: opts.iq_rate,
             overlap_us: None,
+            ..Synth::default()
         },
     )?;
     fs::write(path, bytes).with_context(|| path.display().to_string())

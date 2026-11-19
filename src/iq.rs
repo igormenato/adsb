@@ -26,6 +26,12 @@ pub struct Synth {
     pub seed: u64,
     pub sample_hz: u32,
     pub overlap_us: Option<f64>,
+    /// Sample-clock offset in µs. Default matches dump1090 phase 4.
+    pub align_us: f64,
+    /// Silence before the first frame, in µs.
+    pub leading_us: f64,
+    /// Extra gap after each frame, drawn U[0, start_jitter_us] from `seed`.
+    pub start_jitter_us: f64,
 }
 
 impl Default for Synth {
@@ -34,8 +40,11 @@ impl Default for Synth {
             amplitude: 0.8,
             snr_db: None,
             seed: 1,
-            sample_hz: super::radio::SAMPLE_HZ,
+            sample_hz: 2_400_000,
             overlap_us: None,
+            align_us: ALIGN_US,
+            leading_us: 0.0,
+            start_jitter_us: 0.0,
         }
     }
 }
@@ -55,19 +64,85 @@ pub fn encode_cu8(frames: &[[u8; 14]], synth: Synth) -> Result<Vec<u8>> {
     {
         bail!("iq: snr must be finite");
     }
-    let starts = frame_starts(frames.len(), synth.overlap_us);
-    let last = starts.last().copied().unwrap_or(0.0);
+    let mut rng = Rng(synth.seed | 1);
+    let starts = frame_starts(
+        frames.len(),
+        synth.overlap_us,
+        synth.leading_us,
+        synth.start_jitter_us,
+        &mut rng,
+    );
+    let last = starts.last().copied().unwrap_or(synth.leading_us);
     let duration_us = last + FRAME_US + GUARD_US;
     let n = ((duration_us * 1e-6) * f64::from(synth.sample_hz)).ceil() as usize + 1;
     let (amp, sigma) = pulse_and_noise(synth.amplitude, synth.snr_db);
-    let mut rng = Rng(synth.seed | 1);
+    Ok(fill_cu8(
+        n,
+        synth.sample_hz,
+        synth.align_us,
+        amp,
+        sigma,
+        frames,
+        &starts,
+        rng,
+    ))
+}
+
+/// AWGN only (no Mode S pulses). `snr_db` sets σ the same way as [`encode_cu8`].
+pub fn encode_noise_cu8(duration_s: f64, synth: Synth) -> Result<Vec<u8>> {
+    if !(duration_s.is_finite() && duration_s > 0.0) {
+        bail!("iq: noise duration must be > 0");
+    }
+    if synth.sample_hz == 0 {
+        bail!("iq: sample rate must be > 0");
+    }
+    if let Some(snr) = synth.snr_db
+        && !snr.is_finite()
+    {
+        bail!("iq: snr must be finite");
+    }
+    let n = (duration_s * f64::from(synth.sample_hz)).ceil() as usize;
+    let (_amp, sigma) = pulse_and_noise(synth.amplitude, synth.snr_db);
+    let rng = Rng(synth.seed | 1);
+    Ok(fill_cu8(
+        n,
+        synth.sample_hz,
+        synth.align_us,
+        0.0,
+        sigma,
+        &[],
+        &[],
+        rng,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_cu8(
+    n: usize,
+    sample_hz: u32,
+    align_us: f64,
+    amp: f64,
+    sigma: f64,
+    frames: &[[u8; 14]],
+    starts: &[f64],
+    mut rng: Rng,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(n * 2);
+    let mut active = 0usize;
     for i in 0..n {
-        let t_us = ALIGN_US + i as f64 * 1e6 / f64::from(synth.sample_hz);
+        let t_us = align_us + i as f64 * 1e6 / f64::from(sample_hz);
+        while active < starts.len() && t_us >= starts[active] + FRAME_US {
+            active += 1;
+        }
         let mut re = 0.0;
-        for (frame, start) in frames.iter().zip(starts.iter()) {
-            if pulse_at(t_us - start, frame) {
-                re = (re + amp).clamp(-1.0, 1.0);
+        if amp > 0.0 {
+            for k in active..starts.len() {
+                if t_us < starts[k] {
+                    break;
+                }
+                if pulse_at(t_us - starts[k], &frames[k]) {
+                    re = (re + amp).clamp(-1.0, 1.0);
+                }
             }
         }
         re += sigma * rng.gaussian();
@@ -75,15 +150,36 @@ pub fn encode_cu8(frames: &[[u8; 14]], synth: Synth) -> Result<Vec<u8>> {
         out.push(to_cu8(re));
         out.push(to_cu8(im));
     }
-    Ok(out)
+    out
 }
 
-fn frame_starts(n: usize, overlap_us: Option<f64>) -> Vec<f64> {
+fn frame_starts(
+    n: usize,
+    overlap_us: Option<f64>,
+    leading_us: f64,
+    jitter_us: f64,
+    rng: &mut Rng,
+) -> Vec<f64> {
     let dt = match overlap_us {
         Some(overlap) if overlap.is_finite() && overlap > 0.0 => (FRAME_US - overlap).max(1.0),
         _ => FRAME_US + GUARD_US,
     };
-    (0..n).map(|i| i as f64 * dt).collect()
+    let mut t = leading_us.max(0.0);
+    let jitter = if jitter_us.is_finite() && jitter_us > 0.0 {
+        jitter_us
+    } else {
+        0.0
+    };
+    (0..n)
+        .map(|_| {
+            let start = t;
+            t += dt;
+            if jitter > 0.0 {
+                t += rng.u01() * jitter;
+            }
+            start
+        })
+        .collect()
 }
 
 /// Pulse amplitude and per-component AWGN σ.
@@ -157,12 +253,12 @@ impl Rng {
 mod tests {
     use rs1090::decode::crc::modes_checksum;
 
-    use trck::demod::{demodulate2400, msg_octets};
-    use trck::mag::mag_cu8;
-    use trck::{EmergencyKind, Tracker, pack_frame};
+    use crate::demod::{demodulate2400, msg_octets};
+    use crate::mag::mag_cu8;
+    use crate::modes::{EVEN, ODD, df5_identity};
+    use crate::{EmergencyKind, Tracker, pack_frame};
 
     use super::*;
-    use trck::modes::{EVEN, ODD, df5_identity};
 
     fn recovered(bytes: &[u8]) -> Vec<[u8; 14]> {
         demodulate2400(&mag_cu8(bytes), true)
@@ -310,7 +406,7 @@ mod tests {
 
     #[test]
     fn skip_does_not_repeat_a_frame() {
-        let odd = trck::modes::ODD;
+        let odd = crate::modes::ODD;
         let bytes = encode_cu8(&[EVEN, odd], Synth::default()).expect("iq");
         let msgs = recovered(&bytes);
         assert!(msgs.len() <= 4, "n={} {msgs:02x?}", msgs.len());
@@ -333,7 +429,7 @@ mod tests {
 
     #[test]
     fn overlapping_frames_are_shorter_than_sequential() {
-        let odd = trck::modes::ODD;
+        let odd = crate::modes::ODD;
         let sequential = encode_cu8(&[EVEN, odd], Synth::default()).expect("seq");
         let overlap = encode_cu8(
             &[EVEN, odd],
