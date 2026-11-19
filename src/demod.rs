@@ -367,8 +367,26 @@ mod tests {
         assert_eq!(msg_octets(&msg).len(), 14);
     }
 
+    fn scalar_quick(samples: &[u16], j: usize) -> bool {
+        samples[j + 1] > samples[j + 7]
+            && samples[j + 12] > samples[j + 14]
+            && samples[j + 12] > samples[j + 15]
+    }
+
+    fn assert_mask16(samples: &[u16], j: usize) {
+        let window: &[u16; 31] = samples[j..j + 31].try_into().unwrap();
+        let mask = preamble_mask16(window);
+        for k in 0..16 {
+            assert_eq!(
+                mask & (1 << k) != 0,
+                scalar_quick(samples, j + k),
+                "j={j} k={k}"
+            );
+        }
+    }
+
     #[test]
-    fn preamble_mask16_matches_per_sample_quick_check() {
+    fn preamble_mask16_matches_scalar_quick_check() {
         let mut mag = vec![0u16; 64];
         let mut seed = 0x9E37_79B9_u32;
         for _ in 0..200 {
@@ -376,58 +394,50 @@ mod tests {
                 seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
                 *slot = (seed >> 16) as u16;
             }
-            let window: &[u16; 31] = mag[..31].try_into().unwrap();
-            let mask = preamble_mask16(window);
-            for k in 0..16 {
-                assert_eq!(mask & (1 << k) != 0, preamble_quick(&mag, k), "k={k}");
-            }
+            assert_mask16(&mag, 0);
         }
-    }
 
-    #[test]
-    fn vector_scan_matches_scalar_scan_on_noise() {
-        let mut mag = vec![0u16; 4096];
-        let mut seed = 1u32;
+        mag.fill(100);
+        assert_mask16(&mag, 0);
+        mag[1] = 101;
+        mag[7] = 101;
+        mag[12] = 200;
+        mag[14] = 50;
+        mag[15] = 50;
+        assert_mask16(&mag, 0);
+        mag[1] = 200;
+        mag[7] = 50;
+        mag[12] = 100;
+        mag[14] = 100;
+        mag[15] = 50;
+        assert_mask16(&mag, 0);
+        mag[14] = 50;
+        mag[15] = 100;
+        assert_mask16(&mag, 0);
+
+        mag.resize(MIN_TRAILING_SAMPLES + 20, 0);
+        seed = 1;
         for slot in mag.iter_mut() {
             seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
             *slot = (seed >> 8) as u16;
         }
-        let vector = demodulate2400(&mag, true);
-        let scalar = demodulate2400_scalar(&mag, true);
-        assert_eq!(vector.len(), scalar.len());
-        for (a, b) in vector.iter().zip(&scalar) {
-            assert_eq!(a.sample_position, b.sample_position);
-            assert_eq!(a.msg, b.msg);
-            assert_eq!(a.score, b.score);
-            assert_eq!(a.corrected_bits, b.corrected_bits);
-            assert_eq!(a.signal_level.to_bits(), b.signal_level.to_bits());
-        }
-    }
-
-    fn demodulate2400_scalar(samples: &[u16], fix: bool) -> Vec<ModeSMessage> {
-        let mut results = Vec::new();
-        if samples.len() < MIN_TRAILING_SAMPLES {
-            return results;
-        }
-        let df_long = if fix {
-            DF_LONG | df17_one_bit_damage()
-        } else {
-            DF_LONG
-        };
-        let last = samples.len() - MIN_TRAILING_SAMPLES;
+        let last = mag.len() - MIN_TRAILING_SAMPLES;
         let mut j = 0;
-        while j < last {
-            if !preamble_quick(samples, j) {
-                j += 1;
-                continue;
-            }
-            if let Some(msg) = decode_at(&samples[j..], j, df_long, fix) {
-                j += skip_after(&msg);
-                results.push(msg);
-            } else {
-                j += 1;
-            }
+        while j + 16 <= last {
+            assert_mask16(&mag, j);
+            j += 16;
         }
-        results
+        while j < last {
+            assert_eq!(preamble_quick(&mag, j), scalar_quick(&mag, j), "tail j={j}");
+            j += 1;
+        }
+        let tail = last - 1;
+        mag[tail + 1] = mag[tail + 7];
+        mag[tail + 12] = mag[tail + 14].max(mag[tail + 15]);
+        assert_eq!(
+            preamble_quick(&mag, tail),
+            scalar_quick(&mag, tail),
+            "j=last-1"
+        );
     }
 }
