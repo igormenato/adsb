@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Live IQ path: fat LTO, `panic=abort`, Cortex-A53 codegen for aarch64, and an auto-vectorized 16-wide preamble scan. Decoded messages stay bit-identical.
+
 ### Fixed
 
 - `sudo trck update` replaces `/usr/local/bin/trck` and `systemctl try-restart trck` when the service is installed. Success exits 0.
