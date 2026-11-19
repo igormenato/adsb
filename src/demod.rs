@@ -1,14 +1,14 @@
-//! 2.4 MS/s Mode S demodulator with optional 1-bit PI CRC correction.
+//! 2.4 MS/s Mode S demodulator with optional PI CRC correction.
 //!
 //! Preamble search, `slice_phase0`–`slice_phase4`, DF bitset early-out, and
 //! the post-accept skip are ported from readsb `demod_2400.c`
 //! (wiedehopf/readsb, itself a fork of dump1090-fa).
-//! The CRC gate is `score_message` (trck 1-bit PI fix), not readsb
-//! `scoreModesMessage`.
+//! The CRC gate is `score_message` (trck 1-bit PI fix, gated 2-bit DF17/18),
+//! not readsb `scoreModesMessage`.
 
 use rs1090::source::demod::{MODES_LONG_MSG_BYTES, icao_filter_test, validate_modes_message};
 
-use crate::crc_fix::{aa_bit, correct_pi};
+use crate::crc_fix::{aa_bit, correct_pi, correct_with_conf, prepare_tables};
 
 const MIN_TRAILING_SAMPLES: usize = 326;
 /// readsb `PREAMBLE_THRESHOLD_DEFAULT`.
@@ -38,6 +38,9 @@ pub fn demodulate2400(samples: &[u16], fix: bool) -> Vec<ModeSMessage> {
     let mut results = Vec::new();
     if samples.len() < MIN_TRAILING_SAMPLES {
         return results;
+    }
+    if fix {
+        prepare_tables();
     }
     let df_long = if fix {
         DF_LONG | df17_one_bit_damage()
@@ -166,7 +169,14 @@ fn score_phase(
     let mut offset = 19 + try_phase / 5;
     let mut phase = try_phase % 5;
     let mut msg = [0_u8; MODES_LONG_MSG_BYTES];
-    msg[0] = slice_byte(pa, &mut offset, &mut phase);
+    let mut conf = [0_i32; 112];
+    let mut nbits = 0usize;
+    msg[0] = slice_byte(
+        pa,
+        &mut offset,
+        &mut phase,
+        fix.then_some((&mut conf, &mut nbits)),
+    );
     let df = u32::from(msg[0] >> 3);
     let bytelen = if df_long & (1 << df) != 0 {
         14
@@ -178,10 +188,17 @@ fn score_phase(
         }
         return;
     };
+    // 2-bit repair is DF17/18 only; stop recording |corr| on short frames.
+    let record = fix && bytelen == 14;
     for slot in msg.iter_mut().take(bytelen).skip(1) {
-        *slot = slice_byte(pa, &mut offset, &mut phase);
+        *slot = slice_byte(
+            pa,
+            &mut offset,
+            &mut phase,
+            record.then_some((&mut conf, &mut nbits)),
+        );
     }
-    let (score, corrected) = score_message(&mut msg, fix);
+    let (score, corrected) = score_message(&mut msg, fix, &conf[..nbits]);
     if score > *best_score {
         *best_msg = msg;
         *best_score = score;
@@ -189,8 +206,22 @@ fn score_phase(
     }
 }
 
-fn slice_byte(m: &[u16], offset: &mut usize, phase: &mut usize) -> u8 {
+fn slice_byte(
+    m: &[u16],
+    offset: &mut usize,
+    phase: &mut usize,
+    mut conf: Option<(&mut [i32; 112], &mut usize)>,
+) -> u8 {
     let p = *offset;
+    let mut bit = |corr: i32, mask: u8| -> u8 {
+        if let Some((mags, i)) = conf.as_mut()
+            && **i < mags.len()
+        {
+            mags[**i] = corr.saturating_abs();
+            **i += 1;
+        }
+        if corr > 0 { mask } else { 0 }
+    };
     let (byte, next_phase, advance) = match *phase {
         0 => (
             bit(slice_phase0(&m[p..]), 0x80)
@@ -258,10 +289,6 @@ fn slice_byte(m: &[u16], offset: &mut usize, phase: &mut usize) -> u8 {
     byte
 }
 
-fn bit(corr: i32, mask: u8) -> u8 {
-    if corr > 0 { mask } else { 0 }
-}
-
 fn slice_phase0(m: &[u16]) -> i32 {
     18 * i32::from(m[0]) - 15 * i32::from(m[1]) - 3 * i32::from(m[2])
 }
@@ -286,11 +313,16 @@ fn addr(msg: &[u8]) -> u32 {
     u32::from(msg[1]) << 16 | u32::from(msg[2]) << 8 | u32::from(msg[3])
 }
 
-fn score_message(msg: &mut [u8; 14], fix: bool) -> (i32, u8) {
+fn score_message(msg: &mut [u8; 14], fix: bool, conf: &[i32]) -> (i32, u8) {
     if !fix {
         return (validate_modes_message(msg), 0);
     }
-    match correct_pi(msg) {
+    let correction = if conf.len() >= 112 {
+        correct_with_conf(msg, conf)
+    } else {
+        correct_pi(msg)
+    };
+    match correction {
         None => (validate_modes_message(msg), 0),
         Some(correction) => {
             let df = msg[0] >> 3;
@@ -298,10 +330,12 @@ fn score_message(msg: &mut [u8; 14], fix: bool) -> (i32, u8) {
             if df == 11 && !known {
                 return (-2, 0);
             }
-            if matches!(df, 17 | 18) && aa_bit(correction.bit) && !known {
+            let aa = aa_bit(correction.bit) || correction.extra.is_some_and(aa_bit);
+            if matches!(df, 17 | 18) && aa && !known {
                 return (-2, 0);
             }
-            (validate_modes_message(msg), 1)
+            let nbits = if correction.extra.is_some() { 2 } else { 1 };
+            (validate_modes_message(msg), nbits)
         }
     }
 }

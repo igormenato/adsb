@@ -74,7 +74,7 @@ nc localhost 30002 | ./trck --hex - --uart /dev/serial0
 ./trck --iq capture.cu8 --uart -
 ```
 
-`--iq` is an RTL-SDR cu8 capture on the same dump1090-2400 path as the dongle. `--iq-rate` is the file sample rate and defaults to 2400000. 1-bit CRC correction is on; `--no-fix` turns it off.
+`--iq` is an RTL-SDR cu8 capture on the same dump1090-2400 path as the dongle. `--iq-rate` is the file sample rate and defaults to 2400000. CRC correction is on (1-bit DF11/17/18, plus 2-bit DF17/18 when both flipped bits are among the 10 lowest-confidence magnitudes); `--no-fix` turns it off.
 
 ## ESP32
 

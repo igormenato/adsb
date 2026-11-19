@@ -56,7 +56,7 @@ struct Args {
     /// Sample rate of --iq. Other rates are resampled to 2.4 MS/s.
     #[arg(long, value_name = "HZ")]
     iq_rate: Option<u32>,
-    /// Disable 1-bit Mode S CRC correction (dump1090-fa `--fix` is the default).
+    /// Disable Mode S CRC correction (1-bit DF11/17/18 and gated 2-bit DF17/18).
     #[arg(long)]
     no_fix: bool,
     #[command(flatten)]
