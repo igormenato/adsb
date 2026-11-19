@@ -1,12 +1,12 @@
 //! Mode S CRC correction for DF11/DF17/DF18 (dump1090-fa `--fix`).
 //!
 //! 1-bit PI repair is ungated. DF17/18 also try a 2-bit syndrome table
-//! (collisions with other 1–4 bit patterns dropped; baked in `two_bit_long.inc`)
+//! (collisions with other 1–4 bit patterns dropped; table from `build.rs`)
 //! when both bits are among the [`TWO_BIT_CONF_N`] lowest-confidence magnitudes.
 
 use std::sync::OnceLock;
 
-include!("two_bit_long.inc");
+include!(concat!(env!("OUT_DIR"), "/two_bit_long.rs"));
 
 use rs1090::decode::crc::modes_checksum;
 
@@ -173,7 +173,6 @@ fn among_weakest(bit: usize, conf: &[i32]) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
-    use std::path::PathBuf;
 
     use super::*;
     use crate::modes::{EVEN, IDENT, ODD, STATUS, VELOCITY, df17, df18_cf0};
@@ -221,40 +220,10 @@ mod tests {
         rows
     }
 
-    fn two_bit_inc_source(rows: &[(u32, u8, u8)]) -> String {
-        let mut out = String::from(
-            "// Unique 2-bit PI syndromes; dump1090-fa prepareErrorTable(..., 2, 4).\n\
-             // Regen: TRCK_REGEN=1 cargo test --locked --lib two_bit_long_matches_dump1090_2_4\n\
-             #[rustfmt::skip]\n",
-        );
-        out.push_str(&format!(
-            "static TWO_BIT_LONG: [(u32, u8, u8); {}] = [\n",
-            rows.len()
-        ));
-        for &(s, a, b) in rows {
-            out.push_str(&format!("    (0x{s:06X}, {a}, {b}),\n"));
-        }
-        out.push_str("];\n");
-        out
-    }
-
     #[test]
     fn two_bit_long_matches_dump1090_2_4() {
         let got = rebuild_two_bit_long();
-        if got.as_slice() != super::TWO_BIT_LONG {
-            let src = two_bit_inc_source(&got);
-            if std::env::var("TRCK_REGEN").as_deref() == Ok("1") {
-                let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/two_bit_long.inc");
-                std::fs::write(&path, &src).expect("write two_bit_long.inc");
-            }
-            eprint!("{src}");
-            panic!(
-                "TWO_BIT_LONG != dump1090 (2,4) rebuild ({} vs {} entries); \
-                 TRCK_REGEN=1 cargo test --locked --lib two_bit_long_matches_dump1090_2_4",
-                super::TWO_BIT_LONG.len(),
-                got.len()
-            );
-        }
+        assert_eq!(got.as_slice(), super::TWO_BIT_LONG.as_slice());
     }
 
     fn unique_two_bit_pair() -> (usize, usize) {
