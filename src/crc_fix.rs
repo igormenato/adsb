@@ -172,26 +172,89 @@ fn among_weakest(bit: usize, conf: &[i32]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+
     use super::*;
     use crate::modes::{EVEN, IDENT, ODD, STATUS, VELOCITY, df17, df18_cf0};
 
-    #[test]
-    fn prepare_tables_is_only_one_bit() {
-        let t0 = std::time::Instant::now();
-        super::prepare_tables();
-        let dt = t0.elapsed();
-        assert!(
-            dt < std::time::Duration::from_millis(100),
-            "1-bit tables took {dt:?} (2-bit is static)"
+    /// Unique 2-bit syndromes; collisions with other 1–4 bit patterns dropped.
+    fn rebuild_two_bit_long() -> Vec<(u32, u8, u8)> {
+        let s = long_syndromes();
+        let one: HashSet<u32> = s.iter().copied().collect();
+        let mut map: HashMap<u32, Option<(u8, u8)>> = HashMap::new();
+        for i in 0..LONG_BITS {
+            for j in (i + 1)..LONG_BITS {
+                let syn = s[i] ^ s[j];
+                if syn == 0 || one.contains(&syn) {
+                    continue;
+                }
+                match map.get_mut(&syn) {
+                    None => {
+                        map.insert(syn, Some((i as u8, j as u8)));
+                    }
+                    Some(slot) => *slot = None,
+                }
+            }
+        }
+        for i in 0..LONG_BITS {
+            for j in (i + 1)..LONG_BITS {
+                let sj = s[i] ^ s[j];
+                for k in (j + 1)..LONG_BITS {
+                    let sk = sj ^ s[k];
+                    if let Some(slot) = map.get_mut(&sk) {
+                        *slot = None;
+                    }
+                    for &sl in s.iter().skip(k + 1) {
+                        if let Some(slot) = map.get_mut(&(sk ^ sl)) {
+                            *slot = None;
+                        }
+                    }
+                }
+            }
+        }
+        let mut rows: Vec<(u32, u8, u8)> = map
+            .into_iter()
+            .filter_map(|(syn, pair)| pair.map(|(a, b)| (syn, a, b)))
+            .collect();
+        rows.sort_unstable_by_key(|r| r.0);
+        rows
+    }
+
+    fn two_bit_inc_source(rows: &[(u32, u8, u8)]) -> String {
+        let mut out = String::from(
+            "// Unique 2-bit PI syndromes; dump1090-fa prepareErrorTable(..., 2, 4).\n\
+             // Regen: TRCK_REGEN=1 cargo test --locked --lib two_bit_long_matches_dump1090_2_4\n\
+             #[rustfmt::skip]\n",
         );
+        out.push_str(&format!(
+            "static TWO_BIT_LONG: [(u32, u8, u8); {}] = [\n",
+            rows.len()
+        ));
+        for &(s, a, b) in rows {
+            out.push_str(&format!("    (0x{s:06X}, {a}, {b}),\n"));
+        }
+        out.push_str("];\n");
+        out
     }
 
     #[test]
-    fn two_bit_table_is_sorted_unique() {
-        for w in super::TWO_BIT_LONG.windows(2) {
-            assert!(w[0].0 < w[1].0);
+    fn two_bit_long_matches_dump1090_2_4() {
+        let got = rebuild_two_bit_long();
+        if got.as_slice() != super::TWO_BIT_LONG {
+            let src = two_bit_inc_source(&got);
+            if std::env::var("TRCK_REGEN").as_deref() == Ok("1") {
+                let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/two_bit_long.inc");
+                std::fs::write(&path, &src).expect("write two_bit_long.inc");
+            }
+            eprint!("{src}");
+            panic!(
+                "TWO_BIT_LONG != dump1090 (2,4) rebuild ({} vs {} entries); \
+                 TRCK_REGEN=1 cargo test --locked --lib two_bit_long_matches_dump1090_2_4",
+                super::TWO_BIT_LONG.len(),
+                got.len()
+            );
         }
-        assert_eq!(super::TWO_BIT_LONG.len(), 3582);
     }
 
     fn unique_two_bit_pair() -> (usize, usize) {

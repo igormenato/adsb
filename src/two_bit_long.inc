@@ -1,4 +1,5 @@
-// Unique 2-bit PI syndromes; 1–4 bit collisions dropped. Generated, do not edit.
+// Unique 2-bit PI syndromes; dump1090-fa prepareErrorTable(..., 2, 4).
+// Regen: TRCK_REGEN=1 cargo test --locked --lib two_bit_long_matches_dump1090_2_4
 #[rustfmt::skip]
 static TWO_BIT_LONG: [(u32, u8, u8); 3582] = [
     (0x000005, 109, 111),
