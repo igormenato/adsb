@@ -30,8 +30,6 @@
 #define TACK_HEALTH_PAUSED 1
 #define TACK_HEALTH_SIM 2
 #define TACK_HEALTH_DOWN 255
-#define TRCK_HB_LINE "PING\r\n"
-#define TRCK_HB_DOWN_MS 10000u
 
 typedef struct {
     uint32_t icao;
@@ -223,19 +221,6 @@ static inline bool trck_unpack_ack(const uint8_t *bytes, size_t len, TrckAck *ou
     return true;
 }
 
-enum {
-    TRCK_HB_SILENT = 0,
-    TRCK_HB_PRINT = 1,
-    TRCK_HB_DOWN = 2,
-};
-
-typedef struct {
-    uint8_t have;
-    uint8_t health;
-    uint8_t down;
-    uint32_t last_ms;
-} TrckHb;
-
 static inline bool trck_ack_matches(uint8_t pending, uint8_t ack_cmd) {
     return pending == ack_cmd;
 }
@@ -253,44 +238,6 @@ static inline const char *trck_health_word(uint8_t health) {
     default:
         return "?";
     }
-}
-
-static inline uint8_t trck_health(const TrckHb *h) {
-    if (h == NULL || !h->have || h->down) {
-        return TACK_HEALTH_DOWN;
-    }
-    return h->health;
-}
-
-static inline void trck_hb_init(TrckHb *h) {
-    h->have = 0;
-    h->health = TACK_HEALTH_DOWN;
-    h->down = 0;
-    h->last_ms = 0;
-}
-
-static inline void trck_hb_touch(TrckHb *h, uint32_t now_ms) {
-    h->have = 1;
-    h->down = 0;
-    h->last_ms = now_ms;
-}
-
-static inline int trck_hb_on_status(TrckHb *h, uint8_t health, uint32_t now_ms) {
-    int out = (!h->have || h->health != health) ? TRCK_HB_PRINT : TRCK_HB_SILENT;
-    h->health = health;
-    trck_hb_touch(h, now_ms);
-    return out;
-}
-
-static inline int trck_hb_poll(TrckHb *h, uint32_t now_ms) {
-    if (!h->have || h->down) {
-        return TRCK_HB_SILENT;
-    }
-    if ((uint32_t)(now_ms - h->last_ms) < TRCK_HB_DOWN_MS) {
-        return TRCK_HB_SILENT;
-    }
-    h->down = 1;
-    return TRCK_HB_DOWN;
 }
 
 static inline void trck_ack_scan_init(TrckAckScan *scan) {

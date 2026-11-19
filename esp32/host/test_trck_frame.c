@@ -164,7 +164,6 @@ int main(int argc, char **argv) {
     assert(trck_pack_cmd_line(0xFF, too_small, sizeof too_small) == 0);
     assert(trck_cmd_word(TCMD_STATUS) == NULL);
     assert(trck_cmd_word(0xFF) == NULL);
-    assert(strcmp(TRCK_HB_LINE, "PING\r\n") == 0);
 
     uint8_t ack_raw[TACK_LEN];
     memset(ack_raw, 0, sizeof ack_raw);
@@ -183,19 +182,13 @@ int main(int argc, char **argv) {
     assert(strcmp(trck_health_word(ack.health), "paused") == 0);
     assert(strcmp(trck_health_word(TACK_HEALTH_OK), "ok") == 0);
     assert(strcmp(trck_health_word(TACK_HEALTH_SIM), "sim") == 0);
+    assert(strcmp(trck_health_word(TACK_HEALTH_DOWN), "down") == 0);
     assert(trck_ack_matches(TCMD_STATUS, ack.cmd));
     assert(!trck_ack_matches(TCMD_PAUSE, ack.cmd));
-    TrckHb watch;
-    trck_hb_init(&watch);
-    assert(trck_health(&watch) == TACK_HEALTH_DOWN);
-    assert(trck_hb_on_status(&watch, ack.health, 0) == TRCK_HB_PRINT);
-    assert(trck_health(&watch) == TACK_HEALTH_PAUSED);
-    assert(trck_hb_on_status(&watch, ack.health, 3000) == TRCK_HB_SILENT);
     ack_raw[6] = TACK_HEALTH_OK;
     trck_wr_u16(ack_raw + TACK_BODY_LEN, trck_crc16(ack_raw, TACK_BODY_LEN));
     assert(trck_unpack_ack(ack_raw, sizeof ack_raw, &ack));
     assert(ack.health == TACK_HEALTH_OK);
-    assert(trck_hb_on_status(&watch, ack.health, 3000) == TRCK_HB_PRINT);
     uint8_t pause_raw[TACK_LEN];
     memset(pause_raw, 0, sizeof pause_raw);
     memcpy(pause_raw, "TACK", 4);
@@ -207,11 +200,6 @@ int main(int argc, char **argv) {
     assert(trck_unpack_ack(pause_raw, sizeof pause_raw, &pause));
     assert(trck_ack_matches(TCMD_PAUSE, pause.cmd));
     assert(!trck_ack_matches(TCMD_PAUSE, ack.cmd));
-    trck_hb_touch(&watch, 3000);
-    assert(trck_hb_poll(&watch, 12999) == TRCK_HB_SILENT);
-    assert(trck_hb_poll(&watch, 13000) == TRCK_HB_DOWN);
-    assert(trck_health(&watch) == TACK_HEALTH_DOWN);
-    assert(trck_hb_poll(&watch, 14000) == TRCK_HB_SILENT);
     ack_raw[5] = TCMD_FAILED;
     ack_raw[6] = TACK_HEALTH_OK;
     trck_wr_u16(ack_raw + TACK_BODY_LEN, trck_crc16(ack_raw, TACK_BODY_LEN));

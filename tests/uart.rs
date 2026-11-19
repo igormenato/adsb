@@ -233,7 +233,7 @@ fn uart_restart_acks_then_exits() {
 }
 
 #[test]
-fn ascii_pause_heartbeat_resume_acks() {
+fn ascii_pause_ping_resume_acks() {
     let (listener, port) = listen();
     let mut pty = Pty::open();
     let mut sender = spawn_uart(port, &pty.path());
