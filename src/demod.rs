@@ -8,7 +8,9 @@
 
 use rs1090::source::demod::{MODES_LONG_MSG_BYTES, icao_filter_test, validate_modes_message};
 
-use crate::crc_fix::{aa_bit, correct_pi, correct_with_conf, prepare_tables};
+use crate::crc_fix::{
+    Correction, aa_bit, correct_pi_syndrome, lookup_two_bit, prepare_tables, try_two_bit,
+};
 
 const MIN_TRAILING_SAMPLES: usize = 326;
 /// readsb `PREAMBLE_THRESHOLD_DEFAULT`.
@@ -169,14 +171,7 @@ fn score_phase(
     let mut offset = 19 + try_phase / 5;
     let mut phase = try_phase % 5;
     let mut msg = [0_u8; MODES_LONG_MSG_BYTES];
-    let mut conf = [0_i32; 112];
-    let mut nbits = 0usize;
-    msg[0] = slice_byte(
-        pa,
-        &mut offset,
-        &mut phase,
-        fix.then_some((&mut conf, &mut nbits)),
-    );
+    msg[0] = slice_byte(pa, &mut offset, &mut phase, None);
     let df = u32::from(msg[0] >> 3);
     let bytelen = if df_long & (1 << df) != 0 {
         14
@@ -188,17 +183,30 @@ fn score_phase(
         }
         return;
     };
-    // 2-bit repair is DF17/18 only; stop recording |corr| on short frames.
-    let record = fix && bytelen == 14;
     for slot in msg.iter_mut().take(bytelen).skip(1) {
-        *slot = slice_byte(
-            pa,
-            &mut offset,
-            &mut phase,
-            record.then_some((&mut conf, &mut nbits)),
-        );
+        *slot = slice_byte(pa, &mut offset, &mut phase, None);
     }
-    let (score, corrected) = score_message(&mut msg, fix, &conf[..nbits]);
+    let (mut score, mut corrected, syn) = score_message(&mut msg, fix);
+    if fix
+        && bytelen == 14
+        && corrected == 0
+        && syn != 0
+        && matches!(msg[0] >> 3, 17 | 18)
+        && lookup_two_bit(syn).is_some()
+    {
+        let mut conf = [0_i32; 112];
+        let mut nbits = 0usize;
+        let mut off = 19 + try_phase / 5;
+        let mut ph = try_phase % 5;
+        for slot in msg.iter_mut().take(14) {
+            *slot = slice_byte(pa, &mut off, &mut ph, Some((&mut conf, &mut nbits)));
+        }
+        if let Some(fix2) = try_two_bit(&mut msg, syn, &conf[..nbits]) {
+            let (s, c) = score_fixed(&mut msg, fix2);
+            score = s;
+            corrected = c;
+        }
+    }
     if score > *best_score {
         *best_msg = msg;
         *best_score = score;
@@ -313,31 +321,32 @@ fn addr(msg: &[u8]) -> u32 {
     u32::from(msg[1]) << 16 | u32::from(msg[2]) << 8 | u32::from(msg[3])
 }
 
-fn score_message(msg: &mut [u8; 14], fix: bool, conf: &[i32]) -> (i32, u8) {
+fn score_message(msg: &mut [u8; 14], fix: bool) -> (i32, u8, u32) {
     if !fix {
-        return (validate_modes_message(msg), 0);
+        return (validate_modes_message(msg), 0, 0);
     }
-    let correction = if conf.len() >= 112 {
-        correct_with_conf(msg, conf)
-    } else {
-        correct_pi(msg)
-    };
+    let (correction, long) = correct_pi_syndrome(msg);
     match correction {
-        None => (validate_modes_message(msg), 0),
+        None => (validate_modes_message(msg), 0, long),
         Some(correction) => {
-            let df = msg[0] >> 3;
-            let known = icao_filter_test(addr(msg));
-            if df == 11 && !known {
-                return (-2, 0);
-            }
-            let aa = aa_bit(correction.bit) || correction.extra.is_some_and(aa_bit);
-            if matches!(df, 17 | 18) && aa && !known {
-                return (-2, 0);
-            }
-            let nbits = if correction.extra.is_some() { 2 } else { 1 };
-            (validate_modes_message(msg), nbits)
+            let (score, nbits) = score_fixed(msg, correction);
+            (score, nbits, 0)
         }
     }
+}
+
+fn score_fixed(msg: &mut [u8; 14], correction: Correction) -> (i32, u8) {
+    let df = msg[0] >> 3;
+    let known = icao_filter_test(addr(msg));
+    if df == 11 && !known {
+        return (-2, 0);
+    }
+    let aa = aa_bit(correction.bit) || correction.extra.is_some_and(aa_bit);
+    if matches!(df, 17 | 18) && aa && !known {
+        return (-2, 0);
+    }
+    let nbits = if correction.extra.is_some() { 2 } else { 1 };
+    (validate_modes_message(msg), nbits)
 }
 
 #[cfg(test)]

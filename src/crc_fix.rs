@@ -1,11 +1,12 @@
 //! Mode S CRC correction for DF11/DF17/DF18 (dump1090-fa `--fix`).
 //!
 //! 1-bit PI repair is ungated. DF17/18 also try a 2-bit syndrome table
-//! (collisions with other 1–4 bit patterns dropped) when both bits are
-//! among the [`TWO_BIT_CONF_N`] lowest-confidence magnitudes.
+//! (collisions with other 1–4 bit patterns dropped; baked in `two_bit_long.inc`)
+//! when both bits are among the [`TWO_BIT_CONF_N`] lowest-confidence magnitudes.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
+
+include!("two_bit_long.inc");
 
 use rs1090::decode::crc::modes_checksum;
 
@@ -74,32 +75,33 @@ pub fn aa_bit(bit: usize) -> bool {
 pub(crate) fn prepare_tables() {
     let _ = long_syndromes();
     let _ = short_syndromes();
-    let _ = two_bit_long();
 }
 
-/// Flip a single correctable PI bit. Input DF must be 11, 17, or 18.
-pub fn correct_pi(msg: &mut [u8; 14]) -> Option<Correction> {
-    correct(msg, None)
+pub(crate) fn lookup_two_bit(syndrome: u32) -> Option<(u8, u8)> {
+    TWO_BIT_LONG
+        .binary_search_by_key(&syndrome, |&(s, _, _)| s)
+        .ok()
+        .map(|i| (TWO_BIT_LONG[i].1, TWO_BIT_LONG[i].2))
 }
 
-/// 1-bit repair, then gated 2-bit DF17/18 when `conf` is the per-bit |corr|.
-pub(crate) fn correct_with_conf(msg: &mut [u8; 14], conf: &[i32]) -> Option<Correction> {
-    correct(msg, Some(conf))
-}
-
-fn correct(msg: &mut [u8; 14], conf: Option<&[i32]>) -> Option<Correction> {
+/// 1-bit repair, plus the 112-bit remainder so the caller can try 2-bit without another CRC.
+pub(crate) fn correct_pi_syndrome(msg: &mut [u8; 14]) -> (Option<Correction>, u32) {
     let df0 = df(msg);
+    let Some(long) = long_crc(msg) else {
+        return (None, 0);
+    };
     if !matches!(df0, 11 | 17 | 18) {
-        return None;
+        return (None, long);
     }
-    let long = long_crc(msg)?;
-    let short = short_crc(msg)?;
+    let Some(short) = short_crc(msg) else {
+        return (None, long);
+    };
 
     if matches!(df0, 17 | 18) && long == 0 {
-        return None;
+        return (None, 0);
     }
     if df0 == 11 && short & 0x00ff_ff80 == 0 {
-        return None;
+        return (None, long);
     }
 
     if long != 0
@@ -110,7 +112,7 @@ fn correct(msg: &mut [u8; 14], conf: Option<&[i32]>) -> Option<Correction> {
         let df1 = df(&trial);
         if matches!(df1, 17 | 18) && long_crc(&trial) == Some(0) {
             *msg = trial;
-            return Some(Correction { bit, extra: None });
+            return (Some(Correction { bit, extra: None }), 0);
         }
     }
 
@@ -121,30 +123,32 @@ fn correct(msg: &mut [u8; 14], conf: Option<&[i32]>) -> Option<Correction> {
         flip(&mut trial, bit);
         if df(&trial) == 11 && short_crc(&trial).is_some_and(|c| c & 0x00ff_ff80 == 0) {
             *msg = trial;
-            return Some(Correction { bit, extra: None });
+            return (Some(Correction { bit, extra: None }), 0);
         }
     }
 
-    if let Some(conf) = conf
-        && matches!(df0, 17 | 18)
-        && long != 0
-        && let Some(&(a, b)) = two_bit_long().get(&long)
-        && among_weakest(a as usize, conf)
-        && among_weakest(b as usize, conf)
-    {
-        let mut trial = *msg;
-        flip(&mut trial, a as usize);
-        flip(&mut trial, b as usize);
-        let df1 = df(&trial);
-        if matches!(df1, 17 | 18) && long_crc(&trial) == Some(0) {
-            *msg = trial;
-            return Some(Correction {
-                bit: a as usize,
-                extra: Some(b as usize),
-            });
-        }
-    }
+    (None, long)
+}
 
+pub(crate) fn try_two_bit(msg: &mut [u8; 14], long: u32, conf: &[i32]) -> Option<Correction> {
+    if !matches!(df(msg), 17 | 18) || long == 0 {
+        return None;
+    }
+    let (a, b) = lookup_two_bit(long)?;
+    if !among_weakest(a as usize, conf) || !among_weakest(b as usize, conf) {
+        return None;
+    }
+    let mut trial = *msg;
+    flip(&mut trial, a as usize);
+    flip(&mut trial, b as usize);
+    let df1 = df(&trial);
+    if matches!(df1, 17 | 18) && long_crc(&trial) == Some(0) {
+        *msg = trial;
+        return Some(Correction {
+            bit: a as usize,
+            extra: Some(b as usize),
+        });
+    }
     None
 }
 
@@ -166,63 +170,34 @@ fn among_weakest(bit: usize, conf: &[i32]) -> bool {
     true
 }
 
-/// Unique 2-bit syndromes on 112-bit PI; collisions with other 1–4 bit patterns dropped
-/// (dump1090-fa `prepareErrorTable(..., 2, 4)`).
-fn two_bit_long() -> &'static HashMap<u32, (u16, u16)> {
-    static TABLE: OnceLock<HashMap<u32, (u16, u16)>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let s = long_syndromes();
-        let one: HashSet<u32> = s.iter().copied().collect();
-        let mut map: HashMap<u32, Option<(u16, u16)>> = HashMap::new();
-        for i in 0..LONG_BITS {
-            for j in (i + 1)..LONG_BITS {
-                let syn = s[i] ^ s[j];
-                if syn == 0 || one.contains(&syn) {
-                    continue;
-                }
-                match map.get_mut(&syn) {
-                    None => {
-                        map.insert(syn, Some((i as u16, j as u16)));
-                    }
-                    Some(slot) => *slot = None,
-                }
-            }
-        }
-        for i in 0..LONG_BITS {
-            for j in (i + 1)..LONG_BITS {
-                let sj = s[i] ^ s[j];
-                for k in (j + 1)..LONG_BITS {
-                    let sk = sj ^ s[k];
-                    if let Some(slot) = map.get_mut(&sk) {
-                        *slot = None;
-                    }
-                    for &sl in s.iter().skip(k + 1) {
-                        if let Some(slot) = map.get_mut(&(sk ^ sl)) {
-                            *slot = None;
-                        }
-                    }
-                }
-            }
-        }
-        map.into_iter()
-            .filter_map(|(syn, pair)| pair.map(|p| (syn, p)))
-            .collect()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::modes::{EVEN, IDENT, ODD, STATUS, VELOCITY, df17, df18_cf0};
 
+    #[test]
+    fn prepare_tables_is_only_one_bit() {
+        let t0 = std::time::Instant::now();
+        super::prepare_tables();
+        let dt = t0.elapsed();
+        assert!(
+            dt < std::time::Duration::from_millis(100),
+            "1-bit tables took {dt:?} (2-bit is static)"
+        );
+    }
+
+    #[test]
+    fn two_bit_table_is_sorted_unique() {
+        for w in super::TWO_BIT_LONG.windows(2) {
+            assert!(w[0].0 < w[1].0);
+        }
+        assert_eq!(super::TWO_BIT_LONG.len(), 3582);
+    }
+
     fn unique_two_bit_pair() -> (usize, usize) {
-        let s = long_syndromes();
-        let table = two_bit_long();
-        for a in 8..LONG_BITS {
-            for b in (a + 1)..LONG_BITS {
-                if table.contains_key(&(s[a] ^ s[b])) {
-                    return (a, b);
-                }
+        for &(_, a, b) in super::TWO_BIT_LONG.iter() {
+            if a >= 8 {
+                return (a as usize, b as usize);
             }
         }
         panic!("no unique 2-bit pair");
@@ -230,11 +205,10 @@ mod tests {
 
     fn colliding_two_bit_pair() -> (usize, usize) {
         let s = long_syndromes();
-        let table = two_bit_long();
         for a in 8..LONG_BITS {
             for b in (a + 1)..LONG_BITS {
                 let syn = s[a] ^ s[b];
-                if syn != 0 && find_bit(syn, s).is_none() && !table.contains_key(&syn) {
+                if syn != 0 && find_bit(syn, s).is_none() && lookup_two_bit(syn).is_none() {
                     return (a, b);
                 }
             }
@@ -248,6 +222,18 @@ mod tests {
             conf[b] = 0;
         }
         conf
+    }
+
+    fn correct_with_conf(msg: &mut [u8; 14], conf: &[i32]) -> Option<Correction> {
+        let (one, long) = super::correct_pi_syndrome(msg);
+        if one.is_some() {
+            return one;
+        }
+        super::try_two_bit(msg, long, conf)
+    }
+
+    fn correct_pi(msg: &mut [u8; 14]) -> Option<Correction> {
+        super::correct_pi_syndrome(msg).0
     }
 
     fn remainder(frame: &[u8; 14]) -> u32 {
