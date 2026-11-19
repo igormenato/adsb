@@ -11,8 +11,8 @@ use nix::unistd::Uid;
 use super::update;
 
 const UNIT: &str = include_str!("../packaging/trck.service");
-const UNIT_PATH: &str = "/etc/systemd/system/trck.service";
-const BIN_PATH: &str = "/usr/local/bin/trck";
+pub(crate) const UNIT_PATH: &str = "/etc/systemd/system/trck.service";
+pub(crate) const BIN_PATH: &str = "/usr/local/bin/trck";
 const WORK_DIR: &str = "/var/lib/trck";
 
 pub fn run() -> ExitCode {
@@ -71,7 +71,7 @@ fn write_unit(path: &Path, text: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn run_host(args: &[&str]) -> Result<()> {
+pub(crate) fn run_host(args: &[&str]) -> Result<()> {
     let (cmd, rest) = args.split_first().expect("command");
     let status = Command::new(cmd)
         .args(rest)

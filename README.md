@@ -25,10 +25,10 @@ Copy `target/aarch64-unknown-linux-musl/release/trck`. The static musl binary ru
 ## Update
 
 ```
-./trck update
+sudo trck update
 ```
 
-Needs `curl` (`sudo apt install curl` on Raspberry Pi OS Lite if it is missing). Downloads `trck-aarch64` from the latest GitHub release of [igormenato/adsb](https://github.com/igormenato/adsb) when that tag is newer than this binary. It writes a temp file next to the running binary and renames it over the file. `trck update --version 0.3.2` installs that tag, including a downgrade. The file must match the listed size and start with an ELF header. When GitHub sends an asset `digest`, `sha256sum` checks it. After a successful replace it prints `restart` and exits 1 so systemd `Restart=always` can start the new binary.
+Needs `curl` (`sudo apt install curl` on Raspberry Pi OS Lite if it is missing). Downloads `trck-aarch64` from the latest GitHub release of [igormenato/adsb](https://github.com/igormenato/adsb) when that tag is newer than this binary. When `/etc/systemd/system/trck.service` exists, it replaces `/usr/local/bin/trck` (needs root) and runs `systemctl try-restart trck`, so a service stopped for sim/replay stays stopped. Without the service it replaces this binary. Success exits 0. `trck update --version 0.3.2` installs that tag, including a downgrade. The file must match the listed size and start with an ELF header. When GitHub sends an asset `digest`, `sha256sum` checks it.
 
 ## Autostart
 
@@ -38,7 +38,7 @@ On the Pi, as root:
 sudo ./trck install-service
 ```
 
-Writes `/etc/systemd/system/trck.service`, replaces `/usr/local/bin/trck` (temp file + rename), creates `/var/lib/trck` for `aircraft.csv`, then `systemctl daemon-reload` and `systemctl enable --now trck`. `ExecStart` is `/usr/local/bin/trck --allow-power-commands`. To change flags, `sudo systemctl edit trck` (clear `ExecStart=` then set a new one); that drop-in survives reinstall. The unit runs as root (`Restart=always`, `RestartSec=1`, `StartLimitIntervalSec=0`, `ProtectHome=yes`, `PrivateTmp=yes`, no `ProtectSystem`) so UART reboot/shutdown and `trck update` can work. Logs:
+Writes `/etc/systemd/system/trck.service`, replaces `/usr/local/bin/trck` (temp file + rename), creates `/var/lib/trck` for `aircraft.csv`, then `systemctl daemon-reload` and `systemctl enable --now trck`. `ExecStart` is `/usr/local/bin/trck --allow-power-commands`. To change flags, `sudo systemctl edit trck` (clear `ExecStart=` then set a new one); that drop-in survives reinstall. The unit runs as root (`Restart=always`, `RestartSec=1`, `StartLimitIntervalSec=0`, `ProtectHome=yes`, `PrivateTmp=yes`, no `ProtectSystem`) so UART reboot/shutdown work. `sudo trck update` replaces `/usr/local/bin/trck` and restarts the service if it is running. Logs:
 
 ```
 journalctl -u trck -f
