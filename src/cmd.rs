@@ -176,7 +176,6 @@ fn parse_line(bytes: &[u8]) -> Option<Line> {
     }
     Some(match bytes {
         b"PING" => Line::Cmd(Cmd::Ping as u8),
-        b"STATUS" | b"STATUS_ADSB" => Line::Cmd(Cmd::Status as u8),
         b"REBOOT" => Line::Cmd(Cmd::Reboot as u8),
         b"SHUTDOWN" => Line::Cmd(Cmd::Shutdown as u8),
         b"PAUSE" => Line::Cmd(Cmd::Pause as u8),
@@ -502,7 +501,8 @@ mod tests {
     #[test]
     fn parse_line_maps_ascii_commands() {
         assert_eq!(parse_line(b"PING"), Some(Line::Cmd(Cmd::Ping as u8)));
-        assert_eq!(parse_line(b"STATUS"), Some(Line::Cmd(Cmd::Status as u8)));
+        assert_eq!(parse_line(b"STATUS"), Some(Line::Noise));
+        assert_eq!(parse_line(b"STATUS_ADSB"), Some(Line::Noise));
         assert_eq!(parse_line(b"PAUSE\r"), Some(Line::Cmd(Cmd::Pause as u8)));
         assert_eq!(parse_line(b"RESUME"), Some(Line::Cmd(Cmd::Resume as u8)));
         assert_eq!(parse_line(b"RESTART"), Some(Line::Cmd(Cmd::Restart as u8)));
@@ -514,10 +514,6 @@ mod tests {
         assert_eq!(
             parse_line(b"SHUTDOWN"),
             Some(Line::Cmd(Cmd::Shutdown as u8))
-        );
-        assert_eq!(
-            parse_line(b"STATUS_ADSB"),
-            Some(Line::Cmd(Cmd::Status as u8))
         );
         assert_eq!(parse_line(b""), None);
         assert_eq!(parse_line(b"ping"), Some(Line::Noise));
@@ -532,8 +528,8 @@ mod tests {
             [CmdFeed::Cmd(Cmd::Pause as u8)]
         );
         assert_eq!(
-            feeds(&mut scan, b"STATUS_ADSB\r\n"),
-            [CmdFeed::Cmd(Cmd::Status as u8)]
+            feeds(&mut scan, b"PING\r\n"),
+            [CmdFeed::Cmd(Cmd::Ping as u8)]
         );
         assert_eq!(
             feeds(&mut scan, b"RESUME\n"),
@@ -554,14 +550,12 @@ mod tests {
     fn ascii_words_with_t_byte_at_a_time() {
         const WORDS: &[(&[u8], CmdFeed)] = &[
             (b"PING", CmdFeed::Cmd(Cmd::Ping as u8)),
-            (b"STATUS", CmdFeed::Cmd(Cmd::Status as u8)),
             (b"REBOOT", CmdFeed::Cmd(Cmd::Reboot as u8)),
             (b"SHUTDOWN", CmdFeed::Cmd(Cmd::Shutdown as u8)),
             (b"PAUSE", CmdFeed::Cmd(Cmd::Pause as u8)),
             (b"RESUME", CmdFeed::Cmd(Cmd::Resume as u8)),
             (b"RESTART", CmdFeed::Cmd(Cmd::Restart as u8)),
             (b"SIMULATION", CmdFeed::Cmd(Cmd::Simulation as u8)),
-            (b"STATUS_ADSB", CmdFeed::Cmd(Cmd::Status as u8)),
         ];
         for &(word, expect) in WORDS {
             for ending in [b"\r\n".as_slice(), b"\n".as_slice()] {
@@ -573,10 +567,11 @@ mod tests {
         }
         let mut scan = CmdScan::new();
         assert_eq!(
-            feeds(&mut scan, b"STATUS_ADSB\nSTATUS\n"),
+            feeds(&mut scan, b"STATUS_ADSB\nSTATUS\nPING\n"),
             [
-                CmdFeed::Cmd(Cmd::Status as u8),
-                CmdFeed::Cmd(Cmd::Status as u8)
+                CmdFeed::Noise,
+                CmdFeed::Noise,
+                CmdFeed::Cmd(Cmd::Ping as u8)
             ]
         );
     }
@@ -597,7 +592,7 @@ mod tests {
                 CmdFeed::Cmd(Cmd::Ping as u8),
                 CmdFeed::Cmd(Cmd::Pause as u8),
                 CmdFeed::Cmd(Cmd::Status as u8),
-                CmdFeed::Cmd(Cmd::Status as u8),
+                CmdFeed::Noise,
                 CmdFeed::Cmd(Cmd::Resume as u8),
                 CmdFeed::Cmd(Cmd::Pause as u8),
             ]
