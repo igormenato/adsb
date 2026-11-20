@@ -6,7 +6,10 @@
 //! The CRC gate is `score_message` (trck 1-bit PI fix), not readsb
 //! `scoreModesMessage`.
 
-use rs1090::source::demod::{MODES_LONG_MSG_BYTES, icao_filter_test, validate_modes_message};
+use rs1090::decode::crc::modes_checksum;
+use rs1090::source::demod::{
+    MODES_LONG_MSG_BYTES, icao_filter_add, icao_filter_test, validate_modes_message,
+};
 
 use crate::crc_fix::{aa_bit, correct_pi};
 
@@ -286,12 +289,34 @@ fn addr(msg: &[u8]) -> u32 {
     u32::from(msg[1]) << 16 | u32::from(msg[2]) << 8 | u32::from(msg[3])
 }
 
+fn validate(msg: &[u8; 14]) -> i32 {
+    let score = validate_modes_message(msg);
+    if score >= 0 {
+        return score;
+    }
+    // rs1090 treats ICAOs above 0xD00000 as unallocated, but Brazil
+    // (E40000-E7FFFF) and other blocks live there. Accept a DF17/18 with a
+    // zero CRC and a nonzero 24-bit address.
+    if !matches!(msg[0] >> 3, 17 | 18) || !matches!(modes_checksum(msg, 112), Ok(0)) {
+        return score;
+    }
+    let icao = addr(msg);
+    if icao == 0 || icao == 0x00ff_ffff {
+        return score;
+    }
+    let known = icao_filter_test(icao);
+    if !known {
+        icao_filter_add(icao);
+    }
+    if known { 1800 } else { 1400 }
+}
+
 fn score_message(msg: &mut [u8; 14], fix: bool) -> (i32, u8) {
     if !fix {
-        return (validate_modes_message(msg), 0);
+        return (validate(msg), 0);
     }
     match correct_pi(msg) {
-        None => (validate_modes_message(msg), 0),
+        None => (validate(msg), 0),
         Some(correction) => {
             let df = msg[0] >> 3;
             let known = icao_filter_test(addr(msg));
@@ -301,7 +326,7 @@ fn score_message(msg: &mut [u8; 14], fix: bool) -> (i32, u8) {
             if matches!(df, 17 | 18) && aa_bit(correction.bit) && !known {
                 return (-2, 0);
             }
-            (validate_modes_message(msg), 1)
+            (validate(msg), 1)
         }
     }
 }
@@ -317,5 +342,27 @@ mod tests {
         assert_eq!(msg_octets(&msg).len(), 7);
         msg[0] = 0x8D;
         assert_eq!(msg_octets(&msg).len(), 14);
+    }
+
+    #[test]
+    fn high_icao_df17_and_df18_are_valid() {
+        let even = crate::modes::EVEN;
+        let me = even[4..11].try_into().expect("ME");
+        for frame in [
+            crate::modes::with_icao(&even, 0xE4_8A_BC),
+            crate::modes::df18_cf0(0xE4_8A_BC, me),
+        ] {
+            for fix in [false, true] {
+                let mut msg = frame;
+                assert!(
+                    score_message(&mut msg, fix).0 >= 0,
+                    "df={} fix={fix}",
+                    frame[0] >> 3
+                );
+            }
+            let mut damaged = frame;
+            damaged[5] ^= 1;
+            assert!(score_message(&mut damaged, false).0 < 0);
+        }
     }
 }
