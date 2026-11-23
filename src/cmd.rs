@@ -175,7 +175,7 @@ fn parse_line(bytes: &[u8]) -> Option<Line> {
         return None;
     }
     Some(match bytes {
-        b"PING" => Line::Cmd(Cmd::Ping as u8),
+        b"PING" | b"STATUS_ADSB" | b"STATUS" => Line::Cmd(Cmd::Ping as u8),
         b"REBOOT" => Line::Cmd(Cmd::Reboot as u8),
         b"SHUTDOWN" => Line::Cmd(Cmd::Shutdown as u8),
         b"PAUSE" => Line::Cmd(Cmd::Pause as u8),
@@ -501,8 +501,8 @@ mod tests {
     #[test]
     fn parse_line_maps_ascii_commands() {
         assert_eq!(parse_line(b"PING"), Some(Line::Cmd(Cmd::Ping as u8)));
-        assert_eq!(parse_line(b"STATUS"), Some(Line::Noise));
-        assert_eq!(parse_line(b"STATUS_ADSB"), Some(Line::Noise));
+        assert_eq!(parse_line(b"STATUS"), Some(Line::Cmd(Cmd::Ping as u8)));
+        assert_eq!(parse_line(b"STATUS_ADSB"), Some(Line::Cmd(Cmd::Ping as u8)));
         assert_eq!(parse_line(b"PAUSE\r"), Some(Line::Cmd(Cmd::Pause as u8)));
         assert_eq!(parse_line(b"RESUME"), Some(Line::Cmd(Cmd::Resume as u8)));
         assert_eq!(parse_line(b"RESTART"), Some(Line::Cmd(Cmd::Restart as u8)));
@@ -538,6 +538,15 @@ mod tests {
     }
 
     #[test]
+    fn status_adsb_line_is_ping() {
+        let mut scan = CmdScan::new();
+        assert_eq!(
+            feeds(&mut scan, b"STATUS_ADSB\r\n"),
+            [CmdFeed::Cmd(Cmd::Ping as u8)]
+        );
+    }
+
+    #[test]
     fn ascii_split_across_feeds() {
         let mut scan = CmdScan::new();
         assert_eq!(feeds(&mut scan, b"PI"), []);
@@ -569,8 +578,8 @@ mod tests {
         assert_eq!(
             feeds(&mut scan, b"STATUS_ADSB\nSTATUS\nPING\n"),
             [
-                CmdFeed::Noise,
-                CmdFeed::Noise,
+                CmdFeed::Cmd(Cmd::Ping as u8),
+                CmdFeed::Cmd(Cmd::Ping as u8),
                 CmdFeed::Cmd(Cmd::Ping as u8)
             ]
         );
@@ -592,7 +601,7 @@ mod tests {
                 CmdFeed::Cmd(Cmd::Ping as u8),
                 CmdFeed::Cmd(Cmd::Pause as u8),
                 CmdFeed::Cmd(Cmd::Status as u8),
-                CmdFeed::Noise,
+                CmdFeed::Cmd(Cmd::Ping as u8),
                 CmdFeed::Cmd(Cmd::Resume as u8),
                 CmdFeed::Cmd(Cmd::Pause as u8),
             ]

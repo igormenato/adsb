@@ -62,7 +62,7 @@ The RF firmware (ESP32 TX GPIO 10 to Pi RX GPIO 15) sends the same commands as u
 
 | Line | Pi action |
 | --- | --- |
-| `PING` | Same `TACK` as TCMD ping, including health. USB `ping` sends this on demand |
+| `PING` | Same `TACK` as TCMD ping, including health. USB `ping` sends this on demand. `STATUS_ADSB` and `STATUS` are aliases of this line |
 | `PAUSE` | Same as TCMD pause |
 | `RESUME` | Same as TCMD resume |
 | `RESTART` | Same as TCMD restart |

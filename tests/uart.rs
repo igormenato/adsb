@@ -257,7 +257,7 @@ fn ascii_pause_ping_resume_acks() {
 }
 
 #[test]
-fn ascii_status_ignored_status_adsb_and_ping_ack() {
+fn ascii_status_and_status_adsb_ack_as_ping() {
     let (listener, port) = listen();
     let mut pty = Pty::open();
     let mut sender = spawn_uart(port, &pty.path());
@@ -266,11 +266,13 @@ fn ascii_status_ignored_status_adsb_and_ping_ack() {
         .write_all(b"STATUS\nSTATUS_ADSB\nPING\n")
         .expect("ascii");
     pty.master.flush().expect("flush");
-    let tacks = wait_tacks(&mut pty.master, 1, Duration::from_secs(3));
-    assert_eq!(tacks.len(), 1);
-    assert_eq!(tacks[0][4], Cmd::Ping as u8);
-    assert_eq!(tacks[0][5], 0);
-    assert_eq!(tacks[0][6], Health::Ok as u8);
+    let tacks = wait_tacks(&mut pty.master, 3, Duration::from_secs(3));
+    assert_eq!(tacks.len(), 3);
+    for tack in &tacks {
+        assert_eq!(tack[4], Cmd::Ping as u8);
+        assert_eq!(tack[5], 0);
+        assert_eq!(tack[6], Health::Ok as u8);
+    }
     assert!(sender.0.try_wait().unwrap().is_none());
 }
 
