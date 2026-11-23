@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use rs_rtl::{DeviceId, RtlSdr};
 
+use trck::autogain::{AutoGain, log_change};
 use trck::demod::{demodulate2400, msg_octets};
 use trck::mag::{cu8_to_f32, mag_cu8_into, mag_iq};
 use trck::{Fix, Tracker};
@@ -19,6 +20,13 @@ pub const SAMPLE_HZ: u32 = 2_400_000;
 const OPEN_RETRY: Duration = Duration::from_secs(2);
 const LOOKAHEAD: usize = 326;
 const FILE_CHUNK: usize = 32_768;
+
+#[derive(Clone, Copy, Debug)]
+pub enum TunerGain {
+    SoftwareAuto,
+    HardwareAgc,
+    Manual(i32),
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IqStats {
@@ -33,6 +41,7 @@ struct Demod {
     tracker: Tracker,
     stats: IqStats,
     fix: bool,
+    auto: Option<AutoGain>,
 }
 
 impl Demod {
@@ -43,6 +52,7 @@ impl Demod {
             tracker: Tracker::new(),
             stats: IqStats::default(),
             fix,
+            auto: None,
         }
     }
 
@@ -54,6 +64,9 @@ impl Demod {
         let start = self.mag.len();
         self.mag.resize(start + n, 0);
         mag_cu8_into(&cu8[..n * 2], &mut self.mag[start..]);
+        if let Some(auto) = self.auto.as_mut() {
+            auto.observe(&self.mag[start..]);
+        }
         self.decode(enqueue, log_msg);
     }
 
@@ -102,15 +115,15 @@ impl Demod {
     }
 }
 
-pub fn run_rtlsdr(device: usize, gain: Option<i32>, enqueue: impl Fn(Fix), stop: &Stop, fix: bool) {
+pub fn run_rtlsdr(device: usize, gain: TunerGain, enqueue: impl Fn(Fix), stop: &Stop, fix: bool) {
     let mut delay = OPEN_RETRY;
     while !stop.is_set() {
         match open_rtlsdr(device, gain) {
-            Ok(mut sdr) => {
+            Ok((mut sdr, auto)) => {
                 eprintln!("rtlsdr {device} open");
                 delay = OPEN_RETRY;
                 match sdr.start_streaming() {
-                    Ok(reader) => drain_rtlsdr(&reader, &enqueue, stop, fix),
+                    Ok(reader) => drain_rtlsdr(&reader, &enqueue, stop, fix, auto),
                     Err(err) => eprintln!("rtlsdr {device} stream: {err}"),
                 }
             }
@@ -124,23 +137,55 @@ pub fn run_rtlsdr(device: usize, gain: Option<i32>, enqueue: impl Fn(Fix), stop:
     }
 }
 
-fn open_rtlsdr(device: usize, gain: Option<i32>) -> Result<RtlSdr, rs_rtl::Error> {
+fn open_rtlsdr(
+    device: usize,
+    gain: TunerGain,
+) -> Result<(RtlSdr, Option<AutoGain>), rs_rtl::Error> {
     let mut sdr = RtlSdr::open(DeviceId::Index(device))?;
     sdr.set_center_freq(CENTER_HZ)?;
     sdr.set_sample_rate(SAMPLE_HZ)?;
-    match gain {
-        Some(g) => sdr.set_gain_manual(g)?,
-        None => sdr.set_gain_auto()?,
-    }
-    Ok(sdr)
+    let auto = match gain {
+        TunerGain::SoftwareAuto => {
+            let auto = AutoGain::new(sdr.gains());
+            sdr.set_gain_manual(auto.as_ref().map(AutoGain::current).unwrap_or(i32::MAX))?;
+            auto
+        }
+        TunerGain::HardwareAgc => {
+            sdr.set_gain_auto()?;
+            None
+        }
+        TunerGain::Manual(g) => {
+            sdr.set_gain_manual(g)?;
+            None
+        }
+    };
+    Ok((sdr, auto))
 }
 
-fn drain_rtlsdr(reader: &rs_rtl::AsyncReadHandle, enqueue: &impl Fn(Fix), stop: &Stop, fix: bool) {
+fn drain_rtlsdr(
+    reader: &rs_rtl::AsyncReadHandle,
+    enqueue: &impl Fn(Fix),
+    stop: &Stop,
+    fix: bool,
+    auto: Option<AutoGain>,
+) {
     let mut demod = Demod::new(fix);
+    demod.auto = auto;
+    let ctrl = demod.auto.is_some().then(|| reader.control_handle());
     let mut last_drop = 0u64;
     while !stop.is_set() {
         match reader.recv_timeout(POLL_SLICE) {
-            Ok(rs_rtl::TryRecv::Item(buf)) => demod.push_cu8(&buf, enqueue, false),
+            Ok(rs_rtl::TryRecv::Item(buf)) => {
+                demod.push_cu8(&buf, enqueue, false);
+                if let (Some(auto), Some(ctrl)) = (demod.auto.as_mut(), ctrl.as_ref())
+                    && let Some(change) = auto.evaluate()
+                {
+                    log_change(change);
+                    if let Err(err) = ctrl.set_gain(change.new_tenth_db) {
+                        eprintln!("gain apply: {err}");
+                    }
+                }
+            }
             Ok(rs_rtl::TryRecv::Empty) => {}
             Ok(rs_rtl::TryRecv::End) => {
                 demod.finish(enqueue, false);

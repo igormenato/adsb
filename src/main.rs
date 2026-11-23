@@ -43,9 +43,8 @@ struct Args {
     /// RTL-SDR device index. Used when --check and --hex are off.
     #[arg(long, default_value_t = 0)]
     rtlsdr: usize,
-    /// Tuner gain in dB, or `auto` for tuner AGC (not readsb adaptive gain).
-    /// Default is the tuner's maximum advertised table step.
-    #[arg(long, default_value_t, value_parser = parse_gain, value_name = "auto|dB")]
+    /// Tuner gain: `auto` software autogain (default), a dB value, `max`, or `agc` for tuner hardware AGC.
+    #[arg(long, default_value_t, value_parser = parse_gain, value_name = "auto|agc|max|dB")]
     gain: Gain,
     /// Newline hex or AVR Mode S frames. HOST:PORT, or - for stdin.
     #[arg(long, conflicts_with = "check", value_name = "HOST:PORT|-")]
@@ -143,9 +142,12 @@ enum Pace {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Gain {
-    Auto,
-    /// Highest step in the tuner gain table (unknown until the device is open).
+    /// Software autogain over the tuner's manual table (readsb `--gain auto`).
     #[default]
+    Auto,
+    /// Tuner hardware AGC (FC0013 LNA AGC / R82xx AGC).
+    Agc,
+    /// Highest step in the tuner gain table (unknown until the device is open).
     Max,
     Manual(i32),
 }
@@ -154,6 +156,7 @@ impl std::fmt::Display for Gain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Auto => f.write_str("auto"),
+            Self::Agc => f.write_str("agc"),
             Self::Max => f.write_str("max"),
             Self::Manual(t) => write!(f, "{:.1}", f64::from(*t) / 10.0),
         }
@@ -161,12 +164,12 @@ impl std::fmt::Display for Gain {
 }
 
 impl Gain {
-    fn rtlsdr(self) -> Option<i32> {
+    fn rtlsdr(self) -> radio::TunerGain {
         match self {
-            Self::Auto => None,
-            // Above every advertised step so the driver snaps to the table max.
-            Self::Max => Some(i32::MAX),
-            Self::Manual(t) => Some(t),
+            Self::Auto => radio::TunerGain::SoftwareAuto,
+            Self::Agc => radio::TunerGain::HardwareAgc,
+            Self::Max => radio::TunerGain::Manual(i32::MAX),
+            Self::Manual(t) => radio::TunerGain::Manual(t),
         }
     }
 }
@@ -174,6 +177,9 @@ impl Gain {
 fn parse_gain(text: &str) -> Result<Gain, String> {
     if text.eq_ignore_ascii_case("auto") {
         return Ok(Gain::Auto);
+    }
+    if text.eq_ignore_ascii_case("agc") {
+        return Ok(Gain::Agc);
     }
     if text.eq_ignore_ascii_case("max") {
         return Ok(Gain::Max);
@@ -495,7 +501,7 @@ fn unix_time(ts: f64) -> SystemTime {
 
 fn run_radio(
     device: usize,
-    gain: Option<i32>,
+    gain: radio::TunerGain,
     writer: Writer,
     stop: Arc<Stop>,
     fix: bool,
@@ -541,6 +547,7 @@ mod tests {
     fn parse_gain_auto() {
         assert_eq!(parse_gain("auto").unwrap(), Gain::Auto);
         assert_eq!(parse_gain("AUTO").unwrap(), Gain::Auto);
+        assert_eq!(parse_gain("agc").unwrap(), Gain::Agc);
         assert_eq!(parse_gain("max").unwrap(), Gain::Max);
         assert_eq!(parse_gain("MAX").unwrap(), Gain::Max);
     }
@@ -550,8 +557,15 @@ mod tests {
         assert_eq!(parse_gain("49.6").unwrap(), Gain::Manual(496));
         assert_eq!(parse_gain("40.2").unwrap(), Gain::Manual(402));
         assert_eq!(parse_gain("0").unwrap(), Gain::Manual(0));
-        assert_eq!(Gain::default(), Gain::Max);
-        assert_eq!(Gain::Max.rtlsdr(), Some(i32::MAX));
+        assert_eq!(Gain::default(), Gain::Auto);
+        assert!(matches!(
+            Gain::Max.rtlsdr(),
+            radio::TunerGain::Manual(i32::MAX)
+        ));
+        assert!(matches!(
+            Gain::Auto.rtlsdr(),
+            radio::TunerGain::SoftwareAuto
+        ));
     }
 
     #[test]
