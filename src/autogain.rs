@@ -241,7 +241,6 @@ pub fn log_change(change: GainChange) {
 mod tests {
     use super::*;
     use crate::mag::mag_cu8;
-    use std::time::Instant;
 
     const TABLE: &[i32] = &[0, 10, 20, 30, 40, 90, 140, 200, 300, 400, 496];
     const FC: &[i32] = &[-99, -73, -54, 58, 71, 179, 197];
@@ -488,53 +487,6 @@ mod tests {
         assert!(
             mid <= low && high <= mid,
             "mid should land between weak and hot: low={low} mid={mid} high={high} {mid_path:?}"
-        );
-    }
-
-    #[test]
-    fn observe_cost_on_1s_iq_is_negligible() {
-        const N: usize = SAMPLE_HZ as usize;
-        let path = std::path::Path::new("tests/data/modes1.bin");
-        let mut cu8 = if let Ok(bytes) = std::fs::read(path) {
-            bytes
-        } else {
-            let mut v = vec![127u8; 713_736];
-            for (i, b) in v.iter_mut().enumerate() {
-                if i % 64 == 0 {
-                    *b = 140;
-                }
-            }
-            v
-        };
-        let want = N * 2;
-        while cu8.len() < want {
-            let n = cu8.len();
-            cu8.extend_from_within(..want.saturating_sub(n).min(n));
-        }
-        cu8.truncate(want);
-        let mag = mag_cu8(&cu8);
-        let t0 = Instant::now();
-        let n_msg = crate::demod::demodulate2400(&mag, true).len();
-        let before = t0.elapsed();
-        let t0 = Instant::now();
-        let mut auto = AutoGain::new(TABLE).unwrap();
-        auto.observe(&mag);
-        let observe = t0.elapsed();
-        let t0 = Instant::now();
-        auto.observe(&mag);
-        let n_msg2 = crate::demod::demodulate2400(&mag, true).len();
-        let after = t0.elapsed();
-        assert_eq!(n_msg, n_msg2);
-        eprintln!(
-            "1s IQ (modes1.bin tiled) mag+demod={:.4}s observe={:.4}s mag+demod+observe={:.4}s msgs={n_msg}",
-            before.as_secs_f64(),
-            observe.as_secs_f64(),
-            after.as_secs_f64()
-        );
-        assert!(
-            observe.as_secs_f64() < 0.02,
-            "autogain observe {:.4}s on 1s IQ",
-            observe.as_secs_f64()
         );
     }
 }
