@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3](https://github.com/igormenato/adsb/compare/v0.6.2...v0.6.3) - 2026-11-23
+
+### Added
+
+- *(radio)* dump live IQ and print minute stats ([#139](https://github.com/igormenato/adsb/pull/139))
+
+### Other
+
+- Treat UART STATUS_ADSB and STATUS as PING ([#141](https://github.com/igormenato/adsb/pull/141))
+
 ## [0.6.2](https://github.com/igormenato/adsb/compare/v0.6.1...v0.6.2) - 2026-11-23
 
 ### Other
