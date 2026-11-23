@@ -76,6 +76,8 @@ nc localhost 30002 | ./trck --hex - --uart /dev/serial0
 
 `--iq` is an RTL-SDR cu8 capture on the same dump1090-2400 path as the dongle. `--iq-rate` is the file sample rate and defaults to 2400000. 1-bit CRC correction is on; `--no-fix` turns it off.
 
+On the dongle, `./trck --iq-out capture.cu8` writes those same cu8 bytes before demod (stderr also prints `live msgs=… fixes=… dropped=… gain=…` once a minute). Replay the file with `./trck --iq capture.cu8 --uart -` and with `readsb --device-type ifile --ifile capture.cu8 --iformat UC8` to A/B trck's samples against readsb.
+
 ## ESP32
 
 ```

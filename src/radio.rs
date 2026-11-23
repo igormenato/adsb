@@ -1,9 +1,9 @@
 //! RTL-SDR at 1090 MHz. readsb 2.4 MS/s demod with 1-bit PI CRC correction.
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use rs_rtl::{DeviceId, RtlSdr};
@@ -20,6 +20,7 @@ pub const SAMPLE_HZ: u32 = 2_400_000;
 const OPEN_RETRY: Duration = Duration::from_secs(2);
 const LOOKAHEAD: usize = 326;
 const FILE_CHUNK: usize = 32_768;
+const LIVE_STATS: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug)]
 pub enum TunerGain {
@@ -115,15 +116,23 @@ impl Demod {
     }
 }
 
-pub fn run_rtlsdr(device: usize, gain: TunerGain, enqueue: impl Fn(Fix), stop: &Stop, fix: bool) {
+pub fn run_rtlsdr(
+    device: usize,
+    gain: TunerGain,
+    enqueue: impl Fn(Fix),
+    stop: &Stop,
+    fix: bool,
+    iq_out: Option<&Path>,
+) {
     let mut delay = OPEN_RETRY;
+    let mut dump = iq_out.and_then(open_iq_out);
     while !stop.is_set() {
         match open_rtlsdr(device, gain) {
             Ok((mut sdr, auto)) => {
                 eprintln!("rtlsdr {device} open");
                 delay = OPEN_RETRY;
                 match sdr.start_streaming() {
-                    Ok(reader) => drain_rtlsdr(&reader, &enqueue, stop, fix, auto),
+                    Ok(reader) => drain_rtlsdr(&reader, &enqueue, stop, fix, auto, gain, &mut dump),
                     Err(err) => eprintln!("rtlsdr {device} stream: {err}"),
                 }
             }
@@ -168,19 +177,25 @@ fn drain_rtlsdr(
     stop: &Stop,
     fix: bool,
     auto: Option<AutoGain>,
+    gain: TunerGain,
+    dump: &mut Option<File>,
 ) {
     let mut demod = Demod::new(fix);
     demod.auto = auto;
     let ctrl = demod.auto.is_some().then(|| reader.control_handle());
     let mut last_drop = 0u64;
+    let mut live = LiveStats::new(Instant::now());
+    let mut gain_tenth = current_gain_tenth(&demod.auto, gain);
     while !stop.is_set() {
         match reader.recv_timeout(POLL_SLICE) {
             Ok(rs_rtl::TryRecv::Item(buf)) => {
+                write_iq_out(dump, &buf);
                 demod.push_cu8(&buf, enqueue, false);
                 if let (Some(auto), Some(ctrl)) = (demod.auto.as_mut(), ctrl.as_ref())
                     && let Some(change) = auto.evaluate()
                 {
                     log_change(change);
+                    gain_tenth = Some(change.new_tenth_db);
                     if let Err(err) = ctrl.set_gain(change.new_tenth_db) {
                         eprintln!("gain apply: {err}");
                     }
@@ -202,8 +217,97 @@ fn drain_rtlsdr(
             eprintln!("rtlsdr usb_dropped={dropped}");
             last_drop = dropped;
         }
+        if let Some(line) = live.maybe(
+            Instant::now(),
+            demod.stats.messages,
+            demod.stats.fixes,
+            dropped,
+            gain_tenth,
+        ) {
+            eprintln!("{line}");
+        }
     }
     reader.stop();
+}
+
+fn open_iq_out(path: &Path) -> Option<File> {
+    match File::create(path) {
+        Ok(file) => Some(file),
+        Err(err) => {
+            eprintln!("iq-out {}: {err}", path.display());
+            None
+        }
+    }
+}
+
+fn write_iq_out(dump: &mut Option<impl Write>, chunk: &[u8]) {
+    let Some(file) = dump.as_mut() else {
+        return;
+    };
+    if let Err(err) = file.write_all(chunk) {
+        eprintln!("iq-out: {err}");
+        *dump = None;
+    }
+}
+
+fn current_gain_tenth(auto: &Option<AutoGain>, gain: TunerGain) -> Option<i32> {
+    if let Some(auto) = auto {
+        return Some(auto.current());
+    }
+    match gain {
+        TunerGain::Manual(tenth) => Some(tenth),
+        TunerGain::SoftwareAuto | TunerGain::HardwareAgc => None,
+    }
+}
+
+fn live_stats_line(msgs: u64, fixes: u64, dropped: u64, gain_tenth: Option<i32>) -> String {
+    let gain = match gain_tenth {
+        Some(tenth) => format!("{:.1}", f64::from(tenth) / 10.0),
+        None => "agc".to_string(),
+    };
+    format!("live msgs={msgs} fixes={fixes} dropped={dropped} gain={gain}")
+}
+
+struct LiveStats {
+    last: Instant,
+    msgs: u64,
+    fixes: u64,
+    dropped: u64,
+}
+
+impl LiveStats {
+    fn new(now: Instant) -> Self {
+        Self {
+            last: now,
+            msgs: 0,
+            fixes: 0,
+            dropped: 0,
+        }
+    }
+
+    fn maybe(
+        &mut self,
+        now: Instant,
+        msgs: u64,
+        fixes: u64,
+        dropped: u64,
+        gain_tenth: Option<i32>,
+    ) -> Option<String> {
+        if now.saturating_duration_since(self.last) < LIVE_STATS {
+            return None;
+        }
+        let line = live_stats_line(
+            msgs.saturating_sub(self.msgs),
+            fixes.saturating_sub(self.fixes),
+            dropped.saturating_sub(self.dropped),
+            gain_tenth,
+        );
+        self.last = now;
+        self.msgs = msgs;
+        self.fixes = fixes;
+        self.dropped = dropped;
+        Some(line)
+    }
 }
 
 pub fn run_iq(
@@ -380,5 +484,80 @@ mod tests {
         );
         assert_eq!(whole.messages, odd.messages);
         assert_eq!(whole.fixed, odd.fixed);
+    }
+
+    #[test]
+    fn live_stats_line_matches_the_stderr_format() {
+        assert_eq!(
+            live_stats_line(12, 3, 1, Some(197)),
+            "live msgs=12 fixes=3 dropped=1 gain=19.7"
+        );
+        assert_eq!(
+            live_stats_line(0, 0, 0, None),
+            "live msgs=0 fixes=0 dropped=0 gain=agc"
+        );
+    }
+
+    #[test]
+    fn live_stats_counts_are_since_the_last_line() {
+        let t0 = Instant::now();
+        let mut live = LiveStats::new(t0);
+        assert!(
+            live.maybe(t0 + Duration::from_secs(59), 10, 2, 4, Some(300))
+                .is_none()
+        );
+        let line = live
+            .maybe(t0 + Duration::from_secs(60), 10, 2, 4, Some(300))
+            .expect("minute");
+        assert_eq!(line, "live msgs=10 fixes=2 dropped=4 gain=30.0");
+        assert!(
+            live.maybe(t0 + Duration::from_secs(90), 11, 2, 5, Some(300))
+                .is_none()
+        );
+        let line = live
+            .maybe(t0 + Duration::from_secs(120), 15, 5, 7, Some(496))
+            .expect("second minute");
+        assert_eq!(line, "live msgs=5 fixes=3 dropped=3 gain=49.6");
+    }
+
+    #[test]
+    fn iq_out_writes_each_chunk_verbatim() {
+        let chunks: [&[u8]; 3] = [b"ab", b"cd", b"ef"];
+        let mut dump = Some(Vec::new());
+        for chunk in chunks {
+            write_iq_out(&mut dump, chunk);
+        }
+        assert_eq!(dump.expect("open"), b"abcdef");
+    }
+
+    struct FailAfter {
+        left: usize,
+        inner: Vec<u8>,
+    }
+
+    impl Write for FailAfter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.left == 0 {
+                return Err(io::Error::other("disk full"));
+            }
+            self.left -= 1;
+            self.inner.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn iq_out_stops_after_the_first_write_error() {
+        let mut dump = Some(FailAfter {
+            left: 1,
+            inner: Vec::new(),
+        });
+        write_iq_out(&mut dump, b"ok");
+        assert!(dump.is_some());
+        write_iq_out(&mut dump, b"no");
+        assert!(dump.is_none());
     }
 }
