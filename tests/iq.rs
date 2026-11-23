@@ -185,6 +185,7 @@ fn iq_help_lists_the_knobs() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("--iq"), "{text}");
     assert!(text.contains("--iq-rate"), "{text}");
+    assert!(text.contains("--iq-out"), "{text}");
     assert!(text.contains("--no-fix"), "{text}");
 }
 

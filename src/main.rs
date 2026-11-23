@@ -55,6 +55,9 @@ struct Args {
     /// Sample rate of --iq. Other rates are resampled to 2.4 MS/s.
     #[arg(long, value_name = "HZ")]
     iq_rate: Option<u32>,
+    /// Write live RTL-SDR cu8 as received. Replay with --iq or readsb ifile UC8.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["check", "hex", "iq"])]
+    iq_out: Option<PathBuf>,
     /// Disable 1-bit Mode S CRC correction (dump1090-fa `--fix` is the default).
     #[arg(long)]
     no_fix: bool,
@@ -306,7 +309,14 @@ fn main() -> ExitCode {
         args.output.baud,
         args.output.table.display()
     );
-    run_radio(args.rtlsdr, args.gain.rtlsdr(), writer, stop, !args.no_fix)
+    run_radio(
+        args.rtlsdr,
+        args.gain.rtlsdr(),
+        writer,
+        stop,
+        !args.no_fix,
+        args.iq_out,
+    )
 }
 
 fn run_iq(path: &Path, rate: u32, writer: Writer, stop: Arc<Stop>, fix: bool) -> ExitCode {
@@ -505,6 +515,7 @@ fn run_radio(
     writer: Writer,
     stop: Arc<Stop>,
     fix: bool,
+    iq_out: Option<PathBuf>,
 ) -> ExitCode {
     let shared = Arc::clone(&writer.shared);
     let radio_stop = Arc::clone(&stop);
@@ -521,6 +532,7 @@ fn run_radio(
             },
             &radio_stop,
             fix,
+            iq_out.as_deref(),
         );
         radio_stop.request();
         shared.ready.notify_one();
