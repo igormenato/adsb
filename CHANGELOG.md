@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2](https://github.com/igormenato/adsb/compare/v0.6.1...v0.6.2) - 2026-11-23
+
+### Other
+
+- software autogain for `--gain auto` ([#137](https://github.com/igormenato/adsb/pull/137))
+
 ### Changed
 
 - `--gain auto` (now the default) is software autogain over the tuner manual gain table, ported from readsb. Tuner hardware AGC is `--gain agc`. `--gain <dB>` and `--gain max` are unchanged.
