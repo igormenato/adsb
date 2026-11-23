@@ -145,7 +145,7 @@ fn default_gain_maps_to_highest_fc0013_step() {
     assert_eq!(
         rs_rtl::nearest_gain(tuner.gains(), i32::MAX),
         max,
-        "CLI default (tuner max) snaps to the last FC0013 table step"
+        "--gain max snaps to the last FC0013 table step"
     );
     tuner.set_gain_manual(&bus, max).unwrap();
     assert_eq!(bus.get(fc0013::I2C_ADDR, 0x14) & 0x1f, 0x10);

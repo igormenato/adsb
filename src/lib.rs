@@ -1,5 +1,6 @@
 //! Pi sender: one decoded ADS-B position at a time onto the UART.
 
+pub mod autogain;
 mod cmd;
 mod cpr;
 mod crc_fix;
