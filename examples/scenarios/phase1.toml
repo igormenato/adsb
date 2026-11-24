@@ -1,0 +1,13 @@
+duration = 600
+
+[[aircraft]]
+icao = "C0A001"
+callsign = "TAM7701"
+lat = -25.44
+lon = -49.27
+alt_ft = 35000
+heading_deg = 90
+speed_kt = 420
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 270
