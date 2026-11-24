@@ -72,7 +72,11 @@ impl AutoGain {
             return None;
         }
         let min_idx = table.iter().position(|&g| g >= MIN_TENTH_DB).unwrap_or(0);
-        let mut idx = nearest_index(table, START_TENTH_DB);
+        // readsb starts at 30.0 dB; on FC0013 that maps to the last LNA step, so use minGain.
+        let mut idx = match table.last() {
+            Some(&max_g) if START_TENTH_DB > max_g => min_idx,
+            _ => nearest_index(table, START_TENTH_DB),
+        };
         idx = idx.clamp(min_idx, table.len() - 1);
         Some(Self {
             table: table.to_vec(),
@@ -244,6 +248,10 @@ mod tests {
 
     const TABLE: &[i32] = &[0, 10, 20, 30, 40, 90, 140, 200, 300, 400, 496];
     const FC: &[i32] = &[-99, -73, -54, 58, 71, 179, 197];
+    const FC_FULL: &[i32] = &[
+        -99, -73, -65, -63, -63, -60, -58, -54, 58, 61, 63, 65, 67, 68, 70, 71, 179, 181, 182, 184,
+        186, 188, 191, 197,
+    ];
 
     fn interval_mags(window_mag: u16) -> Vec<u16> {
         vec![window_mag; INTERVAL_SAMPLES as usize]
@@ -275,7 +283,7 @@ mod tests {
         let auto = AutoGain::new(TABLE).unwrap();
         assert_eq!(auto.current(), 300);
         let fc = AutoGain::new(FC).unwrap();
-        assert_eq!(fc.current(), 197);
+        assert_eq!(fc.current(), 58);
         assert!(fc.table[fc.min_idx] >= 0);
         assert!(AutoGain::new(&[]).is_none());
     }
@@ -300,6 +308,80 @@ mod tests {
         let change = auto.evaluate().expect("lower");
         assert!(change.new_tenth_db < change.old_tenth_db);
         assert_eq!(change.reason, GainReason::VeryLoud);
+    }
+
+    #[test]
+    fn saturated_stream_steps_down_and_settles() {
+        let mut auto = AutoGain::new(FC).unwrap();
+        auto.idx = FC.len() - 1;
+        auto.startup = 0;
+        assert_eq!(auto.current(), 197);
+        let mag = interval_mags(u16::MAX);
+        let steps = run_until_hold(&mut auto, &mag, 40);
+        assert!(steps > 0, "must step down from 19.7 dB");
+        assert_eq!(auto.current(), 58);
+        for _ in 0..8 {
+            auto.observe(&mag);
+            assert_eq!(auto.evaluate(), None);
+        }
+        assert_eq!(auto.current(), 58);
+    }
+
+    #[test]
+    fn noisy_floor_holds_fc0013_off_max() {
+        // ~-30 dBFS (mag 2000) is noise_high, not noise_low: hold or lower, never climb to 19.7 dB.
+        let mut auto = AutoGain::new(FC).unwrap();
+        assert_eq!(auto.current(), 58);
+        let mag = interval_mags(2_000);
+        let start = auto.current();
+        for _ in 0..40 {
+            auto.observe(&mag);
+            if let Some(change) = auto.evaluate() {
+                assert!(
+                    change.new_tenth_db <= start,
+                    "noise_high floor must not raise gain: {start} -> {}",
+                    change.new_tenth_db
+                );
+            }
+        }
+        assert!(
+            auto.current() < *FC.last().unwrap(),
+            "must not sit at FC0013 max {}",
+            auto.current()
+        );
+    }
+
+    #[test]
+    fn fc0013_climbs_from_mingain_on_low_noise_then_holds_below_max() {
+        let mut auto = AutoGain::new(FC_FULL).unwrap();
+        assert_eq!(auto.current(), 58);
+        let quiet = interval_mags(200);
+        let mut raises = 0;
+        for _ in 0..12 {
+            auto.observe(&quiet);
+            if let Some(change) = auto.evaluate() {
+                assert_eq!(change.reason, GainReason::NoiseLow);
+                assert!(change.new_tenth_db > change.old_tenth_db);
+                raises += 1;
+            }
+        }
+        assert!(
+            raises >= 2,
+            "low-noise from 5.8 dB must step up over intervals"
+        );
+        assert!(
+            auto.current() > 58,
+            "must have left minGain, got {}",
+            auto.current()
+        );
+
+        let noisy = interval_mags(2_000);
+        run_until_hold(&mut auto, &noisy, 40);
+        assert!(
+            auto.current() < *FC_FULL.last().unwrap(),
+            "after noise rises, must stop below 19.7 dB, got {}",
+            auto.current()
+        );
     }
 
     #[test]
