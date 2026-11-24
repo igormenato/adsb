@@ -1,0 +1,241 @@
+duration = 600
+
+[[aircraft]]
+icao = "C0A001"
+callsign = "TAM7701"
+lat = -25.44
+lon = -49.27
+alt_ft = 35000
+heading_deg = 90
+speed_kt = 420
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 270
+
+[[aircraft]]
+icao = "C0A002"
+callsign = "AZU101"
+lat = -25.30
+lon = -49.40
+alt_ft = 28000
+heading_deg = 180
+speed_kt = 380
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 0
+
+[[aircraft]]
+icao = "C0A003"
+callsign = "GOL102"
+lat = -25.55
+lon = -49.15
+alt_ft = 8000
+heading_deg = 270
+speed_kt = 220
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 90
+
+[[aircraft]]
+icao = "C0A004"
+callsign = "PTG103"
+lat = -25.40
+lon = -49.00
+alt_ft = 22000
+heading_deg = 45
+speed_kt = 300
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 225
+
+[[aircraft]]
+icao = "C0A005"
+callsign = "TAM7702"
+lat = -25.50
+lon = -49.35
+alt_ft = 31000
+heading_deg = 135
+speed_kt = 400
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 315
+
+[[aircraft]]
+icao = "C0A006"
+callsign = "AZU106"
+lat = -25.35
+lon = -49.20
+alt_ft = 18000
+heading_deg = 315
+speed_kt = 340
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 135
+
+[[aircraft]]
+icao = "C0A007"
+callsign = "GOL107"
+lat = -25.48
+lon = -49.10
+alt_ft = 12000
+heading_deg = 0
+speed_kt = 250
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 180
+
+[[aircraft]]
+icao = "C0A008"
+callsign = "PTG108"
+lat = -25.38
+lon = -49.32
+alt_ft = 25000
+heading_deg = 225
+speed_kt = 360
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 45
+
+[[aircraft]]
+icao = "C0A009"
+callsign = "TAM7703"
+lat = -25.52
+lon = -49.22
+alt_ft = 37000
+heading_deg = 60
+speed_kt = 430
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 240
+
+[[aircraft]]
+icao = "C0A00A"
+callsign = "AZU110"
+lat = -25.33
+lon = -49.12
+alt_ft = 9000
+heading_deg = 300
+speed_kt = 210
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 120
+
+[[aircraft]]
+icao = "C0A00B"
+callsign = "GOL111"
+lat = -25.46
+lon = -49.42
+alt_ft = 16000
+heading_deg = 20
+speed_kt = 280
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 200
+
+[[aircraft]]
+icao = "C0A00C"
+callsign = "PTG112"
+lat = -25.36
+lon = -49.05
+alt_ft = 24000
+heading_deg = 250
+speed_kt = 330
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 70
+
+[[aircraft]]
+icao = "C0A00D"
+callsign = "TAM7704"
+lat = -25.28
+lon = -49.25
+alt_ft = 33000
+heading_deg = 110
+speed_kt = 410
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 290
+
+[[aircraft]]
+icao = "C0A00E"
+callsign = "AZU114"
+lat = -25.58
+lon = -49.30
+alt_ft = 7000
+heading_deg = 80
+speed_kt = 190
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 260
+
+[[aircraft]]
+icao = "C0A00F"
+callsign = "GOL115"
+lat = -25.42
+lon = -49.18
+alt_ft = 20000
+heading_deg = 350
+speed_kt = 310
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 170
+
+[[aircraft]]
+icao = "C0A010"
+callsign = "PTG116"
+lat = -25.54
+lon = -49.08
+alt_ft = 27000
+heading_deg = 200
+speed_kt = 370
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 20
+
+[[aircraft]]
+icao = "C0A011"
+callsign = "TAM7705"
+lat = -25.32
+lon = -49.38
+alt_ft = 39000
+heading_deg = 40
+speed_kt = 440
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 220
+
+[[aircraft]]
+icao = "C0A012"
+callsign = "AZU118"
+lat = -25.47
+lon = -49.02
+alt_ft = 14000
+heading_deg = 160
+speed_kt = 260
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 340
+
+[[aircraft]]
+icao = "C0A013"
+callsign = "GOL119"
+lat = -25.39
+lon = -49.45
+alt_ft = 10000
+heading_deg = 280
+speed_kt = 230
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 100
+
+[[aircraft]]
+icao = "C0A014"
+callsign = "PTG120"
+lat = -25.56
+lon = -49.24
+alt_ft = 29000
+heading_deg = 5
+speed_kt = 390
+rate_hz = 2
+turn_at = 300
+heading_to_deg = 185
