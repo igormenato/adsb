@@ -72,7 +72,14 @@ impl AutoGain {
             return None;
         }
         let min_idx = table.iter().position(|&g| g >= MIN_TENTH_DB).unwrap_or(0);
-        let mut idx = nearest_index(table, START_TENTH_DB);
+        // readsb starts at 30.0 dB. FC0013 tops out at 19.7 dB, so nearest(30 dB)
+        // is the last LNA step and the front-end opens already saturated. Start
+        // at minGain instead and climb; lowering from a hot 19.7 dB is what
+        // left the Fitipower stuck until a USB replug.
+        let mut idx = match table.last() {
+            Some(&max_g) if START_TENTH_DB > max_g => min_idx,
+            _ => nearest_index(table, START_TENTH_DB),
+        };
         idx = idx.clamp(min_idx, table.len() - 1);
         Some(Self {
             table: table.to_vec(),
@@ -275,7 +282,7 @@ mod tests {
         let auto = AutoGain::new(TABLE).unwrap();
         assert_eq!(auto.current(), 300);
         let fc = AutoGain::new(FC).unwrap();
-        assert_eq!(fc.current(), 197);
+        assert_eq!(fc.current(), 58);
         assert!(fc.table[fc.min_idx] >= 0);
         assert!(AutoGain::new(&[]).is_none());
     }
@@ -300,6 +307,48 @@ mod tests {
         let change = auto.evaluate().expect("lower");
         assert!(change.new_tenth_db < change.old_tenth_db);
         assert_eq!(change.reason, GainReason::VeryLoud);
+    }
+
+    #[test]
+    fn saturated_stream_steps_down_and_settles() {
+        let mut auto = AutoGain::new(FC).unwrap();
+        auto.idx = FC.len() - 1;
+        auto.startup = 0;
+        assert_eq!(auto.current(), 197);
+        let mag = interval_mags(u16::MAX);
+        let steps = run_until_hold(&mut auto, &mag, 40);
+        assert!(steps > 0, "must step down from 19.7 dB");
+        assert_eq!(auto.current(), 58);
+        for _ in 0..8 {
+            auto.observe(&mag);
+            assert_eq!(auto.evaluate(), None);
+        }
+        assert_eq!(auto.current(), 58);
+    }
+
+    #[test]
+    fn quiet_stream_does_not_run_away_to_max() {
+        // Constant sky-like floor (~-30 dBFS on the 16-bit mag scale), not digital
+        // silence. noise_high is true, so gain must not climb the FC0013 table.
+        let mut auto = AutoGain::new(FC).unwrap();
+        assert_eq!(auto.current(), 58);
+        let mag = interval_mags(2_000);
+        let start = auto.current();
+        for _ in 0..40 {
+            auto.observe(&mag);
+            if let Some(change) = auto.evaluate() {
+                assert!(
+                    change.new_tenth_db <= start,
+                    "quiet/noisy floor must not raise gain: {start} -> {}",
+                    change.new_tenth_db
+                );
+            }
+        }
+        assert!(
+            auto.current() < *FC.last().unwrap(),
+            "must not sit at FC0013 max {}",
+            auto.current()
+        );
     }
 
     #[test]

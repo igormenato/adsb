@@ -186,6 +186,22 @@ fn manual_gain_enables_mode_and_fixed_if() {
 }
 
 #[test]
+fn standby_clears_manual_lna_and_drops_to_lowest_step() {
+    let bus = fc0013_bus();
+    let mut tuner = Fc0013::new(XTAL_HZ);
+    tuner.init(&bus).unwrap();
+    tuner
+        .set_gain_manual(&bus, TunerType::Fc0013.max_gain())
+        .unwrap();
+    assert_eq!(bus.get(fc0013::I2C_ADDR, 0x0d) & 0x08, 0x08);
+    assert_eq!(bus.get(fc0013::I2C_ADDR, 0x14) & 0x1f, 0x10);
+    tuner.standby(&bus).unwrap();
+    assert_eq!(bus.get(fc0013::I2C_ADDR, 0x0d) & 0x08, 0);
+    assert_eq!(bus.get(fc0013::I2C_ADDR, 0x13), 0x0a);
+    assert_eq!(bus.get(fc0013::I2C_ADDR, 0x14) & 0x1f, 0x02);
+}
+
+#[test]
 fn gain_auto_clears_manual_lna_bit() {
     let bus = fc0013_bus();
     let mut tuner = Fc0013::new(XTAL_HZ);

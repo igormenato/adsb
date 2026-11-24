@@ -172,9 +172,18 @@ impl Fc0013 {
         Ok(0)
     }
 
-    /// No standby sequence on this chip.
-    pub fn standby(&self, _bus: &impl I2cBus) -> Result<()> {
-        Ok(())
+    /// Clear manual LNA and drop to the lowest table step.
+    ///
+    /// librtlsdr's FC0013 standby is a no-op, so the last `set_gain_manual`
+    /// (often 19.7 dB) stays in the tuner until USB reset. Re-enable LNA AGC
+    /// and write LNA code 0x02 (-9.9 dB) so close/teardown does not leave the
+    /// dongle saturating.
+    pub fn standby(&self, bus: &impl I2cBus) -> Result<()> {
+        let d = rd(bus, 0x0d)?;
+        wr(bus, 0x0d, d & !0x08)?;
+        wr(bus, 0x13, 0x0a)?;
+        let cur = rd(bus, 0x14)?;
+        wr(bus, 0x14, (cur & 0xe0) | 0x02)
     }
 
     fn program(&self, bus: &impl I2cBus) -> Result<()> {
