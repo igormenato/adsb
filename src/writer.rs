@@ -154,7 +154,7 @@ impl Shared {
         let _ = self.queue_reply(pack_reply(&reply), after);
     }
 
-    fn has_reply(&self) -> bool {
+    pub(crate) fn has_reply(&self) -> bool {
         !self
             .pending_reply
             .lock()
@@ -170,7 +170,7 @@ impl Shared {
             < REPLY_CAP
     }
 
-    fn queue_reply(&self, bytes: [u8; ACK_LEN], after: AfterReply) -> bool {
+    pub(crate) fn queue_reply(&self, bytes: [u8; ACK_LEN], after: AfterReply) -> bool {
         let mut q = self
             .pending_reply
             .lock()
@@ -211,6 +211,18 @@ pub(crate) struct Writer {
 impl Writer {
     pub(crate) fn has_pending(&self) -> bool {
         self.shared.lock().has_pending() || self.shared.has_reply()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_buf(stop: Arc<Stop>) -> Self {
+        Self {
+            sink: Sink::Buf(Vec::new()),
+            uart: None,
+            retry_wait: UART_RETRY_MIN,
+            retry_at: Instant::now(),
+            stop,
+            shared: Shared::new(None, false),
+        }
     }
 
     pub(crate) fn uart_fd(&self) -> Option<BorrowedFd<'_>> {
