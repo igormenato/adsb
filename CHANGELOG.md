@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4](https://github.com/igormenato/adsb/compare/v0.6.3...v0.6.4) - 2026-11-24
+
+### Added
+
+- *(service)* install-service --hex for readsb feed ([#143](https://github.com/igormenato/adsb/pull/143))
+
+### Fixed
+
+- *(radio)* keep FC0013 autogain off the top LNA step ([#142](https://github.com/igormenato/adsb/pull/142))
+
 ### Added
 
 - `trck install-service --hex ADDR` writes a unit that reads a readsb raw feed instead of opening the RTL-SDR.
