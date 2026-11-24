@@ -15,8 +15,8 @@ pub(crate) const UNIT_PATH: &str = "/etc/systemd/system/trck.service";
 pub(crate) const BIN_PATH: &str = "/usr/local/bin/trck";
 const WORK_DIR: &str = "/var/lib/trck";
 
-pub fn run() -> ExitCode {
-    match install() {
+pub fn run(hex: Option<&str>) -> ExitCode {
+    match install(hex) {
         Ok(()) => {
             println!("enabled trck.service");
             ExitCode::SUCCESS
@@ -28,7 +28,21 @@ pub fn run() -> ExitCode {
     }
 }
 
-fn install() -> Result<()> {
+fn unit_text(hex: Option<&str>) -> String {
+    let Some(addr) = hex else {
+        return UNIT.to_string();
+    };
+    UNIT.replace(
+        "After=local-fs.target\n",
+        "After=local-fs.target\nAfter=readsb.service\nWants=readsb.service\n",
+    )
+    .replace(
+        "ExecStart=/usr/local/bin/trck --allow-power-commands\n",
+        &format!("ExecStart=/usr/local/bin/trck --allow-power-commands --hex {addr}\n"),
+    )
+}
+
+fn install(hex: Option<&str>) -> Result<()> {
     if !Uid::effective().is_root() {
         bail!("trck install-service needs root");
     }
@@ -36,7 +50,8 @@ fn install() -> Result<()> {
     fs::create_dir_all(WORK_DIR).with_context(|| format!("cannot create {WORK_DIR}"))?;
     let had_unit = Path::new(UNIT_PATH).exists();
     let bin_changed = place_bin(&exe, Path::new(BIN_PATH))?;
-    let unit_changed = write_unit(Path::new(UNIT_PATH), UNIT)?;
+    let unit = unit_text(hex);
+    let unit_changed = write_unit(Path::new(UNIT_PATH), &unit)?;
     run_host(&["systemctl", "daemon-reload"])?;
     run_host(&["systemctl", "enable", "--now", "trck"])?;
     if had_unit && (bin_changed || unit_changed) {
@@ -111,6 +126,23 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn default_unit_is_unchanged() {
+        assert_eq!(unit_text(None), UNIT);
+    }
+
+    #[test]
+    fn hex_unit_starts_trck_on_readsb_feed() {
+        let text = unit_text(Some("127.0.0.1:30002"));
+        assert!(text.contains(
+            "ExecStart=/usr/local/bin/trck --allow-power-commands --hex 127.0.0.1:30002"
+        ));
+        assert!(text.contains("After=readsb.service"));
+        assert!(text.contains("Wants=readsb.service"));
+        assert!(text.contains("After=local-fs.target"));
+        assert!(!text.contains("ExecStart=/usr/local/bin/trck --allow-power-commands\n"));
     }
 
     #[test]

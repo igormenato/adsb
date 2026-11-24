@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `trck install-service --hex ADDR` writes a unit that reads a readsb raw feed instead of opening the RTL-SDR.
+
 ## [0.6.3](https://github.com/igormenato/adsb/compare/v0.6.2...v0.6.3) - 2026-11-23
 
 ### Added

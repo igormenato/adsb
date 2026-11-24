@@ -104,7 +104,11 @@ enum Cmd {
     /// Replace the service binary, or this binary if the service is not installed, from GitHub Releases.
     Update(update::Args),
     /// Install and enable the systemd unit.
-    InstallService,
+    InstallService {
+        /// Hex feed HOST:PORT. readsb owns the RTL-SDR; trck does not open it.
+        #[arg(long, value_name = "ADDR")]
+        hex: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -243,7 +247,7 @@ fn main() -> ExitCode {
             speed,
         }) => return run_replay(file, &output, speed),
         Some(Cmd::Update(opts)) => return update::run(opts),
-        Some(Cmd::InstallService) => return service::run(),
+        Some(Cmd::InstallService { hex }) => return service::run(hex.as_deref()),
         None => {}
     }
     let stop = Stop::new();
