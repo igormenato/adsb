@@ -44,6 +44,8 @@ Writes `/etc/systemd/system/trck.service`, replaces `/usr/local/bin/trck` (temp 
 journalctl -u trck -f
 ```
 
+`sudo ./trck install-service --hex 127.0.0.1:30002` writes the same unit with `ExecStart=/usr/local/bin/trck --allow-power-commands --hex ADDR` and `After=`/`Wants=readsb.service`, so readsb owns the RTL-SDR and trck reads its raw feed. This command does not install readsb; run it yourself (for example `readsb --device-type rtlsdr --gain auto --net --net-ro-port 30002`).
+
 ## Run on the Pi
 
 ```
