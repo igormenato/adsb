@@ -100,7 +100,10 @@ pub(crate) fn run_hex(
 ) -> ExitCode {
     let mut delay = RETRY_MIN;
     while !stop.is_set() {
-        match dial_first(addrs, stop, text) {
+        if let Err(err) = service_uart(writer) {
+            return write_exit(err);
+        }
+        match dial_first(addrs, stop, text, writer) {
             Ok(stream) => {
                 eprintln!("hex {text} connected");
                 match pump(stream, writer, stop, text) {
@@ -111,12 +114,15 @@ pub(crate) fn run_hex(
                 }
             }
             Err(DialError::Stopped) => break,
+            Err(DialError::Restart) => return write_exit(ChunkError::Restart),
             Err(DialError::Failed(_)) => {}
         }
         if stop.is_set() {
             break;
         }
-        sleep_until_stop(stop, delay);
+        if let Err(err) = idle_until_stop(writer, stop, delay) {
+            return write_exit(err);
+        }
         delay = grow(delay);
     }
     eprintln!("stopped");
@@ -126,10 +132,57 @@ pub(crate) fn run_hex(
 #[derive(Debug)]
 enum DialError {
     Stopped,
+    Restart,
     Failed(io::Error),
 }
 
-fn dial_first(addrs: &[SocketAddr], stop: &Stop, text: &str) -> Result<TcpStream, DialError> {
+fn service_uart(writer: &mut Writer) -> Result<(), ChunkError> {
+    writer.try_reopen_uart();
+    if !writer.has_pending() {
+        return Ok(());
+    }
+    match writer.write_some() {
+        Ok(()) => Ok(()),
+        Err(ChunkError::Failed(err)) => {
+            writer.recover_uart(&format!("uart write: {err}"));
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn idle_until_stop(writer: &mut Writer, stop: &Stop, timeout: Duration) -> Result<(), ChunkError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if stop.is_set() {
+            return Ok(());
+        }
+        service_uart(writer)?;
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(());
+        }
+        sleep_until_stop(
+            stop,
+            deadline.saturating_duration_since(now).min(POLL_SLICE),
+        );
+    }
+}
+
+fn dial_err(err: ChunkError) -> DialError {
+    match err {
+        ChunkError::Stopped => DialError::Stopped,
+        ChunkError::Restart => DialError::Restart,
+        ChunkError::Failed(err) => DialError::Failed(err),
+    }
+}
+
+fn dial_first(
+    addrs: &[SocketAddr],
+    stop: &Stop,
+    text: &str,
+    writer: &mut Writer,
+) -> Result<TcpStream, DialError> {
     if addrs.is_empty() {
         eprintln!("hex {text}: expected host:port");
         return Err(DialError::Failed(io::Error::new(
@@ -142,9 +195,10 @@ fn dial_first(addrs: &[SocketAddr], stop: &Stop, text: &str) -> Result<TcpStream
         if stop.is_set() {
             return Err(DialError::Stopped);
         }
-        match dial(addr, stop, CONNECT_TIMEOUT) {
+        match dial(addr, stop, CONNECT_TIMEOUT, writer) {
             Ok(stream) => return Ok(stream),
             Err(DialError::Stopped) => return Err(DialError::Stopped),
+            Err(DialError::Restart) => return Err(DialError::Restart),
             Err(DialError::Failed(err)) => {
                 eprintln!("hex {text}: {err}");
                 last = Some(err);
@@ -156,14 +210,19 @@ fn dial_first(addrs: &[SocketAddr], stop: &Stop, text: &str) -> Result<TcpStream
     })))
 }
 
-fn dial(addr: &SocketAddr, stop: &Stop, timeout: Duration) -> Result<TcpStream, DialError> {
+fn dial(
+    addr: &SocketAddr,
+    stop: &Stop,
+    timeout: Duration,
+    writer: &mut Writer,
+) -> Result<TcpStream, DialError> {
     if stop.is_set() {
         return Err(DialError::Stopped);
     }
     let sock = sys::tcp_socket(addr).map_err(DialError::Failed)?;
     match sys::connect(&sock, addr) {
         Ok(()) => {}
-        Err(err) if pending_connect(&err) => wait_connected(sock.as_fd(), stop, timeout)?,
+        Err(err) if pending_connect(&err) => wait_connected(sock.as_fd(), stop, timeout, writer)?,
         Err(err) => return Err(DialError::Failed(err)),
     }
     Ok(TcpStream::from(sock))
@@ -179,12 +238,18 @@ fn pending_connect(err: &io::Error) -> bool {
     })
 }
 
-fn wait_connected(fd: BorrowedFd<'_>, stop: &Stop, timeout: Duration) -> Result<(), DialError> {
+fn wait_connected(
+    fd: BorrowedFd<'_>,
+    stop: &Stop,
+    timeout: Duration,
+    writer: &mut Writer,
+) -> Result<(), DialError> {
     let deadline = Instant::now() + timeout;
     loop {
         if stop.is_set() {
             return Err(DialError::Stopped);
         }
+        service_uart(writer).map_err(dial_err)?;
         let now = Instant::now();
         if now >= deadline {
             return Err(DialError::Failed(io::Error::new(
@@ -347,5 +412,41 @@ fn end_socket(writer: &mut Writer) -> Pump {
         Err(ChunkError::Stopped) => Pump::Stopped,
         Err(ChunkError::Restart) => Pump::Restart,
         Err(ChunkError::Failed(err)) => Pump::Uart(err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::thread;
+    use trck::{Cmd, decide, pack_reply};
+
+    #[test]
+    fn hex_writes_replies_while_feed_is_down() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        drop(listener);
+        let stop = Stop::new();
+        let mut writer = Writer::test_buf(Arc::clone(&stop));
+        let shared = Arc::clone(&writer.shared);
+        let (reply, after) = decide(Cmd::Ping as u8, false, false, false);
+        assert!(shared.queue_reply(pack_reply(&reply), after));
+        let stop_run = Arc::clone(&stop);
+        let thread =
+            thread::spawn(move || run_hex(&[addr], "127.0.0.1:closed", &mut writer, &stop_run));
+        let started = Instant::now();
+        while shared.has_reply() {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "reply not written while the hex feed is down"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let (reply, after) = decide(Cmd::Restart as u8, false, false, false);
+        assert!(shared.queue_reply(pack_reply(&reply), after));
+        let code = thread.join().expect("join");
+        assert_eq!(code, ExitCode::from(1));
     }
 }
