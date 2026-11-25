@@ -3,6 +3,7 @@ duration = 600
 [[aircraft]]
 icao = "C0A001"
 callsign = "TAM7701"
+squawk = "7700"
 lat = -25.44
 lon = -49.27
 alt_ft = 35000
@@ -75,6 +76,7 @@ heading_to_deg = 135
 [[aircraft]]
 icao = "C0A007"
 callsign = "GOL107"
+squawk = "7700"
 lat = -25.48
 lon = -49.10
 alt_ft = 12000
@@ -159,6 +161,7 @@ heading_to_deg = 290
 [[aircraft]]
 icao = "C0A00E"
 callsign = "AZU114"
+squawk = "7700"
 lat = -25.58
 lon = -49.30
 alt_ft = 7000
@@ -231,6 +234,7 @@ heading_to_deg = 100
 [[aircraft]]
 icao = "C0A014"
 callsign = "PTG120"
+squawk = "7700"
 lat = -25.56
 lon = -49.24
 alt_ft = 29000
