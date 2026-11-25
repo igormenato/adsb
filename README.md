@@ -100,7 +100,7 @@ If `sim.toml` exists in the process cwd (`/var/lib/trck` for the systemd unit), 
 
 ### Scenario TOML
 
-Unknown keys fail. `duration` and at least one `[[aircraft]]` are required. Examples: [crossing.toml](examples/scenarios/crossing.toml), [climb.toml](examples/scenarios/climb.toml). Indoor competition runs: [phase1.toml](examples/scenarios/phase1.toml), [phase10.toml](examples/scenarios/phase10.toml), [phase20.toml](examples/scenarios/phase20.toml) (1 / 10 / 20 aircraft, 10 minutes). Copy one to `/var/lib/trck/sim.toml` and send UART `SIMULATION` to run it on the live service.
+Unknown keys fail. `duration` and at least one `[[aircraft]]` are required. Examples: [crossing.toml](examples/scenarios/crossing.toml), [climb.toml](examples/scenarios/climb.toml). Indoor competition runs: [phase1.toml](examples/scenarios/phase1.toml), [phase10.toml](examples/scenarios/phase10.toml), [phase20.toml](examples/scenarios/phase20.toml) (1 / 10 / 20 aircraft, 10 minutes; all three carry squawk 7700 — phase1 on its one aircraft, phase10 and phase20 on four each). Copy one to `/var/lib/trck/sim.toml` and send UART `SIMULATION` to run it on the live service.
 
 Top-level:
 

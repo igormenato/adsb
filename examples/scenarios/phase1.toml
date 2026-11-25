@@ -3,6 +3,7 @@ duration = 600
 [[aircraft]]
 icao = "C0A001"
 callsign = "TAM7701"
+squawk = "7700"
 lat = -25.44
 lon = -49.27
 alt_ft = 35000
