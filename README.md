@@ -96,7 +96,7 @@ make -C esp32/host test
 
 `trck sim` writes `ts,hex` Mode S lines. `trck replay` runs those lines through the live decoder and UART writer. UART `SIMULATION` (TCMD 7) does the same on the live process: radio stays open, live positions are not forwarded, and a scenario loops until `RESUME` or `RESTART`. Use this to drive Pi to ESP32 to RF to base with fake aircraft and no ssh.
 
-If `sim.toml` exists in the process cwd (`/var/lib/trck` for the systemd unit), that file is the scenario. Otherwise the binary uses a built-in 5-minute loop of four aircraft around UTFPR Curitiba. A bad `sim.toml` is logged once, then the built-in file is used. `PAUSE` pauses live or simulation. `RESUME` always returns to live, including after pause-during-sim. A second `SIMULATION` while already running is `ok` and a no-op. While paused during sim, `SIMULATION` unpauses and continues (the only way back to sim frames; `RESUME` would go live). Health is `ok` (0), `paused` (1), or `sim` (2). Paused wins.
+If `sim.toml` exists in the process cwd (`/var/lib/trck` for the systemd unit), that file is the scenario. Otherwise the binary uses a built-in 5-minute loop of four aircraft around Buenos Aires. A bad `sim.toml` is logged once, then the built-in file is used. `PAUSE` pauses live or simulation. `RESUME` always returns to live, including after pause-during-sim. A second `SIMULATION` while already running is `ok` and a no-op. While paused during sim, `SIMULATION` unpauses and continues (the only way back to sim frames; `RESUME` would go live). Health is `ok` (0), `paused` (1), or `sim` (2). Paused wins.
 
 ### Scenario TOML
 
